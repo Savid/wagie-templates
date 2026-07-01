@@ -1,0 +1,356 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/deep-research
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a topic requires structured, iterative research; decomposes via perspective-driven planning, accumulates typed findings across iterations, assesses coverage with a structured rubric, and verifies results adversarially before output.
+tags: ["research", "iterative", "deep-research"]
+inputs:
+  values:
+    topic:
+      required: true
+      description: The topic to research
+      schema: { type: string }
+    depth:
+      description: >-
+        Desired research depth. shallow: overview (3-5 sub-questions, completeness >= 60). moderate: solid coverage (5-10 sub-questions, >= 75). deep: comprehensive (10-15 sub-questions, >= 85).
+      schema: { type: string, default: moderate, enum: [shallow, moderate, deep] }
+    context:
+      description: Optional context or constraints to guide the research
+      schema: { type: string }
+    max_iterations:
+      description: Maximum research iterations
+      schema: { type: number, default: 5 }
+tasks:
+  plan:
+    uses: dev.wagie/research-plan@1.0.0
+    inputs:
+      values:
+        topic:
+          value: "${{ inputs.values.topic }}"
+        depth:
+          value: "${{ inputs.values.?depth.orValue('moderate') }}"
+        context:
+          value: "${{ inputs.values.?context.orValue('') }}"
+  research:
+    needs: [plan]
+    inputs:
+      values:
+        topic:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.topic }}"
+        depth:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?depth.orValue('moderate') }}"
+        plan_questions:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                question:
+                  type: string
+                perspective:
+                  type: string
+                priority:
+                  type: string
+                difficulty:
+                  type: string
+              required: [question]
+          value: "${{ tasks.plan.outputs.values.questions }}"
+    loop:
+      max: "${{ inputs.values.?max_iterations.orValue(5) }}"
+      until: "${{ outputs.values.completeness == 'sufficient' || outputs.values.information_gain == 'diminishing' }}"
+      onMaxExhausted: continue
+    tasks:
+      investigate:
+        uses: dev.wagie/research-findings@1.0.0
+        inputs:
+          values:
+            topic:
+              value: "${{ inputs.values.topic }}"
+            previous_findings:
+              value: "${{ loop.findings.orValue([]) }}"
+            gaps:
+              value: "${{ loop.gaps.orValue([]) }}"
+            plan_questions:
+              value: "${{ inputs.values.plan_questions }}"
+      accumulate:
+        needs: [investigate]
+        quality-gate: "${{ has(outputs.values.findings) }}"
+        instructions: |
+          Merge prior findings with the new research batch.
+
+          Rules:
+          - Preserve all previous findings verbatim unless superseded
+          - Append only substantively new findings
+          - When a new finding corroborates an existing one, increase
+            the existing finding's corroboration count rather than
+            adding a duplicate
+          - When a new finding contradicts an existing one, update the
+            contradictions field on both findings
+          - If a new finding supersedes an old one with stronger
+            evidence, replace the old finding and note the upgrade
+          - Drop findings with confidence below 20 that have been
+            superseded by stronger evidence on the same claim
+
+          Preserve information. When in doubt, keep the finding.
+        inputs:
+          values:
+            previous_findings:
+              schema: { type: array, items: { type: object } }
+              value: "${{ loop.findings.orValue([]) }}"
+            new_findings:
+              schema: { type: array, items: { type: object } }
+              value: "${{ tasks.investigate.outputs.values.findings }}"
+        outputs:
+          values:
+            findings:
+              required: true
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    claim:
+                      type: string
+                    evidence:
+                      type: string
+                    confidence:
+                      type: number
+                    source_type:
+                      type: string
+                    evidence_strength:
+                      type: string
+                    corroboration:
+                      type: number
+                    contradictions:
+                      type: string
+                  required: [claim, evidence, confidence]
+                description: Accumulated research findings across iterations
+      assess:
+        needs: [accumulate]
+        uses: dev.wagie/research-coverage-assess@1.0.0
+        inputs:
+          values:
+            topic:
+              value: "${{ inputs.values.topic }}"
+            depth:
+              value: "${{ inputs.values.depth }}"
+            findings:
+              value: "${{ tasks.accumulate.outputs.values.findings }}"
+            previous_gap_count:
+              value: "${{ loop.gap_count.orValue(0) }}"
+            plan_questions:
+              value: "${{ inputs.values.plan_questions }}"
+    outputs:
+      values:
+        findings:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                claim:
+                  type: string
+                evidence:
+                  type: string
+                confidence:
+                  type: number
+                source_type:
+                  type: string
+                evidence_strength:
+                  type: string
+                corroboration:
+                  type: number
+                contradictions:
+                  type: string
+              required: [claim, evidence, confidence]
+          value: "${{ tasks.accumulate.outputs.values.findings }}"
+        gaps:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                question:
+                  type: string
+                priority:
+                  type: string
+                difficulty:
+                  type: string
+                dimension:
+                  type: string
+              required: [question, priority, difficulty, dimension]
+          value: "${{ tasks.assess.outputs.values.gaps }}"
+        gap_count:
+          required: true
+          schema: { type: number }
+          value: "${{ size(tasks.assess.outputs.values.gaps) }}"
+        completeness:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.assess.outputs.values.completeness }}"
+        information_gain:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.assess.outputs.values.information_gain }}"
+        scores:
+          required: true
+          schema:
+            type: object
+            properties:
+              breadth:
+                type: number
+              depth:
+                type: number
+              balance:
+                type: number
+              conflict_resolution:
+                type: number
+          value: "${{ tasks.assess.outputs.values.scores }}"
+        summary:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.assess.outputs.values.summary }}"
+        converged:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.assess.outputs.values.completeness == 'sufficient' || tasks.assess.outputs.values.information_gain == 'diminishing' }}"
+  verify:
+    needs: [plan, research]
+    uses: dev.wagie/research-verify@1.0.0
+    inputs:
+      values:
+        topic:
+          value: "${{ inputs.values.topic }}"
+        findings:
+          value: "${{ tasks.research.outputs.values.findings }}"
+        perspectives:
+          value: "${{ tasks.plan.outputs.values.perspectives }}"
+  synthesize:
+    needs: [plan, research, verify]
+    quality-gate: "${{ has(outputs.values.summary) && size(outputs.values.summary) > 0 }}"
+    instructions: |
+      Render a structured markdown research report from the verified
+      findings.
+
+      Structure:
+      1. Title — the research topic as a heading
+      2. Executive summary — 3-5 sentences covering the most important
+         findings, written as direct assertions not hedged qualifications
+      3. Key findings — organized by the perspectives used during
+         research, each finding presented with its evidence and
+         confidence assessment
+      4. Areas of disagreement — where sources or findings conflict,
+         present both sides with the evidence for each
+      5. Verification notes — significant issues found during
+         verification, adjusted confidence levels, and why
+      6. Open questions — what the research could not answer and why
+      7. Coverage assessment — the rubric scores and what they mean
+
+      Writing standards:
+      - Write in direct, assertive prose — not bullet-point summaries
+      - Every factual claim must reference its evidence
+      - Where confidence was adjusted during verification, note the
+        original and adjusted values with rationale
+      - Do not hedge with phrases like "it is important to note" or
+        "it should be considered" — state what the evidence shows
+      - Use tables when comparing alternatives or presenting structured
+        data
+      - Flag high-severity verification issues prominently
+
+      Write the rendered report as the `report` output.
+    inputs:
+      values:
+        topic:
+          schema: { type: string }
+          value: "${{ inputs.values.topic }}"
+        depth:
+          schema: { type: string }
+          value: "${{ inputs.values.?depth.orValue('moderate') }}"
+        perspectives:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.plan.outputs.values.perspectives }}"
+        plan:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.plan.outputs.values.questions }}"
+        findings:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.verify.outputs.values.verified_findings }}"
+        issues:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.verify.outputs.values.issues }}"
+        open_questions:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.verify.outputs.values.open_questions }}"
+        scores:
+          schema: { type: object }
+          value: "${{ tasks.research.outputs.values.scores }}"
+        coverage_summary:
+          schema: { type: string }
+          value: "${{ tasks.research.outputs.values.summary }}"
+        verification_summary:
+          schema: { type: string }
+          value: "${{ tasks.verify.outputs.values.verification_summary }}"
+        information_gain:
+          schema: { type: string }
+          value: "${{ tasks.research.outputs.values.information_gain }}"
+        converged:
+          schema: { type: boolean }
+          value: "${{ tasks.research.outputs.values.converged }}"
+    outputs:
+      values:
+        report:
+          required: true
+          schema: { type: string, description: Structured markdown research report }
+        summary:
+          required: true
+          schema: { type: string, description: Executive summary of the research }
+outputs:
+  values:
+    report:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.synthesize.outputs.values.report }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.synthesize.outputs.values.summary }}"
+    findings:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.verify.outputs.values.verified_findings }}"
+    issues:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.verify.outputs.values.issues }}"
+    open_questions:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.verify.outputs.values.open_questions }}"
+    scores:
+      required: true
+      schema: { type: object }
+      value: "${{ tasks.research.outputs.values.scores }}"
+    completeness:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.research.outputs.values.completeness }}"
+    information_gain:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.research.outputs.values.information_gain }}"
+    converged:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.research.outputs.values.converged }}"

@@ -1,0 +1,167 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/research-findings
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a topic needs a typed batch of research findings; returns incremental findings with evidence quality metadata, focused on breadth first and then explicit gap closure.
+tags: ["research", "findings", "evidence"]
+inputs:
+  values:
+    topic:
+      required: true
+      description: Topic to research
+      schema: { type: string }
+    previous_findings:
+      description: Prior findings already established
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            claim:
+              type: string
+            evidence:
+              type: string
+            confidence:
+              type: number
+            source_type:
+              type: string
+            evidence_strength:
+              type: string
+            corroboration:
+              type: number
+            contradictions:
+              type: string
+          required: [claim, evidence, confidence]
+    gaps:
+      description: Remaining questions or subtopics to address
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            question:
+              type: string
+            priority:
+              type: string
+            difficulty:
+              type: string
+          required: [question]
+    plan_questions:
+      description: Sub-questions from the research plan to target
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            question:
+              type: string
+            perspective:
+              type: string
+            priority:
+              type: string
+            difficulty:
+              type: string
+          required: [question]
+tasks:
+  investigate:
+    quality-gate: "${{ has(outputs.values.findings) && size(outputs.values.findings) > 0 }}"
+    instructions: |
+      You are an investigative researcher. Your job is to produce
+      substantive, evidence-backed findings — not summaries or
+      overviews. A worker with tool-use (web search and source
+      retrieval) is required to gather real evidence.
+
+      Strategy:
+      - If previous_findings is empty and plan_questions are provided,
+        work through plan questions in priority order, building a broad
+        foundation across multiple perspectives
+      - If previous_findings is empty and no plan exists, survey the
+        topic broadly: identify the major dimensions, key debates, and
+        foundational facts
+      - If gaps are provided, prioritize filling those gaps specifically
+        — do not re-explore already-covered territory
+      - Prefer fewer substantive findings over many thin ones
+
+      Evidence standards:
+      - Every claim must cite specific evidence, not general knowledge
+      - Assess each source: is it primary research, secondary analysis,
+        or speculation? Record this as source_type
+      - Rate evidence_strength honestly: strong means multiple credible
+        sources agree; moderate means some support exists; weak means
+        limited or indirect support only
+      - When multiple independent sources support a claim, record how
+        many as corroboration
+      - When sources contradict each other, surface the contradiction
+        explicitly — do not silently pick a side
+
+      Epistemic discipline:
+      - Distinguish between established facts, expert consensus with
+        debate, emerging or contested findings, and your inference
+      - If you cannot find evidence for something, say so rather than
+        filling with plausible-sounding claims
+      - Do not hedge with phrases like "it is important to note" — be
+        direct about what the evidence shows and where it is uncertain
+      - Form concrete assessments. Vague conclusions like "there are
+        pros and cons" are not findings
+
+      Do NOT repeat or restate previous findings. Every finding in
+      your batch must be substantively new.
+    inputs:
+      values:
+        topic:
+          schema: { type: string }
+          value: "${{ inputs.values.topic }}"
+        previous_findings:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?previous_findings.orValue([]) }}"
+        gaps:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?gaps.orValue([]) }}"
+        plan_questions:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?plan_questions.orValue([]) }}"
+    outputs:
+      values:
+        findings:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                claim:
+                  type: string
+                  description: The specific factual claim
+                evidence:
+                  type: string
+                  description: Specific evidence supporting the claim
+                confidence:
+                  type: number
+                  description: 0-100 confidence in the claim
+                source_type:
+                  type: string
+                  enum: [primary, secondary, tertiary, inference]
+                  description: Type of source backing the claim
+                evidence_strength:
+                  type: string
+                  enum: [strong, moderate, weak]
+                  description: How well evidence supports the claim
+                corroboration:
+                  type: number
+                  description: Number of independent sources supporting the claim
+                contradictions:
+                  type: string
+                  description: Known contradicting evidence or viewpoints
+              required: [claim, evidence, confidence, source_type, evidence_strength]
+            description: Incremental research findings
+outputs:
+  values:
+    findings:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.investigate.outputs.values.findings }}"

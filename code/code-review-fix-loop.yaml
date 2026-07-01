@@ -1,0 +1,379 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/code-review-fix-loop
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when code needs iterative improvement via committee review; reviews with
+  the full persona panel, fixes flagged issues, optionally verifies against the
+  project's test suite, and re-reviews until the committee approves or iterations
+  are exhausted. Tracks findings-count decay and verification status for
+  convergence.
+tags: ["code-review", "fix-loop", "iterative", "convergence", "verification"]
+inputs:
+  values:
+    diff:
+      required: true
+      description: "Git diff output or equivalent patch content (e.g. git diff main...HEAD)"
+      schema: { type: string }
+    personas:
+      description: >-
+        Array of reviewer personas for the committee. If omitted, the committee's
+        default panel is used (Security Auditor, Correctness, Performance,
+        Maintainability, Research Reviewer, General Reviewer).
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            role:
+              type: string
+            focus:
+              type: string
+            principles:
+              type: string
+            severity_default:
+              type: string
+              description: "Default severity for findings from this persona"
+            requires_tools:
+              type: boolean
+              description: "Whether this persona needs tool-use capability (e.g. web search, doc lookup)"
+          required: [role, focus]
+    repo:
+      description: "Repository to clone for verification (owner/name or full URL). When provided, enables test/lint/typecheck verification after each fix."
+      schema: { type: string }
+    ref:
+      description: "Git ref being reviewed (e.g. branch name, commit SHA). Used as the checkout target for verification."
+      schema: { type: string }
+    context:
+      description: Optional repository or architectural context
+      schema: { type: string }
+    checks:
+      description: "Explicit verification checks to run. If omitted, auto-discovered from project config. Only used when repo is provided."
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            category:
+              type: string
+              enum: [test, lint, typecheck, build, format, custom]
+            command:
+              type: string
+            name:
+              type: string
+            required:
+              type: boolean
+          required: [category]
+    max_iterations:
+      description: Maximum review-fix iterations (research shows 2-3 captures 75-87% of fixable issues)
+      schema: { type: number, default: 3 }
+    threshold:
+      description: Minimum committee average score to approve
+      schema: { type: number, default: 90 }
+tasks:
+  improve:
+    inputs:
+      values:
+        diff:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.diff }}"
+        repo:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?repo.orValue('') }}"
+        ref:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?ref.orValue('') }}"
+        context:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?context.orValue('') }}"
+        personas:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                role: { type: string }
+                focus: { type: string }
+                principles: { type: string }
+                severity_default: { type: string }
+                requires_tools: { type: boolean }
+              required: [role, focus]
+          value: "${{ inputs.values.?personas.orValue([]) }}"
+        checks:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                category: { type: string, enum: [test, lint, typecheck, build, format, custom] }
+                command: { type: string }
+                name: { type: string }
+                required: { type: boolean }
+              required: [category]
+          value: "${{ inputs.values.?checks.orValue([]) }}"
+        threshold:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?threshold.orValue(90) }}"
+    loop:
+      max: "${{ inputs.values.?max_iterations.orValue(3) }}"
+      until: "${{ (outputs.values.score >= inputs.values.threshold && outputs.values.findings_count == 0.0 && outputs.values.verification_passed) || (outputs.values.findings_count > outputs.values.prev_findings_count && outputs.values.prev_findings_count < 999.0) }}"
+      onMaxExhausted: continue
+    tasks:
+      review:
+        uses: dev.wagie/code-review-committee@1.0.0
+        inputs:
+          values:
+            diff:
+              value: "${{ loop.current_code.orValue(inputs.values.diff) }}"
+            personas:
+              value: "${{ inputs.values.personas }}"
+            repo:
+              value: "${{ inputs.values.repo }}"
+            ref:
+              value: "${{ inputs.values.ref }}"
+            context:
+              value: "${{ inputs.values.context }}"
+            threshold:
+              value: "${{ inputs.values.threshold }}"
+            dismissed_findings:
+              value: "${{ loop.dismissed_findings.orValue([]) }}"
+      fix:
+        needs: [review]
+        if: "${{ tasks.review.outputs.values.verdict != 'approve' }}"
+        quality-gate: "${{ has(outputs.values.fixes_applied) }}"
+        instructions: |
+          You are a skilled developer addressing code review findings. You
+          need a worker with tool-use to read and revise the code.
+
+          Apply the minimum targeted changes to resolve the flagged issues.
+          Do not refactor, restructure, or improve code beyond what the
+          findings require. Each fix should be traceable to a specific finding.
+
+          Prioritize fixes by severity: critical > high > medium > low.
+          If a fix would conflict with another finding, note the conflict
+          and choose the safer option.
+
+          If verification ran on the previous iteration and failed, pay
+          attention to what broke — do not introduce fixes that would cause
+          the same verification failures.
+
+          If any finding looks like a false positive (the code is actually
+          correct, or fixing it would break something else, or the reviewer
+          misunderstood the intent), do NOT fix it. Instead list it in
+          false_positives with your reasoning. Be specific in your reasoning —
+          it will be fed back to reviewers in the next iteration to prevent
+          them from re-flagging the same issue.
+
+          You may also receive previously dismissed findings. Do not re-dismiss
+          findings that are already in the dismissed list — only add new ones.
+
+          Return the complete revised code, not just patches.
+        inputs:
+          values:
+            diff:
+              schema: { type: string }
+              value: "${{ loop.current_code.orValue(inputs.values.diff) }}"
+            findings:
+              schema: { type: array, items: { type: object } }
+              value: "${{ tasks.review.outputs.values.findings }}"
+            context:
+              schema: { type: string }
+              value: "${{ inputs.values.context }}"
+            dismissed_findings:
+              schema: { type: array, items: { type: object } }
+              value: "${{ loop.dismissed_findings.orValue([]) }}"
+            prev_verification_passed:
+              schema: { type: boolean }
+              value: "${{ loop.verification_passed.orValue(true) }}"
+        outputs:
+          values:
+            revised_code:
+              required: true
+              schema: { type: string, description: Complete revised code with fixes applied }
+            fixes_applied:
+              required: true
+              schema:
+                type: array
+                description: Log of fixes applied in this iteration
+                items:
+                  type: object
+                  properties:
+                    finding:
+                      type: string
+                      description: The finding that was addressed
+                    change:
+                      type: string
+                      description: What was changed and why
+                  required: [finding, change]
+            false_positives:
+              required: true
+              schema:
+                type: array
+                description: Findings the developer believes are incorrect or unfixable
+                items:
+                  type: object
+                  properties:
+                    finding:
+                      type: string
+                      description: The finding dismissed as false positive
+                    reasoning:
+                      type: string
+                      description: Why this is a false positive
+                  required: [finding, reasoning]
+      verify:
+        needs: [fix]
+        if: "${{ inputs.values.repo != '' && has(tasks.fix.outputs.values.revised_code) }}"
+        uses: dev.wagie/code-verification@1.0.0
+        inputs:
+          values:
+            repo:
+              value: "${{ inputs.values.repo }}"
+            source_ref:
+              value: "${{ inputs.values.ref }}"
+            patch:
+              value: "${{ tasks.fix.outputs.values.?revised_code.orValue('') }}"
+            checks:
+              value: "${{ inputs.values.checks }}"
+            context:
+              value: "${{ inputs.values.context }}"
+      log_iteration:
+        needs: [review, fix, verify]
+        quality-gate: "${{ has(outputs.values.iteration_summary) && size(outputs.values.iteration_summary) > 0 }}"
+        instructions: |
+          Produce a one-line summary of this review-fix iteration including:
+          score, findings count, fixes applied, verification result (if run),
+          and whether findings decreased from the previous round (converging)
+          or increased (regressing).
+        inputs:
+          values:
+            score:
+              schema: { type: number }
+              value: "${{ tasks.review.outputs.values.average_score }}"
+            verdict:
+              schema: { type: string }
+              value: "${{ tasks.review.outputs.values.verdict }}"
+            findings_count:
+              schema: { type: number }
+              value: "${{ size(tasks.review.outputs.values.findings) }}"
+            fixes_applied:
+              schema: { type: number }
+              value: "${{ size(tasks.fix.outputs.values.?fixes_applied.orValue([])) }}"
+            prev_findings_count:
+              schema: { type: number }
+              value: "${{ loop.findings_count.orValue(999.0) }}"
+            verification_passed:
+              schema: { type: boolean }
+              value: "${{ tasks.verify.outputs.values.?passed.orValue(true) }}"
+            verification_summary:
+              schema: { type: string }
+              value: "${{ tasks.verify.outputs.values.?summary.orValue('skipped') }}"
+        outputs:
+          values:
+            iteration_summary:
+              required: true
+              schema: { type: string, description: One-line summary of this iteration }
+    outputs:
+      values:
+        current_code:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.fix.outputs.values.?revised_code.orValue(loop.current_code.orValue(inputs.values.diff)) }}"
+        score:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.review.outputs.values.average_score }}"
+        findings_count:
+          required: true
+          schema: { type: number }
+          value: "${{ size(tasks.review.outputs.values.findings) }}"
+        prev_findings_count:
+          required: true
+          schema: { type: number }
+          value: "${{ loop.findings_count.orValue(999.0) }}"
+        verification_passed:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.verify.outputs.values.?passed.orValue(true) }}"
+        iteration_log:
+          required: true
+          schema: { type: string }
+          value: '${{ loop.iteration_log.orValue('''') + "\n" + tasks.log_iteration.outputs.values.iteration_summary }}'
+        dismissed_findings:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                finding:
+                  type: string
+                reasoning:
+                  type: string
+              required: [finding, reasoning]
+          value: "${{ loop.dismissed_findings.orValue([]) + tasks.fix.outputs.values.?false_positives.orValue([]) }}"
+        false_positive_count:
+          required: true
+          schema: { type: number }
+          value: "${{ size(loop.dismissed_findings.orValue([])) + size(tasks.fix.outputs.values.?false_positives.orValue([])) }}"
+        converged:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.review.outputs.values.average_score >= inputs.values.threshold && size(tasks.review.outputs.values.findings) == 0 && tasks.verify.outputs.values.?passed.orValue(true) }}"
+        iterations_used:
+          required: true
+          schema: { type: number }
+          value: "${{ loop.iterations_used.orValue(0.0) + 1.0 }}"
+outputs:
+  values:
+    result:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.improve.outputs.values.current_code }}"
+    score:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.improve.outputs.values.score }}"
+    converged:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.improve.outputs.values.converged }}"
+    iterations_used:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.improve.outputs.values.iterations_used }}"
+    verification_passed:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.improve.outputs.values.verification_passed }}"
+    iteration_log:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.improve.outputs.values.iteration_log }}"
+    dismissed_findings:
+      required: true
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            finding:
+              type: string
+            reasoning:
+              type: string
+          required: [finding, reasoning]
+      value: "${{ tasks.improve.outputs.values.dismissed_findings }}"
+    false_positive_count:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.improve.outputs.values.false_positive_count }}"

@@ -1,0 +1,388 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/code-review-committee
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when code needs multi-perspective review; fans out reviewer personas in
+  parallel, then a top-level judge deduplicates, resolves conflicts, and
+  produces a unified verdict with confidence scores.
+tags: ["code-review", "committee", "parallel-review", "review-panel"]
+inputs:
+  values:
+    diff:
+      required: true
+      description: "Git diff output or equivalent patch content (e.g. git diff main...HEAD)"
+      schema: { type: string }
+    personas:
+      description: Array of reviewer personas to form the committee. When omitted or empty, a default six-persona panel is used.
+      schema:
+        type: array
+        default:
+          - role: Security Auditor
+            focus: "Injection flaws, authentication/authorization gaps, secrets exposure, input validation, OWASP Top 10"
+            principles: "Assume code is vulnerable until proven otherwise. Flag any path where untrusted input reaches a sensitive operation without validation."
+            severity_default: high
+          - role: Correctness Reviewer
+            focus: "Logic errors, off-by-one bugs, null/undefined handling, race conditions, edge cases, error propagation"
+            principles: "Mentally execute each code path. Ask what happens with empty input, maximum values, concurrent access, and partial failures."
+            severity_default: high
+          - role: Performance Engineer
+            focus: "Algorithmic complexity, N+1 queries, unnecessary allocations, missing caching, blocking operations in hot paths"
+            principles: "Flag obvious inefficiencies but do not speculate without evidence. Measure before optimizing — unless the cost is clearly O(n^2) or worse."
+            severity_default: medium
+          - role: Maintainability Reviewer
+            focus: "Naming clarity, function length, code duplication, coupling between modules, test coverage gaps"
+            principles: "Code is read far more than written. Prefer clear over clever. Each function should have one reason to change."
+            severity_default: medium
+          - role: Research Reviewer
+            focus: "API correctness against official docs, deprecated patterns, outdated dependencies, known CVEs, library misuse, stale configuration options"
+            principles: "Do not trust static knowledge — verify every library, API, and pattern against current official documentation. Only flag issues you can back with a concrete external source. Quality over quantity."
+            severity_default: medium
+            requires_tools: true
+          - role: General Reviewer
+            focus: "Any issue not covered by specialist reviewers — integration problems, API misuse, business logic errors, unexpected interactions between components, missing validation at system boundaries"
+            principles: "Review without a specific lens. Look for what the specialists would miss. Focus on how the pieces fit together, not how each piece works in isolation."
+        items:
+          type: object
+          properties:
+            role:
+              type: string
+            focus:
+              type: string
+            principles:
+              type: string
+            severity_default:
+              type: string
+              description: "Default severity for findings from this persona"
+            requires_tools:
+              type: boolean
+              description: "Whether this persona needs tool-use capability (e.g. web search, doc lookup)"
+          required: [role, focus]
+    repo:
+      description: "Repository identifier (e.g. owner/name) for context"
+      schema: { type: string }
+    ref:
+      description: "Git ref being reviewed (e.g. branch name, PR number)"
+      schema: { type: string }
+    context:
+      description: Optional repository or architectural context
+      schema: { type: string }
+    threshold:
+      description: Minimum average score across reviewers to pass
+      schema: { type: number, default: 90 }
+    dismissed_findings:
+      description: "Findings from prior iterations dismissed as false positives with reasoning, passed through to each reviewer"
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            finding:
+              type: string
+              description: The original finding that was dismissed
+            reasoning:
+              type: string
+              description: Why this was dismissed as a false positive
+          required: [finding, reasoning]
+tasks:
+  review_panel:
+    inputs:
+      values:
+        diff:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.diff }}"
+        threshold:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?threshold.orValue(90) }}"
+        repo:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?repo.orValue('') }}"
+        ref:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?ref.orValue('') }}"
+        context:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?context.orValue('') }}"
+        dismissed_findings:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                finding: { type: string }
+                reasoning: { type: string }
+              required: [finding, reasoning]
+          value: "${{ inputs.values.?dismissed_findings.orValue([]) }}"
+    matrix:
+      axes:
+        persona:
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                role: { type: string }
+                focus: { type: string }
+                principles: { type: string }
+                severity_default: { type: string }
+                requires_tools: { type: boolean }
+              required: [role, focus]
+          value: "${{ size(inputs.values.?personas.orValue([])) > 0 ? inputs.values.?personas.orValue([]) : [{'role': 'Security Auditor', 'focus': 'Injection flaws, authentication/authorization gaps, secrets exposure, input validation, OWASP Top 10', 'principles': 'Assume code is vulnerable until proven otherwise. Flag any path where untrusted input reaches a sensitive operation without validation.', 'severity_default': 'high'}, {'role': 'Correctness Reviewer', 'focus': 'Logic errors, off-by-one bugs, null/undefined handling, race conditions, edge cases, error propagation', 'principles': 'Mentally execute each code path. Ask what happens with empty input, maximum values, concurrent access, and partial failures.', 'severity_default': 'high'}, {'role': 'Performance Engineer', 'focus': 'Algorithmic complexity, N+1 queries, unnecessary allocations, missing caching, blocking operations in hot paths', 'principles': 'Flag obvious inefficiencies but do not speculate without evidence. Measure before optimizing unless the cost is clearly O(n^2) or worse.', 'severity_default': 'medium'}, {'role': 'Maintainability Reviewer', 'focus': 'Naming clarity, function length, code duplication, coupling between modules, test coverage gaps', 'principles': 'Code is read far more than written. Prefer clear over clever. Each function should have one reason to change.', 'severity_default': 'medium'}, {'role': 'Research Reviewer', 'focus': 'API correctness against official docs, deprecated patterns, outdated dependencies, known CVEs, library misuse, stale configuration options', 'principles': 'Do not trust static knowledge. Verify every library, API, and pattern against current official documentation. Only flag issues you can back with a concrete external source. Quality over quantity.', 'severity_default': 'medium', 'requires_tools': true}, {'role': 'General Reviewer', 'focus': 'Any issue not covered by specialist reviewers integration problems, API misuse, business logic errors, unexpected interactions between components, missing validation at system boundaries', 'principles': 'Review without a specific lens. Look for what the specialists would miss. Focus on how the pieces fit together, not how each piece works in isolation.'}] }}"
+    tasks:
+      member:
+        inputs:
+          values:
+            diff:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.diff }}"
+            threshold:
+              required: true
+              schema: { type: number }
+              value: "${{ inputs.values.threshold }}"
+            repo:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.repo }}"
+            ref:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.ref }}"
+            context:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.context }}"
+            dismissed_findings:
+              required: true
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    finding: { type: string }
+                    reasoning: { type: string }
+                  required: [finding, reasoning]
+              value: "${{ inputs.values.dismissed_findings }}"
+        tasks:
+          review:
+            uses: dev.wagie/code-reviewer@1.0.0
+            inputs:
+              values:
+                diff:
+                  value: "${{ inputs.values.diff }}"
+                persona:
+                  value: "${{ matrix.persona }}"
+                threshold:
+                  value: "${{ inputs.values.threshold }}"
+                repo:
+                  value: "${{ inputs.values.repo }}"
+                ref:
+                  value: "${{ inputs.values.ref }}"
+                context:
+                  value: "${{ inputs.values.context }}"
+                dismissed_findings:
+                  value: "${{ inputs.values.dismissed_findings }}"
+        outputs:
+          values:
+            review:
+              required: true
+              schema:
+                type: object
+                properties:
+                  role:
+                    type: string
+                  score:
+                    type: number
+                  verdict:
+                    type: string
+                  findings:
+                    type: array
+                    items: { type: object }
+                  reasoning:
+                    type: string
+                required: [role, score, verdict, findings, reasoning]
+              value: "${{ {'role': tasks.review.outputs.values.reviewer_role, 'score': tasks.review.outputs.values.score, 'verdict': tasks.review.outputs.values.verdict, 'findings': tasks.review.outputs.values.findings, 'reasoning': tasks.review.outputs.values.reasoning} }}"
+    outputs:
+      values:
+        reviews:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                role:
+                  type: string
+                score:
+                  type: number
+                verdict:
+                  type: string
+                findings:
+                  type: array
+                  items: { type: object }
+                reasoning:
+                  type: string
+              required: [role, score, verdict, findings, reasoning]
+          value: "${{ tasks.member.outputs.values.review }}"
+  judge:
+    needs: [review_panel]
+    quality-gate: "${{ outputs.values.average_score >= 0 && outputs.values.average_score <= 100 && has(outputs.values.verdict) && (outputs.values.verdict == 'approve' || outputs.values.verdict == 'request_changes' || outputs.values.verdict == 'reject') && has(outputs.values.findings) && has(outputs.values.summary) && size(outputs.values.summary) > 0 && outputs.values.agreement_score >= 0 && outputs.values.agreement_score <= 100 }}"
+    instructions: |
+      You are the judge of a code review committee. Multiple specialist
+      reviewers have independently assessed the same code. Your job is to
+      produce a single, authoritative review.
+
+      You will receive reviews from ALL committee members. You MUST process
+      every single review — do not skip, collapse, or summarize over any
+      reviewer. The scores_by_reviewer output MUST contain one entry per
+      reviewer with their exact role and score.
+
+      Process:
+      1. List every reviewer's role and score. Calculate the arithmetic
+         mean of ALL scores — not just one reviewer's score
+      2. Deduplicate findings — when multiple reviewers flag the same
+         code location with similar descriptions, merge into one entry.
+         Preserve the exact file:line location from the original finding.
+         Use the strongest severity among duplicates. Record all agreeing
+         reviewer roles in agreed_by.
+      3. Resolve conflicts — when reviewers disagree on severity or
+         whether something is an issue, weigh the specialist in that
+         domain more heavily (e.g. Security Auditor wins on security
+         findings, Performance Engineer wins on performance findings).
+         Findings that include a source citation (URL, doc reference, CVE)
+         win over contradicting findings based on memory alone
+      4. Filter noise — drop findings that meet ALL of these criteria:
+         severity is low or info, only one reviewer flagged it, and the
+         evidence is weak or speculative. Keep low-severity findings if
+         multiple reviewers agree. NEVER filter findings that include a
+         source citation.
+      5. Rank remaining findings by severity (critical > high > medium >
+         low) then by confidence (multi-reviewer > single-reviewer).
+         Findings with source citations get a confidence floor of 70
+         regardless of agreement count.
+      6. Determine verdict: approve (avg >= threshold and no critical
+         findings), request_changes (any critical or high findings),
+         reject (avg < 50 or multiple critical findings)
+
+      For each unified finding, record which reviewers flagged it and
+      assign confidence: 90+ if 3+ reviewers agree, 70-89 if 2 agree,
+      50-69 if only one reviewer flagged it with strong evidence.
+      Preserve the source field from findings when present.
+
+      Do not introduce new findings — you are aggregating, not reviewing.
+
+      Finally, compute an agreement_score (0-100) reflecting how aligned the
+      reviewers were. If all scores are within 10 points of each other,
+      agreement is 90+. If scores span 30+ points, agreement is below 50.
+      Low agreement signals the review may need human attention.
+
+      BIAS CHECK: Resist the tendency to soften or dismiss findings during
+      aggregation. If a specialist reviewer flagged an issue in their domain,
+      default to keeping it unless another specialist in the same domain
+      explicitly contradicts it. When in doubt, keep the finding.
+    inputs:
+      values:
+        reviews:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.review_panel.outputs.values.reviews }}"
+        threshold:
+          schema: { type: number }
+          value: "${{ inputs.values.?threshold.orValue(90) }}"
+    outputs:
+      values:
+        average_score:
+          required: true
+          schema: { type: number, description: Average score across all reviewers }
+        verdict:
+          required: true
+          schema:
+            type: string
+            enum: [approve, request_changes, reject]
+            description: Unified committee verdict
+        findings:
+          required: true
+          schema:
+            type: array
+            description: Deduplicated, ranked findings with agreement tracking
+            items:
+              type: object
+              properties:
+                severity:
+                  type: string
+                  enum: [critical, high, medium, low, info]
+                location:
+                  type: string
+                  description: "File path and line reference (e.g. src/auth.ts:42)"
+                observation:
+                  type: string
+                impact:
+                  type: string
+                suggestion:
+                  type: string
+                source:
+                  type: string
+                  description: "URL or doc reference (present when finding is backed by external evidence)"
+                agreed_by:
+                  type: array
+                  items:
+                    type: string
+                  description: Reviewer roles that flagged this finding
+                confidence:
+                  type: number
+                  description: Confidence score 0-100 based on reviewer agreement
+              required: [severity, location, observation, impact, suggestion, agreed_by, confidence]
+        scores_by_reviewer:
+          required: true
+          schema:
+            type: array
+            description: Individual scores from each reviewer
+            items:
+              type: object
+              properties:
+                role:
+                  type: string
+                score:
+                  type: number
+              required: [role, score]
+        agreement_score:
+          required: true
+          schema: { type: number, description: How aligned reviewers were (0-100). Low scores signal the review needs human attention }
+        summary:
+          required: true
+          schema: { type: string, description: Unified committee assessment }
+outputs:
+  values:
+    average_score:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.judge.outputs.values.average_score }}"
+    verdict:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.judge.outputs.values.verdict }}"
+    findings:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.judge.outputs.values.findings }}"
+    scores_by_reviewer:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.judge.outputs.values.scores_by_reviewer }}"
+    agreement_score:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.judge.outputs.values.agreement_score }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.judge.outputs.values.summary }}"

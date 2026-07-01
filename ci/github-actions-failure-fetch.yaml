@@ -1,0 +1,224 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/github-actions-failure-fetch
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when triage needs the latest completed GitHub Actions workflow run, and failed-job artifacts only when that latest completed run actually failed. Resolves the latest completed run for a workflow (or a pinned run_id), no-ops on green/latest non-failing runs, enumerates failed jobs for failed runs, downloads matching artifacts, and returns per-job descriptors. Pure `gh` CLI plumbing — domain adapters parse the downloaded artifacts.
+tags: ["ci", "github-actions", "gh", "fetch", "triage"]
+inputs:
+  values:
+    repo:
+      required: true
+      description: GitHub repository in owner/name form
+      schema: { type: string }
+    workflow_ref:
+      required: true
+      description: Workflow file path or filename (e.g. ".github/workflows/run-scheduled.yml" or "run-scheduled.yml")
+      schema: { type: string }
+    run_id:
+      description: Specific GitHub Actions run id; when empty, the latest completed run for the workflow is selected regardless of conclusion
+      schema: { type: string, default: "" }
+    artifact_patterns:
+      description: Artifact name globs to download per job. Empty downloads every artifact attached to each failed job.
+      schema:
+        type: array
+        default: []
+        items:
+          type: string
+    conclusion_filter:
+      description: Job conclusions counted as failures. Defaults to "failure"; add "cancelled" or "timed_out" if those should also be triaged.
+      schema:
+        type: array
+        default: ["failure"]
+        items:
+          type: string
+  secrets:
+    gh_token:
+      required: false
+      description: Optional GitHub token secret used as GH_TOKEN for gh CLI commands. When unset, use ambient gh authentication.
+tasks:
+  fetch:
+    quality-gate: "${{ has(outputs.values.run_id) && has(outputs.values.failures) }}"
+    instructions: |-
+      Locate a failing GitHub Actions run and download per-failed-job artifacts using the `gh` CLI. This task is READ-ONLY against GitHub — never run any `gh` write commands here. ALL `gh` commands MUST be scoped to the provided `repo` input via `--repo <repo>` (or `/repos/<repo>/` for raw API). Never depend on the worker's current-directory git remote.
+
+      GitHub authentication:
+      - `gh_token` is an optional secret. When present, use it only as the `GH_TOKEN` environment variable for `gh` commands and set `GH_PROMPT_DISABLED=1`.
+      - When `gh_token` is absent, use the worker's ambient `gh` authentication (`gh auth status` should pass).
+      - Command examples below omit the environment wrapper; apply the authentication environment to every `gh` invocation.
+      - Do not run `gh auth login`, `gh auth token`, or `gh auth status --show-token`. Do not print, echo, persist, return, or write the token into files. Keep shell tracing and `GH_DEBUG` disabled while a token is in scope.
+
+      Inputs (read from the structured inputs block):
+      - `repo` — owner/name.
+      - `gh_token` — optional secret token for `gh`; empty means use ambient auth.
+      - `workflow_ref` — workflow file path or filename. Pass as the `--workflow` argument verbatim.
+      - `run_id` — when non-empty, use it directly. When empty, find the latest completed run for the workflow regardless of conclusion.
+      - `artifact_patterns` — globs to filter artifact names. Empty means download all.
+      - `conclusion_filter` — job conclusions that count as failures.
+
+      Procedure:
+
+      Shell portability note: the worker shell may be `zsh` or `dash`, NOT bash. Do NOT use bash-specific features (`declare -A`, `${arr[$key]}`, `${!arr[@]}`, `[[ ... ]]`, process substitution `<()`, `<<<`). For any per-job mapping or non-trivial iteration, use a POSIX `sh`-compatible loop OR — preferred for clarity — `python3` with a heredoc. Errors like `bad substitution` are a tell-tale sign of accidental bashism.
+
+      1. Resolve the run.
+         - If `run_id` is non-empty: `gh run view <run_id> --repo <repo> --json databaseId,url,createdAt,headBranch,headSha,workflowName,conclusion,status`.
+         - Else: `gh run list --repo <repo> --workflow <workflow_ref> --status completed --limit 1 --json databaseId,url,createdAt,headBranch,headSha,workflowName,conclusion,status`. Take the first result. Do not filter to failures here; the latest completed green run is a valid no-op. This deliberately ignores queued/in-progress runs until they complete.
+         - If no completed run exists, return `run_id=""`, `no_failures=true`, `failures=[]`, and a `summary` explaining there was nothing completed to triage. Do not error.
+         - If a pinned `run_id` is still in progress (`status` is not `completed`) OR the resolved run has a conclusion not included in `conclusion_filter`, return its metadata with `no_failures=true`, `failures=[]`, and a summary explaining the run did not fail or is not completed. Do not look back to older failed runs.
+         - **`path` is NOT a valid JSON field for `gh run list` OR `gh run view --json`** — both error `Unknown JSON field: "path"`. Do NOT include it in either command. To obtain the workflow path, use the raw API: `gh api /repos/<repo>/actions/runs/<run_id> --jq .path`. If that fails or the value is empty, fall back to using the `workflow_ref` input as `workflow_path` (the caller usually passes either the full path or the filename — both are acceptable values).
+
+      2. Enumerate failed jobs.
+         - `gh run view <run_id> --repo <repo> --json jobs`.
+         - Filter to jobs whose `conclusion` is in `conclusion_filter`.
+         - If no jobs match, return the run metadata with `no_failures=true`, `failures=[]`, and a short summary. Do not error.
+
+      3. Download artifacts.
+         - Create a scratch root directory (`mktemp -d` is fine). Record the absolute path.
+         - For each failed job, create a per-job subdirectory `<scratch>/<job_id>/`.
+         - List the run's artifacts once: `gh api /repos/<repo>/actions/runs/<run_id>/artifacts --paginate --jq '.artifacts[] | {id, name}'`.
+         - Map artifacts to jobs by name convention. Build candidate match tokens from each failed job's display name, matrix/shard suffixes, and other stable name fragments visible in the job name. Match artifacts whose names clearly reference those tokens, then apply `artifact_patterns` when non-empty.
+           - Do not key artifact matching by numeric GitHub `job_id`; use `job_id` only for the scratch directory. Many CI pipelines name artifacts after matrix values rather than job ids.
+           - For the per-job mapping, prefer a small `python3` heredoc (deterministic, portable) over shell tricks. Example shape: read the artifact list and failed jobs into Python, derive normalized tokens from job names, then emit deterministic artifact matches per job. Avoid POSIX `case ... esac` chains in shell when there are more than a couple of jobs — they get fragile.
+         - For each matching artifact, run `gh run download <run_id> --repo <repo> --name <artifact_name> --dir <scratch>/<job_id>/<artifact_name>/`.
+         - If a download fails for one artifact, log a warning and continue — partial coverage is acceptable.
+         - Record the per-job artifact names actually downloaded.
+
+      4. Build the failures array.
+         - One entry per failed job with: `job_id`, `job_name`, `conclusion`, `started_at`, `completed_at`, `artifacts_dir` (absolute path `<scratch>/<job_id>`), `artifact_names` (the array of artifact directory names under `artifacts_dir`).
+
+      5. Return run metadata and the failures array. Set `no_failures=true` when the latest completed or pinned run is non-failing, the pinned run is still running, the run has zero failed jobs, or no completed run was found.
+
+      Keep `summary` short — one or two sentences describing what was fetched.
+    inputs:
+      values:
+        repo:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.repo }}"
+        workflow_ref:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.workflow_ref }}"
+        run_id:
+          schema: { type: string }
+          value: "${{ inputs.values.?run_id.orValue('') }}"
+        artifact_patterns:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?artifact_patterns.orValue([]) }}"
+        conclusion_filter:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?conclusion_filter.orValue(['failure']) }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+    outputs:
+      values:
+        run_id:
+          required: true
+          schema:
+            type: string
+            description: Resolved GitHub Actions run id. Empty only when no completed run was found.
+        run_url:
+          required: true
+          schema:
+            type: string
+            description: HTML URL of the resolved run
+        run_started_at:
+          required: true
+          schema:
+            type: string
+            description: ISO timestamp the run started
+        head_sha:
+          required: true
+          schema:
+            type: string
+            description: Head commit SHA of the run
+        head_branch:
+          required: true
+          schema:
+            type: string
+            description: Head branch the run was triggered on
+        workflow_path:
+          required: true
+          schema:
+            type: string
+            description: Workflow file path within the repo
+        no_failures:
+          required: true
+          schema:
+            type: boolean
+            description: True when the resolved run is non-failing, still running, has zero matching failed jobs, or no completed run was found
+        failures:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                job_id:
+                  type: string
+                job_name:
+                  type: string
+                conclusion:
+                  type: string
+                started_at:
+                  type: string
+                completed_at:
+                  type: string
+                artifacts_dir:
+                  type: string
+                  description: Absolute path to the per-job scratch directory containing downloaded artifact subdirectories
+                artifact_names:
+                  type: array
+                  items:
+                    type: string
+                  description: Artifact subdirectory names under artifacts_dir
+              required: [job_id, job_name, conclusion, artifacts_dir, artifact_names]
+            description: Per-failed-job descriptors with paths to downloaded artifacts
+        summary:
+          required: true
+          schema:
+            type: string
+            description: Short summary of what was fetched
+outputs:
+  values:
+    run_id:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch.outputs.values.run_id }}"
+    run_url:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch.outputs.values.run_url }}"
+    run_started_at:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch.outputs.values.run_started_at }}"
+    head_sha:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch.outputs.values.head_sha }}"
+    head_branch:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch.outputs.values.head_branch }}"
+    workflow_path:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch.outputs.values.workflow_path }}"
+    no_failures:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.fetch.outputs.values.no_failures }}"
+    failures:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.fetch.outputs.values.failures }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch.outputs.values.summary }}"

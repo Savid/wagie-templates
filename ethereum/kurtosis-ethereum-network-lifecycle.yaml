@@ -1,0 +1,686 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/kurtosis-ethereum-network-lifecycle
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a workflow needs a single-session Kurtosis Ethereum network lifecycle; designs config, launches the enclave, inspects it, optionally validates it over an observation window, summarizes the result, and cleans up when requested.
+tags: ["kurtosis", "ethereum", "ethpandaops", "devnet", "validation"]
+inputs:
+  values:
+    goal:
+      required: true
+      description: Desired network outcome
+      schema: { type: string }
+    enclave_name:
+      required: true
+      description: Kurtosis enclave name to create or inspect
+      schema: { type: string }
+    constraints:
+      description: Optional constraints or implementation preferences
+      schema: { type: string }
+    example_hint:
+      description: Optional CI example or feature hint
+      schema: { type: string }
+    package_ref:
+      description: Kurtosis package reference to run
+      schema: { type: string, default: github.com/ethpandaops/ethereum-package }
+    config_mode:
+      description: Whether to design a sensible minimal config or replicate an existing devnet profile
+      schema:
+        type: string
+        default: minimal
+        enum: [minimal, devnet-profile]
+    observation_window:
+      description: Optional post-launch observation window before producing the final summary; use 0 to skip waiting
+      schema: { type: string, default: 0 epochs }
+    success_criteria:
+      description: Optional explicit stability or validation criteria to apply during observation
+      schema: { type: string }
+    devnet_name:
+      description: Existing devnet or devnet-group name to model when `config_mode` is `devnet-profile`
+      schema: { type: string }
+    client_type:
+      description: Optional client type to preserve explicitly in the generated config
+      schema: { type: string }
+    image_hint:
+      description: Optional image or build hint to preserve explicitly in the generated config
+      schema: { type: string }
+    client_pairs:
+      description: Optional explicit client-pair and image combinations to pass through to config design
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            el_type: { type: string }
+            cl_type: { type: string }
+            vc_type: { type: string }
+            el_image: { type: string }
+            cl_image: { type: string }
+            vc_image: { type: string }
+            el_extra_params: { type: array, items: { type: string } }
+            cl_extra_params: { type: array, items: { type: string } }
+            vc_extra_params: { type: array, items: { type: string } }
+            count: { type: number }
+          required: [el_type, cl_type]
+    launch:
+      description: Whether to launch the network after designing config
+      schema: { type: boolean, default: true }
+    auto_cleanup:
+      description: Whether to always remove the enclave in finally cleanup
+      schema: { type: boolean, default: true }
+    config_source:
+      description: >-
+        Where the running network's configuration comes from. `design` (default) calls `kurtosis-ethereum-config` to design and optionally launch a fresh network. `existing-enclave` assumes the enclave is already running (launched elsewhere) and skips both design and launch — the lifecycle only inspects the running network and synthesises `config_summary` and `effective_client_pairs` from the observed service inventory.
+      schema:
+        type: string
+        default: design
+        enum: [design, existing-enclave]
+tasks:
+  run:
+    inputs:
+      values:
+        goal:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        enclave_name:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.enclave_name }}"
+        constraints:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?constraints.orValue('') }}"
+        example_hint:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?example_hint.orValue('') }}"
+        package_ref:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?package_ref.orValue('github.com/ethpandaops/ethereum-package') }}"
+        config_mode:
+          required: true
+          schema: { type: string, enum: [minimal, devnet-profile] }
+          value: "${{ inputs.values.?config_mode.orValue('minimal') }}"
+        observation_window:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?observation_window.orValue('0 epochs') }}"
+        success_criteria:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?success_criteria.orValue('') }}"
+        devnet_name:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?devnet_name.orValue('') }}"
+        client_type:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?client_type.orValue('') }}"
+        image_hint:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?image_hint.orValue('') }}"
+        client_pairs:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                el_type: { type: string }
+                cl_type: { type: string }
+                vc_type: { type: string }
+                el_image: { type: string }
+                cl_image: { type: string }
+                vc_image: { type: string }
+                el_extra_params: { type: array, items: { type: string } }
+                cl_extra_params: { type: array, items: { type: string } }
+                vc_extra_params: { type: array, items: { type: string } }
+                count: { type: number }
+              required: [el_type, cl_type]
+          value: "${{ inputs.values.?client_pairs.orValue([]) }}"
+        launch:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?launch.orValue(true) }}"
+        auto_cleanup:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?auto_cleanup.orValue(true) }}"
+        config_source:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?config_source.orValue('design') }}"
+        force:
+          required: true
+          schema: { type: boolean }
+          value: "${{ true }}"
+    tasks:
+      design_config:
+        if: "${{ inputs.values.config_source != 'existing-enclave' }}"
+        uses: dev.wagie/kurtosis-ethereum-config@1.0.0
+        inputs:
+          values:
+            goal:
+              value: "${{ inputs.values.goal }}"
+            constraints:
+              value: "${{ inputs.values.constraints }}"
+            example_hint:
+              value: "${{ inputs.values.example_hint }}"
+            package_ref:
+              value: "${{ inputs.values.package_ref }}"
+            config_mode:
+              value: "${{ inputs.values.config_mode }}"
+            devnet_name:
+              value: "${{ inputs.values.devnet_name }}"
+            client_type:
+              value: "${{ inputs.values.client_type }}"
+            image_hint:
+              value: "${{ inputs.values.image_hint }}"
+            client_pairs:
+              value: "${{ inputs.values.client_pairs }}"
+      launch_network:
+        needs: [design_config]
+        if: "${{ inputs.values.launch == true && inputs.values.config_source != 'existing-enclave' }}"
+        quality-gate: "${{ has(outputs.values.launch_summary) && size(outputs.values.launch_summary) > 0 }}"
+        instructions: |-
+          Launch the requested Ethereum network with Kurtosis.
+
+          Use the `kurtosis` CLI as the primary tool surface for launch operations.
+          Use the `panda` CLI and MCP tools when you need to surface network or devnet information.
+          A worker with reasoning and tool-use is required.
+
+          Requirements:
+          - Use the provided `config` artifact as the args file for the kurtosis run command.
+          - Run the requested package reference with the provided enclave name.
+          - Prefer `--args-file` and `--image-download always`.
+          - If the package reference already points to a fork or branch, use it exactly as provided.
+          - Return the effective run command and a concise launch summary.
+        inputs:
+          values:
+            enclave_name:
+              schema: { type: string }
+              value: "${{ inputs.values.enclave_name }}"
+            package_ref:
+              schema: { type: string }
+              value: "${{ inputs.values.package_ref }}"
+            config:
+              schema: { type: string }
+              value: "${{ tasks.design_config.outputs.values.?config.orValue('') }}"
+        outputs:
+          values:
+            launch_summary:
+              required: true
+              schema: { type: string, description: Concise launch result summary }
+            run_command:
+              required: true
+              schema: { type: string, description: Effective Kurtosis command used for launch }
+            args_file_path:
+              required: true
+              schema: { type: string, description: Local path to the generated args file }
+      inspect_enclave:
+        needs: [design_config, launch_network]
+        uses: dev.wagie/kurtosis-enclave-context@1.0.0
+        inputs:
+          values:
+            enclave_name:
+              value: "${{ inputs.values.enclave_name }}"
+            focus:
+              value: "${{ 'post-launch' }}"
+            include_logs:
+              value: "${{ false }}"
+      derive_from_existing:
+        needs: [inspect_enclave]
+        if: "${{ inputs.values.config_source == 'existing-enclave' }}"
+        quality-gate: "${{ has(outputs.values.config_summary) && size(outputs.values.config_summary) > 0 && has(outputs.values.effective_client_pairs) }}"
+        instructions: |-
+          Synthesize a `config_summary` and `effective_client_pairs` array from the inspected running network's service inventory. The original config artifact is not available — derive structure from observed service names. A worker with reasoning is required.
+
+          Conventions for kurtosis-ethereum-package service names (loose; do best-effort matching):
+          - `el-<idx>-<el_type>-<cl_type>` — execution client; the first token after the index is the EL type (e.g. reth, geth, nethermind, besu, erigon).
+          - `cl-<idx>-<cl_type>-<el_type>` — consensus client; first token after index is the CL type (e.g. teku, lighthouse, prysm, nimbus, grandine, lodestar).
+          - `vc-<idx>-<vc_type>-<cl_type>` — separate validator client when present.
+          - `assertoor`, `dora`, `mev-relay`, etc. — non-client services.
+
+          Steps:
+          1. Group services by index suffix where possible (el-1, cl-1, vc-1 belong together).
+          2. For each group, emit one entry in `effective_client_pairs` with `el_type`, `cl_type`, and `vc_type` (when present). Always include `el_type` and `cl_type` as strings; use an empty string when one side is missing, and note in `config_summary` that the inventory looked incomplete.
+          3. Write a 3-4 sentence `config_summary` covering: client pair count, the el/cl types observed, presence of separate validator clients, and any unusual services (mev-relay, blob-builder, etc.).
+          4. Return both fields. Do not fabricate fields you cannot evidence from service names.
+        inputs:
+          values:
+            enclave_name:
+              schema: { type: string }
+              value: "${{ inputs.values.enclave_name }}"
+            status_summary:
+              schema: { type: string }
+              value: "${{ tasks.inspect_enclave.outputs.values.status_summary }}"
+            service_names:
+              schema: { type: array, items: { type: string } }
+              value: "${{ tasks.inspect_enclave.outputs.values.service_names }}"
+        outputs:
+          values:
+            config_summary:
+              required: true
+              schema: { type: string, description: Synthesized 3-4 sentence summary of the running network's shape }
+            effective_client_pairs:
+              required: true
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    el_type: { type: string }
+                    cl_type: { type: string }
+                    vc_type: { type: string }
+                  required: [el_type, cl_type]
+                description: Per-pair client identification derived from service names
+      observe_network:
+        needs: [design_config, launch_network, inspect_enclave, derive_from_existing]
+        if: "${{ inputs.values.launch == true && inputs.values.observation_window != '0' && inputs.values.observation_window != '0 epochs' }}"
+        quality-gate: "${{ has(outputs.values.validation_summary) && size(outputs.values.validation_summary) > 0 && has(outputs.values.stable) }}"
+        instructions: |-
+          Observe the launched Ethereum network over the requested observation window before writing the final operator summary.
+
+          Use the `kurtosis` CLI as the primary tool surface for enclave operations.
+          Use the `panda` CLI and MCP tools for network data (Dora queries, log analysis, node health checks).
+          A worker with reasoning and tool-use is required.
+
+          Panda commands for observation:
+          - If Dora is available in the enclave: query via its localhost port for participation, finality, and fork status.
+          - Log analysis: use `panda loki query` if Loki is available, or `kurtosis service logs` as fallback.
+          - Node health: query CL/EL nodes directly via their localhost ports.
+
+          Focus on:
+          - whether the network progresses over the window
+          - whether finality or expected health conditions appear
+          - whether obvious client, service, or enclave failures emerge
+          - validator participation health across the window
+          - proposed blocks and missed proposals when available
+          - missed attestations or equivalent attestation-health signals when available
+
+          Return a concise observation verdict with evidence, next actions, and structured metrics when available.
+        inputs:
+          values:
+            enclave_name:
+              schema: { type: string }
+              value: "${{ inputs.values.enclave_name }}"
+            observation_window:
+              schema: { type: string }
+              value: "${{ inputs.values.observation_window }}"
+            success_criteria:
+              schema: { type: string }
+              value: "${{ inputs.values.success_criteria }}"
+            goal:
+              schema: { type: string }
+              value: "${{ inputs.values.goal }}"
+            config_summary:
+              schema: { type: string }
+              value: "${{ tasks.design_config.outputs.values.?config_summary.orValue(tasks.derive_from_existing.outputs.values.?config_summary.orValue('')) }}"
+            launch_summary:
+              schema: { type: string }
+              value: "${{ tasks.launch_network.outputs.values.?launch_summary.orValue('launch not performed (existing-enclave mode)') }}"
+            status_summary:
+              schema: { type: string }
+              value: "${{ tasks.inspect_enclave.outputs.values.status_summary }}"
+            service_names:
+              schema: { type: array, items: { type: string } }
+              value: "${{ tasks.inspect_enclave.outputs.values.service_names }}"
+            public_endpoints:
+              schema: { type: array, items: { type: string } }
+              value: "${{ tasks.inspect_enclave.outputs.values.public_endpoints }}"
+        outputs:
+          values:
+            stable:
+              required: true
+              schema: { type: boolean, description: Whether the network appeared healthy across the observation window }
+            validation_summary:
+              required: true
+              schema: { type: string, description: Concise observation summary }
+            finalized_epoch:
+              required: true
+              schema: { type: number, description: Finalized epoch observed at the end of the window when available }
+            head_epoch:
+              required: true
+              schema: { type: number, description: Head epoch observed at the end of the window when available }
+            participation_rate:
+              required: true
+              schema: { type: number, description: Validator participation rate percentage when available }
+            proposed_blocks:
+              required: true
+              schema: { type: number, description: Proposed blocks observed during the window when available }
+            missed_proposals:
+              required: true
+              schema: { type: number, description: Missed proposal count observed during the window when available }
+            missed_attestations:
+              required: true
+              schema: { type: number, description: Missed attestation count or equivalent missed-duty estimate when available }
+            evidence:
+              required: true
+              schema:
+                type: array
+                items: { type: string }
+                description: Supporting observations from the observation window
+            recommended_actions:
+              required: true
+              schema:
+                type: array
+                items: { type: string }
+                description: Suggested follow-up actions after observation
+      summarize_result:
+        needs: [design_config, launch_network, inspect_enclave, derive_from_existing, observe_network]
+        instructions: |-
+          Summarize the designed and launched Kurtosis Ethereum network for an operator.
+          A worker with reasoning is required.
+
+          Cover:
+          - what network was requested
+          - what configuration choices matter most
+          - whether launch happened successfully
+          - what happened during launch and immediate inspection
+          - what happened during the observation window when one was requested
+          - finalized/head epoch and participation health when available
+          - proposed blocks, missed proposals, and missed attestations when available
+          - what services and endpoints matter most next
+          - what the operator should do next
+
+          Write the rendered operator summary as the `summary` output.
+        inputs:
+          values:
+            goal:
+              schema: { type: string }
+              value: "${{ inputs.values.goal }}"
+            enclave_name:
+              schema: { type: string }
+              value: "${{ inputs.values.enclave_name }}"
+            observation_window:
+              schema: { type: string }
+              value: "${{ inputs.values.observation_window }}"
+            config_summary:
+              schema: { type: string }
+              value: "${{ tasks.design_config.outputs.values.?config_summary.orValue(tasks.derive_from_existing.outputs.values.?config_summary.orValue('')) }}"
+            inferred_features:
+              schema: { type: array, items: { type: string } }
+              value: "${{ tasks.design_config.outputs.values.?inferred_features.orValue([]) }}"
+            launch_summary:
+              schema: { type: string }
+              value: "${{ tasks.launch_network.outputs.values.?launch_summary.orValue(inputs.values.config_source == 'existing-enclave' ? 'launch not performed (existing-enclave mode)' : 'launch not requested') }}"
+            status_summary:
+              schema: { type: string }
+              value: "${{ tasks.inspect_enclave.outputs.values.status_summary }}"
+            observation_summary:
+              schema: { type: string }
+              value: "${{ tasks.observe_network.outputs.values.?validation_summary.orValue('observation not requested') }}"
+            finalized_epoch:
+              schema: { type: number }
+              value: "${{ tasks.observe_network.outputs.values.?finalized_epoch.orValue(0.0) }}"
+            head_epoch:
+              schema: { type: number }
+              value: "${{ tasks.observe_network.outputs.values.?head_epoch.orValue(0.0) }}"
+            participation_rate:
+              schema: { type: number }
+              value: "${{ tasks.observe_network.outputs.values.?participation_rate.orValue(0.0) }}"
+            proposed_blocks:
+              schema: { type: number }
+              value: "${{ tasks.observe_network.outputs.values.?proposed_blocks.orValue(0.0) }}"
+            missed_proposals:
+              schema: { type: number }
+              value: "${{ tasks.observe_network.outputs.values.?missed_proposals.orValue(0.0) }}"
+            missed_attestations:
+              schema: { type: number }
+              value: "${{ tasks.observe_network.outputs.values.?missed_attestations.orValue(0.0) }}"
+            observation_evidence:
+              schema: { type: array, items: { type: string } }
+              value: "${{ tasks.observe_network.outputs.values.?evidence.orValue([]) }}"
+            service_names:
+              schema: { type: array, items: { type: string } }
+              value: "${{ tasks.inspect_enclave.outputs.values.service_names }}"
+            public_endpoints:
+              schema: { type: array, items: { type: string } }
+              value: "${{ tasks.inspect_enclave.outputs.values.public_endpoints }}"
+            suggested_next_commands:
+              schema: { type: array, items: { type: string } }
+              value: "${{ size(tasks.observe_network.outputs.values.?recommended_actions.orValue([])) > 0 ? tasks.observe_network.outputs.values.?recommended_actions.orValue([]) : tasks.inspect_enclave.outputs.values.suggested_next_commands }}"
+        outputs:
+          values:
+            summary:
+              required: true
+              schema: { type: string, description: Operator summary of the designed, launched, and observed Kurtosis Ethereum network }
+    finally:
+      cleanup_enclave:
+        if: "${{ inputs.values.auto_cleanup == true && inputs.values.launch == true && inputs.values.config_source != 'existing-enclave' }}"
+        uses: dev.wagie/kurtosis-enclave-cleanup@1.0.0
+        inputs:
+          values:
+            enclave_name:
+              value: "${{ inputs.values.enclave_name }}"
+            force:
+              value: "${{ inputs.values.force }}"
+    outputs:
+      values:
+        resolved_network_name:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.design_config.outputs.values.?resolved_network_name.orValue('') }}"
+        resolved_network_group:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.design_config.outputs.values.?resolved_network_group.orValue('') }}"
+        config:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.design_config.outputs.values.?config.orValue('') }}"
+        config_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.design_config.outputs.values.?config_summary.orValue(tasks.derive_from_existing.outputs.values.?config_summary.orValue('')) }}"
+        inferred_features:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.design_config.outputs.values.?inferred_features.orValue([]) }}"
+        devnet_assumptions:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.design_config.outputs.values.?devnet_assumptions.orValue([]) }}"
+        effective_client_pairs:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.design_config.outputs.values.?effective_client_pairs.orValue(tasks.derive_from_existing.outputs.values.?effective_client_pairs.orValue([])) }}"
+        fallback_pair_added:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.design_config.outputs.values.?fallback_pair_added.orValue(false) }}"
+        launch_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.launch_network.outputs.values.?launch_summary.orValue(inputs.values.config_source == 'existing-enclave' ? 'launch not performed (existing-enclave mode)' : 'launch not requested') }}"
+        run_command:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.launch_network.outputs.values.?run_command.orValue('') }}"
+        args_file_path:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.launch_network.outputs.values.?args_file_path.orValue('') }}"
+        status_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.inspect_enclave.outputs.values.status_summary }}"
+        service_names:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.inspect_enclave.outputs.values.service_names }}"
+        public_endpoints:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.inspect_enclave.outputs.values.public_endpoints }}"
+        suggested_next_commands:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.inspect_enclave.outputs.values.suggested_next_commands }}"
+        stable:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.observe_network.outputs.values.?stable.orValue(false) }}"
+        validation_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.observe_network.outputs.values.?validation_summary.orValue('') }}"
+        observation_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.observe_network.outputs.values.?validation_summary.orValue('') }}"
+        finalized_epoch:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.observe_network.outputs.values.?finalized_epoch.orValue(0.0) }}"
+        head_epoch:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.observe_network.outputs.values.?head_epoch.orValue(0.0) }}"
+        participation_rate:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.observe_network.outputs.values.?participation_rate.orValue(0.0) }}"
+        proposed_blocks:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.observe_network.outputs.values.?proposed_blocks.orValue(0.0) }}"
+        missed_proposals:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.observe_network.outputs.values.?missed_proposals.orValue(0.0) }}"
+        missed_attestations:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.observe_network.outputs.values.?missed_attestations.orValue(0.0) }}"
+        observation_evidence:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.observe_network.outputs.values.?evidence.orValue([]) }}"
+        recommended_actions:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.observe_network.outputs.values.?recommended_actions.orValue([]) }}"
+        summary:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.summarize_result.outputs.values.summary }}"
+outputs:
+  values:
+    resolved_network_name:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.resolved_network_name }}"
+    resolved_network_group:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.resolved_network_group }}"
+    config:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.config }}"
+    config_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.config_summary }}"
+    inferred_features:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.run.outputs.values.inferred_features }}"
+    devnet_assumptions:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.run.outputs.values.devnet_assumptions }}"
+    effective_client_pairs:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.run.outputs.values.effective_client_pairs }}"
+    fallback_pair_added:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.run.outputs.values.fallback_pair_added }}"
+    launch_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.launch_summary }}"
+    run_command:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.run_command }}"
+    args_file_path:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.args_file_path }}"
+    status_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.status_summary }}"
+    service_names:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.run.outputs.values.service_names }}"
+    public_endpoints:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.run.outputs.values.public_endpoints }}"
+    suggested_next_commands:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.run.outputs.values.suggested_next_commands }}"
+    stable:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.run.outputs.values.stable }}"
+    validation_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.validation_summary }}"
+    observation_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.observation_summary }}"
+    finalized_epoch:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.run.outputs.values.finalized_epoch }}"
+    head_epoch:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.run.outputs.values.head_epoch }}"
+    participation_rate:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.run.outputs.values.participation_rate }}"
+    proposed_blocks:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.run.outputs.values.proposed_blocks }}"
+    missed_proposals:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.run.outputs.values.missed_proposals }}"
+    missed_attestations:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.run.outputs.values.missed_attestations }}"
+    observation_evidence:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.run.outputs.values.observation_evidence }}"
+    recommended_actions:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.run.outputs.values.recommended_actions }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.summary }}"

@@ -1,0 +1,222 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/research-coverage-assess
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when accumulated research needs a structured coverage decision; scores breadth, depth, balance, and conflict resolution, then returns sufficiency state, prioritized gaps, and information gain signal.
+tags: ["research", "evaluation", "coverage"]
+inputs:
+  values:
+    topic:
+      required: true
+      description: Topic being researched
+      schema: { type: string }
+    depth:
+      required: true
+      description: Requested research depth
+      schema: { type: string }
+    findings:
+      required: true
+      description: Accumulated findings to assess
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            claim:
+              type: string
+            evidence:
+              type: string
+            confidence:
+              type: number
+            source_type:
+              type: string
+            evidence_strength:
+              type: string
+            corroboration:
+              type: number
+            contradictions:
+              type: string
+          required: [claim, evidence, confidence]
+    previous_gap_count:
+      description: Number of gaps identified in the previous iteration
+      schema: { type: number, default: 0 }
+    plan_questions:
+      description: Original research plan questions to assess coverage against
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            question:
+              type: string
+            perspective:
+              type: string
+            priority:
+              type: string
+          required: [question]
+tasks:
+  assess:
+    quality-gate: "${{ has(outputs.values.gaps) && has(outputs.values.summary) && size(outputs.values.summary) > 0 && has(outputs.values.completeness) && has(outputs.values.scores) }}"
+    instructions: |
+      Assess research coverage using this structured rubric.
+
+      Score each dimension 0-100:
+
+      Breadth — Are the major sub-topics and perspectives covered?
+      - If plan_questions were provided, check coverage of each
+        high-priority question explicitly
+      - Identify which perspectives or dimensions have no findings
+      - shallow depth: key facts covered is sufficient
+      - moderate depth: major subtopics covered with evidence
+      - deep depth: comprehensive coverage including edge cases
+
+      Depth — Is each covered sub-topic substantiated?
+      - Are claims backed by evidence, not just stated?
+      - Do findings include source types and evidence strength?
+      - For moderate/deep: are there multiple corroborating sources?
+
+      Balance — Are competing viewpoints represented?
+      - Are contradictions surfaced rather than silently resolved?
+      - Is the research dominated by a single perspective?
+      - For deep: are minority or dissenting views included?
+
+      Conflict resolution — Are contradictions between sources handled?
+      - Are conflicting claims identified and presented with context?
+      - Is there an assessment of which position the evidence favors?
+
+      After scoring, determine completeness:
+
+      Depth thresholds:
+      - shallow: sufficient when average score >= 60
+      - moderate: sufficient when average score >= 75 and no
+        dimension is below 50
+      - deep: sufficient when average score >= 85 and no
+        dimension is below 70
+
+      Information gain assessment:
+      Compare the current gap count against previous_gap_count.
+      If gaps are not shrinking meaningfully across iterations,
+      signal diminishing returns — additional research is unlikely
+      to produce substantial new findings.
+
+      Gap identification:
+      For each gap, provide a specific question, estimate its
+      priority based on how much it would improve coverage, and
+      estimate difficulty. Focus on gaps that would move the
+      lowest-scoring dimension upward.
+
+      Be direct. If the research is strong, say so. If it has
+      clear holes, name them.
+    inputs:
+      values:
+        topic:
+          schema: { type: string }
+          value: "${{ inputs.values.topic }}"
+        depth:
+          schema: { type: string }
+          value: "${{ inputs.values.depth }}"
+        findings:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.findings }}"
+        previous_gap_count:
+          schema: { type: number }
+          value: "${{ inputs.values.?previous_gap_count.orValue(0) }}"
+        plan_questions:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?plan_questions.orValue([]) }}"
+    outputs:
+      values:
+        completeness:
+          required: true
+          schema:
+            type: string
+            enum: [insufficient, sufficient]
+            description: Whether the accumulated findings meet the depth threshold
+        gaps:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                question:
+                  type: string
+                  description: Specific question to address
+                priority:
+                  type: string
+                  enum: [high, medium, low]
+                difficulty:
+                  type: string
+                  enum: [easy, moderate, hard]
+                dimension:
+                  type: string
+                  enum: [breadth, depth, balance, conflict-resolution]
+                  description: Which coverage dimension this gap affects
+              required: [question, priority, difficulty, dimension]
+            description: Remaining gaps prioritized by impact
+        scores:
+          required: true
+          schema:
+            type: object
+            properties:
+              breadth:
+                type: number
+              depth:
+                type: number
+              balance:
+                type: number
+              conflict_resolution:
+                type: number
+            required: [breadth, depth, balance, conflict_resolution]
+            description: Scores per coverage dimension (0-100)
+        information_gain:
+          required: true
+          schema:
+            type: string
+            enum: [high, moderate, diminishing]
+            description: Whether research is still producing substantial new findings
+        summary:
+          required: true
+          schema:
+            type: string
+            description: Concise assessment of current research coverage
+outputs:
+  values:
+    completeness:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.assess.outputs.values.completeness }}"
+    gaps:
+      required: true
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            question:
+              type: string
+            priority:
+              type: string
+            difficulty:
+              type: string
+            dimension:
+              type: string
+          required: [question, priority, difficulty, dimension]
+      value: "${{ tasks.assess.outputs.values.gaps }}"
+    scores:
+      required: true
+      schema: { type: object }
+      value: "${{ tasks.assess.outputs.values.scores }}"
+    information_gain:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.assess.outputs.values.information_gain }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.assess.outputs.values.summary }}"

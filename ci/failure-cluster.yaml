@@ -1,0 +1,177 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/failure-cluster
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when an array of normalized CI failure records and aligned fingerprints need exact grouping by cheap-fingerprint. Generic clustering only; domain-specific merge/split behavior should be encoded in the supplied fingerprints.
+tags: ["ci", "cluster", "dedup", "triage"]
+inputs:
+  values:
+    failures:
+      required: true
+      description: Aligned array of normalized CI failure records, one per failed job or shard
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            job_id:
+              type: string
+            shard_id:
+              type: string
+            test_name:
+              type: string
+            failed_step:
+              type: string
+            category:
+              type: string
+            error_signature:
+              type: string
+            prior_ai_summary:
+              type: string
+            original_artifact_evidence:
+              type: array
+              items:
+                type: object
+                properties:
+                  source:
+                    type: string
+                  category:
+                    type: string
+                  summary:
+                    type: string
+                  excerpt:
+                    type: string
+            evidence_brief:
+              type: object
+              properties:
+                headline:
+                  type: string
+                failure_shape:
+                  type: string
+                artifact_signal:
+                  type: string
+                routing_notes:
+                  type: string
+          required: [job_id, test_name, failed_step, category, error_signature]
+    fingerprints:
+      required: true
+      description: Per-failure fingerprint records aligned by index with `failures`. Each entry has `index`, `cheap_fingerprint`, and `cluster_label`.
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            index:
+              type: number
+            cheap_fingerprint:
+              type: string
+            cluster_label:
+              type: string
+          required: [index, cheap_fingerprint, cluster_label]
+tasks:
+  cluster:
+    quality-gate: "${{ has(outputs.values.clusters) }}"
+    instructions: |-
+      Group the provided failures into clusters by their cheap-fingerprint.
+
+      Rules:
+      - First sort `fingerprints` by numeric `index`; matrix append order is not guaranteed. Use each fingerprint's `index` to read the aligned failure from `failures`.
+      - Two failures belong to the same cluster iff their `cheap_fingerprint` strings are byte-identical. Do not fuzzy-match.
+      - Each cluster references its members by `index` (the original position in the `failures` array).
+      - Pick one member as the cluster representative: prefer the member with the richest original evidence, then the lowest index. Richness order:
+        1. non-empty `original_artifact_evidence`,
+        2. non-empty `prior_ai_summary`,
+        3. non-empty `evidence_brief`,
+        4. lowest index.
+      - Use the representative's `cluster_label` as the cluster's early cluster label. This label describes the pre-investigation failure surface and is not a final issue title.
+      - Sort clusters by their lowest member index so output order is stable across parallel/matrix scheduling.
+      - In `rationale`, name the shared fingerprint, list member shard_ids when available, and briefly explain why the exact match was grouped. Do not add domain-specific ownership or root-cause claims here; this task only groups exact fingerprints.
+
+      Also return two flat arrays aligned with `clusters` by index:
+      - `cluster_fingerprints`: one cheap_fingerprint string per cluster.
+      - `cluster_labels`: one cluster_label string per cluster.
+
+      If the input arrays are empty, return `clusters: []`, `cluster_fingerprints: []`, `cluster_labels: []`, and a `summary` saying there was nothing to cluster.
+    inputs:
+      values:
+        failures:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.failures }}"
+        fingerprints:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.fingerprints }}"
+    outputs:
+      values:
+        cluster_fingerprints:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+            description: Flat array of cheap_fingerprint per cluster, aligned by index
+        cluster_labels:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+            description: Flat array of cluster_label per cluster, aligned by index
+        clusters:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                cheap_fingerprint:
+                  type: string
+                cluster_label:
+                  type: string
+                representative_index:
+                  type: number
+                  description: Index in the input failures array of the chosen representative member
+                member_indices:
+                  type: array
+                  items:
+                    type: number
+                  description: Indices of all member failures
+                member_shard_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: shard_id values for the members when available
+                member_count:
+                  type: number
+                rationale:
+                  type: string
+                  description: Short note describing the cluster and its membership
+              required: [cheap_fingerprint, cluster_label, representative_index, member_indices, member_count]
+            description: Clusters of failures sharing one cheap_fingerprint
+        summary:
+          required: true
+          schema:
+            type: string
+            description: Short summary of clustering outcome
+outputs:
+  values:
+    clusters:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.cluster.outputs.values.clusters }}"
+    cluster_fingerprints:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.cluster.outputs.values.cluster_fingerprints }}"
+    cluster_labels:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.cluster.outputs.values.cluster_labels }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.cluster.outputs.values.summary }}"

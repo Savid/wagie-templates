@@ -1,0 +1,307 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/code-review-adversarial
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when code needs rigorous adversarial review; an optimistic actor generates
+  or improves code while a paranoid critic finds vulnerabilities, iterating until
+  the critic approves or rounds are exhausted.
+tags: ["code-review", "adversarial", "actor-critic", "red-team"]
+inputs:
+  values:
+    diff:
+      required: true
+      description: "Git diff output or equivalent patch content (e.g. git diff main...HEAD)"
+      schema: { type: string }
+    focus:
+      description: What the adversarial critic should focus on
+      schema: { type: string, default: "security, correctness, error handling, edge cases" }
+    repo:
+      description: "Repository identifier (e.g. owner/name) for context"
+      schema: { type: string }
+    ref:
+      description: "Git ref being reviewed (e.g. branch name, PR number)"
+      schema: { type: string }
+    context:
+      description: Optional repository or architectural context
+      schema: { type: string }
+    max_rounds:
+      description: Maximum actor-critic rounds (3-5 eliminates 90%+ of issues)
+      schema: { type: number, default: 3 }
+tasks:
+  adversarial:
+    inputs:
+      values:
+        diff:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.diff }}"
+        focus:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?focus.orValue('security, correctness, error handling, edge cases') }}"
+        repo:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?repo.orValue('') }}"
+        ref:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?ref.orValue('') }}"
+        context:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?context.orValue('') }}"
+    loop:
+      max: "${{ inputs.values.?max_rounds.orValue(3) }}"
+      until: "${{ outputs.values.approved }}"
+      onMaxExhausted: continue
+    tasks:
+      critic:
+        quality-gate: "${{ has(outputs.values.approved) && outputs.values.score >= 0 && outputs.values.score <= 100 && has(outputs.values.findings) && has(outputs.values.reasoning) && size(outputs.values.reasoning) > 0 }}"
+        instructions: |
+          You are a paranoid, adversarial code critic. Your default stance is
+          that the code is broken, vulnerable, or incorrect until you are
+          convinced otherwise.
+
+          SCOPE: Only flag issues in lines that were added or modified in the
+          diff (lines starting with +). Do not flag issues in unchanged
+          context lines.
+
+          Your review must be thorough and hostile — actively try to break
+          the code mentally. Think like an attacker, a malicious user, a
+          chaotic production environment.
+
+          For each issue found:
+          - Describe the exact attack vector, failure mode, or edge case
+          - Show a concrete example of how it fails or can be exploited
+          - Rate severity: critical (exploitable/data-loss), high (likely
+            failure), medium (edge case), low (hardening opportunity)
+
+          Approve ONLY when you cannot find any critical or high severity
+          issues. Medium and low issues alone are not grounds for rejection.
+
+          If previous findings were addressed, verify the fixes actually
+          work and did not introduce new problems. Do not re-flag issues
+          that were properly fixed.
+
+          Dismissed findings: You may receive dismissed_findings — issues
+          from prior rounds that the actor dismissed as false positives with
+          reasoning. You MUST respect these dismissals unless the code has
+          materially changed in a way that invalidates the reasoning. If you
+          disagree with a dismissal, note it in your reasoning but do not
+          re-flag it as a finding. Being paranoid does not mean ignoring
+          evidence — a well-reasoned dismissal is evidence.
+
+          Score: 90+ for approval-worthy, 70-89 minor issues only,
+          50-69 notable problems, below 50 serious concerns.
+        inputs:
+          values:
+            diff:
+              schema: { type: string }
+              value: "${{ loop.current_code.orValue(inputs.values.diff) }}"
+            focus:
+              schema: { type: string }
+              value: "${{ inputs.values.focus }}"
+            repo:
+              schema: { type: string }
+              value: "${{ inputs.values.repo }}"
+            ref:
+              schema: { type: string }
+              value: "${{ inputs.values.ref }}"
+            context:
+              schema: { type: string }
+              value: "${{ inputs.values.context }}"
+            findings_history:
+              schema: { type: string }
+              value: "${{ loop.findings_history.orValue('') }}"
+            dismissed_findings:
+              schema: { type: array, items: { type: object } }
+              value: "${{ loop.dismissed_findings.orValue([]) }}"
+        outputs:
+          values:
+            approved:
+              required: true
+              schema: { type: boolean, description: Whether the critic approves the code }
+            score:
+              required: true
+              schema: { type: number, description: Critic's score 0-100 }
+            findings:
+              required: true
+              schema:
+                type: array
+                description: Issues found by the adversarial critic
+                items:
+                  type: object
+                  properties:
+                    severity:
+                      type: string
+                      enum: [critical, high, medium, low]
+                    location:
+                      type: string
+                      description: "File path and line reference (e.g. src/auth.ts:42)"
+                    observation:
+                      type: string
+                    attack_vector:
+                      type: string
+                      description: How the issue can be triggered or exploited
+                    suggestion:
+                      type: string
+                  required: [severity, location, observation, suggestion]
+            reasoning:
+              required: true
+              schema: { type: string, description: Critic's overall assessment }
+      actor:
+        needs: [critic]
+        if: "${{ tasks.critic.outputs.values.approved != true }}"
+        quality-gate: "${{ has(outputs.values.fixes_applied) }}"
+        instructions: |
+          You are an optimistic, skilled developer responding to an
+          adversarial review. You need a worker with tool-use to read and
+          revise the code. The critic is paranoid by design — take their
+          findings seriously but apply engineering judgment.
+
+          For each finding:
+          - If the attack vector is real: fix it with the simplest correct
+            solution
+          - If the finding is valid but the severity is overstated: fix it
+            anyway, the cost of fixing is low
+          - If the finding is a false positive: leave the code unchanged
+            and add it to false_positives with specific reasoning. Be
+            detailed — your reasoning will be shown to the critic in the
+            next round to prevent re-flagging
+
+          You may receive previously dismissed findings. Do not re-dismiss
+          findings already in the dismissed list — only add new ones.
+
+          Do not over-engineer defenses. A targeted fix is better than a
+          rewrite. Do not add complexity beyond what the findings require.
+
+          Return the complete revised code with all fixes applied.
+        inputs:
+          values:
+            diff:
+              schema: { type: string }
+              value: "${{ loop.current_code.orValue(inputs.values.diff) }}"
+            findings:
+              schema: { type: array, items: { type: object } }
+              value: "${{ tasks.critic.outputs.values.findings }}"
+            context:
+              schema: { type: string }
+              value: "${{ inputs.values.context }}"
+            dismissed_findings:
+              schema: { type: array, items: { type: object } }
+              value: "${{ loop.dismissed_findings.orValue([]) }}"
+        outputs:
+          values:
+            revised_code:
+              required: true
+              schema: { type: string, description: Complete code with fixes applied }
+            fixes_applied:
+              required: true
+              schema:
+                type: array
+                description: Log of fixes applied in this round
+                items:
+                  type: object
+                  properties:
+                    finding:
+                      type: string
+                      description: The finding that was addressed
+                    change:
+                      type: string
+                      description: What was changed and why
+                  required: [finding, change]
+            false_positives:
+              required: true
+              schema:
+                type: array
+                description: Findings dismissed as false positives with reasoning
+                items:
+                  type: object
+                  properties:
+                    finding:
+                      type: string
+                      description: The finding dismissed as false positive
+                    reasoning:
+                      type: string
+                      description: Why this is a false positive
+                  required: [finding, reasoning]
+    outputs:
+      values:
+        current_code:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.actor.outputs.values.?revised_code.orValue(loop.current_code.orValue(inputs.values.diff)) }}"
+        approved:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.critic.outputs.values.approved }}"
+        findings_history:
+          required: true
+          schema: { type: string }
+          value: '${{ loop.findings_history.orValue('''') + "\n---Round---\nScore: " + string(tasks.critic.outputs.values.score) + "\n" + tasks.critic.outputs.values.reasoning }}'
+        dismissed_findings:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                finding:
+                  type: string
+                reasoning:
+                  type: string
+              required: [finding, reasoning]
+          value: "${{ loop.dismissed_findings.orValue([]) + tasks.actor.outputs.values.?false_positives.orValue([]) }}"
+        round_scores:
+          required: true
+          schema: { type: string }
+          value: "${{ loop.round_scores.orValue('') + string(tasks.critic.outputs.values.score) + ',' }}"
+        converged:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.critic.outputs.values.approved }}"
+        rounds_used:
+          required: true
+          schema: { type: number }
+          value: "${{ loop.rounds_used.orValue(0.0) + 1.0 }}"
+outputs:
+  values:
+    result:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.adversarial.outputs.values.current_code }}"
+    approved:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.adversarial.outputs.values.approved }}"
+    converged:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.adversarial.outputs.values.converged }}"
+    rounds_used:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.adversarial.outputs.values.rounds_used }}"
+    findings_history:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.adversarial.outputs.values.findings_history }}"
+    dismissed_findings:
+      required: true
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            finding:
+              type: string
+            reasoning:
+              type: string
+          required: [finding, reasoning]
+      value: "${{ tasks.adversarial.outputs.values.dismissed_findings }}"

@@ -1,0 +1,149 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/kurtosis-devnet-snapshot
+version: "0.1.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when you have a Kurtosis ethereum-package config and want to launch it on a
+  remote panda-compute sandbox, capture VM snapshots of the network at chosen
+  epochs, and get back the sandbox id and per-epoch snapshot ids.
+tags: ["kurtosis", "ethereum", "ethpandaops", "ethereum-package", "devnet", "snapshot", "epoch", "panda-compute", "sandbox", "remote"]
+inputs:
+  values:
+    devnet:
+      required: true
+      description: Devnet name this network represents, used for reference and snapshot notes
+      schema: { type: string }
+    snapshot_epochs:
+      description: Epochs to snapshot the network at, ascending, e.g. [0, 5, 10]. Epoch 0 captures the fresh network.
+      schema:
+        type: array
+        items: { type: number }
+        default: [0]
+    compute_template:
+      description: panda-compute template (base image with kurtosis preinstalled) to provision the sandbox from
+      schema: { type: string, default: devnet }
+    package_ref:
+      description: Kurtosis package reference to launch
+      schema: { type: string, default: github.com/ethpandaops/ethereum-package }
+    sandbox_ttl:
+      description: Optional sandbox TTL (e.g. 2h) to bound the VM lifetime
+      schema: { type: string }
+  artifacts:
+    config:
+      required: true
+      contentType: text/yaml
+      description: Kurtosis ethereum-package args-file to launch on the sandbox
+tasks:
+  provision:
+    quality-gate: "${{ has(outputs.values.sandbox_id) && size(outputs.values.sandbox_id) > 0 }}"
+    instructions: |-
+      Provision a remote sandbox with `panda compute` from the named compute
+      template (a base image with the `kurtosis` CLI and Docker preinstalled). Do
+      not launch any network yet.
+
+      - `panda compute sandboxes create --template <compute_template>` (add
+        `--ttl` when a TTL is given). Creation is async — poll the returned
+        operation until ready.
+
+      Return the sandbox id.
+    inputs:
+      values:
+        compute_template:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?compute_template.orValue('devnet') }}"
+        sandbox_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
+    outputs:
+      values:
+        sandbox_id:
+          required: true
+          schema: { type: string, description: panda-compute sandbox id }
+  deploy_and_snapshot:
+    needs: [provision]
+    quality-gate: "${{ outputs.values.network_ready && size(outputs.values.snapshots) > 0 }}"
+    instructions: |-
+      Launch the Kurtosis ethereum devnet on the provisioned sandbox, then capture
+      VM snapshots at the target epochs. This is one time-sensitive flow — track
+      the network's epoch and snapshot as it crosses each target, so do not split
+      launch from snapshotting.
+
+      - First, read the network's slot timing (slots per epoch and seconds per
+        slot) from the `config` rather than assuming mainnet values. Snapshot at
+        the START of each target epoch: epoch 0 starts at genesis, and epoch N
+        starts at genesis + N * slots_per_epoch * seconds_per_slot. Pre-compute
+        each target's wall-clock offset from genesis before launch so early-epoch
+        snapshots are not missed.
+      - Get the sandbox connection details via
+        `panda compute sandboxes get <sandbox_id>` and follow them to connect.
+        Copy the `config` artifact onto the sandbox, then start the network there:
+        `kurtosis run --args-file <config> <package_ref>`. Capture the genesis
+        time and confirm it is producing blocks.
+      - Note: the sandbox clock may differ from local time (it can be restored
+        from an old snapshot); that is expected. Just use the sandbox's own clock
+        as the time reference when scheduling snapshots.
+      - For each epoch in `snapshot_epochs`, in ascending order, snapshot the
+        network at that epoch's start (epoch 0 is the fresh network at genesis).
+        Take the snapshot from the orchestrator side with `panda compute`, not
+        from within the sandbox session:
+        `panda compute sandboxes snapshot <sandbox_id> --note "<devnet> epoch <n>"`.
+        Snapshots are async — poll the operation and resolve the resulting
+        snapshot id (e.g. via `panda compute sandboxes snapshots <sandbox_id>`).
+      - Record one entry per epoch as `{ epoch, snapshot }` and preserve order.
+    inputs:
+      values:
+        sandbox_id:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.provision.outputs.values.sandbox_id }}"
+        package_ref:
+          schema: { type: string }
+          value: "${{ inputs.values.?package_ref.orValue('github.com/ethpandaops/ethereum-package') }}"
+        snapshot_epochs:
+          required: true
+          schema: { type: array, items: { type: number } }
+          value: "${{ inputs.values.?snapshot_epochs.orValue([0]) }}"
+        devnet:
+          schema: { type: string }
+          value: "${{ inputs.values.devnet }}"
+      artifacts:
+        config:
+          ref: inputs.artifacts.config
+    outputs:
+      values:
+        network_ready:
+          required: true
+          schema: { type: boolean, description: True if the network reached genesis and is producing blocks }
+        snapshots:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                epoch: { type: number }
+                snapshot: { type: string }
+              required: [epoch, snapshot]
+            description: Snapshot id captured at each target epoch, in order
+outputs:
+  values:
+    sandbox_id:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.provision.outputs.values.sandbox_id }}"
+    snapshots:
+      required: true
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            epoch: { type: number }
+            snapshot: { type: string }
+          required: [epoch, snapshot]
+      value: "${{ tasks.deploy_and_snapshot.outputs.values.snapshots }}"

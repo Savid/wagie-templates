@@ -1,0 +1,642 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/assertoor-ci-investigate
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use after an assertoor-test scheduled run to triage its failures into long-lived per-root-cause GitHub issues, with optional local reproduction and bug-hunt investigation per new cluster. Fetches the failing run, parses per-shard artifacts, fingerprints + clusters by root cause, skips fingerprints already covered by any existing issue, compares each new cluster against its nearest previous successful baseline, reproduces representative failures on Kurtosis workers, runs the bug-hunt loop against each reproduced network, classifies the root cause, and creates one issue per new cluster.
+tags: ["ci", "assertoor", "ethereum", "ethpandaops", "triage", "nightly", "auto-debug", "kurtosis", "bug-hunt"]
+inputs:
+  values:
+    source_repo:
+      description: GitHub repository whose failing CI run is being triaged. Workflow runs and artifacts are read from here. GitHub issue side effects land in `issue_repo`, or in `source_repo` when `issue_repo` is empty.
+      schema: { type: string, default: "ethpandaops/assertoor-test" }
+    issue_repo:
+      description: "GitHub repository where ci-investigate creates issues. When empty, falls back to `source_repo`."
+      schema: { type: string, default: "" }
+    workflow_ref:
+      description: Workflow file path or filename to triage on `source_repo`. Defaults to the nightly scheduled run.
+      schema: { type: string, default: "run-scheduled.yml" }
+    run_id:
+      description: Specific run id to triage; when empty, the latest completed scheduled workflow run is selected and the template no-ops when that latest completed run is green/non-failing.
+      schema: { type: string, default: "" }
+    skip_reproduction:
+      description: When true, the per-cluster matrix skips the kurtosis reproduction + bug-hunt steps entirely and renders a triage-only report. Useful for cheap dry runs.
+      schema: { type: boolean, default: false }
+    max_bug_hunt_rounds:
+      description: Maximum probe rounds for the per-cluster bug-hunt loop. Assertoor CI usually stops after one sufficient round and leaves deeper attribution to source-dive.
+      schema: { type: number, default: 3 }
+    reproduction_attempt_timeout_minutes:
+      description: Maximum minutes the assertoor watcher waits per reproduction attempt before declaring not-reproduced. Total wall-clock budget per cluster scales with `reproduction_attempts`.
+      schema: { type: number, default: 360 }
+    reproduction_attempts:
+      description: >-
+        How many times each cluster's reproduce task retries launch then await_assertoor before giving up. Forwarded to `assertoor-ci-kurtosis-reproduce`. The loop stops early on the first successful reproduction. Every attempt preserves the original assertoor timeout values and uses the selected test scope. Default 4 gives ~94% cumulative odds for a 50% per-attempt bug and ~68% for a 25% per-attempt bug. Bump for stubborn / rare non-deterministic bugs; set to 1 to disable retries.
+      schema: { type: number, default: 4 }
+    narrow_to_failing_test:
+      description: Forwarded to `assertoor-ci-kurtosis-reproduce`. When true (default), reproduction patches the args file to run only the originally-failing assertoor test while preserving its stock YAML and timeout values. Set false for a faithful full-queue run when queue/order/state coupling is suspected.
+      schema: { type: boolean, default: true }
+    enable_source_dive:
+      description: When true and classification implicates code (framework-bug, framework-dependency, single-client, multi-client, devnet-network, config-issue, mixed), clones the implicated repo into the source-dive task workspace and runs an evidence-driven source review to surface candidate root-cause files and a suggested change description.
+      schema: { type: boolean, default: true }
+    discord_min_confidence:
+      description: Minimum notification confidence required for a created issue to be included in the Discord notification. Set to 0 or lower to notify for every created issue with a known classification.
+      schema: { type: number, default: 65 }
+  secrets:
+    gh_token:
+      required: false
+      description: Optional GitHub token secret passed to GitHub-facing child templates as GH_TOKEN. When unset, children use ambient gh authentication.
+    discord_webhook_url:
+      required: false
+      description: Optional Discord incoming webhook URL secret. When provided, the final issue-publish summary sends one best-effort Discord message after issue bodies are published.
+tasks:
+  fetch:
+    uses: dev.wagie/github-actions-failure-fetch@1.0.0
+    inputs:
+      values:
+        repo:
+          value: "${{ inputs.values.?source_repo.orValue('ethpandaops/assertoor-test') }}"
+        workflow_ref:
+          value: "${{ inputs.values.?workflow_ref.orValue('run-scheduled.yml') }}"
+        run_id:
+          value: "${{ inputs.values.?run_id.orValue('') }}"
+        artifact_patterns:
+          value: "${{ ['summary-*', 'enclave-dump-*', 'claude-code-output-*'] }}"
+        conclusion_filter:
+          value: "${{ ['failure', 'timed_out'] }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+  adapt:
+    needs: [fetch]
+    if: "${{ tasks.fetch.outputs.values.no_failures != true && size(tasks.fetch.outputs.values.failures) > 0 }}"
+    uses: dev.wagie/assertoor-ci-normalize@1.0.0
+    inputs:
+      values:
+        failures:
+          value: "${{ tasks.fetch.outputs.values.failures.map(f, {'job_id': f.?job_id.orValue(''), 'job_name': f.?job_name.orValue(''), 'conclusion': f.?conclusion.orValue(''), 'artifacts_dir': f.?artifacts_dir.orValue(''), 'artifact_names': f.?artifact_names.orValue([])}) }}"
+        run_id:
+          value: "${{ tasks.fetch.outputs.values.run_id }}"
+        run_url:
+          value: "${{ tasks.fetch.outputs.values.run_url }}"
+        head_sha:
+          value: "${{ tasks.fetch.outputs.values.head_sha }}"
+        run_started_at:
+          value: "${{ tasks.fetch.outputs.values.run_started_at }}"
+  issue_context:
+    needs: [adapt]
+    if: "${{ has(tasks.adapt.outputs.values.normalized_failures) && size(tasks.adapt.outputs.values.normalized_failures) > 0 }}"
+    uses: dev.wagie/ci-investigate-issue-context@1.0.0
+    inputs:
+      values:
+        target_repo:
+          value: "${{ inputs.values.?issue_repo.orValue('') != '' ? inputs.values.?issue_repo.orValue('') : inputs.values.?source_repo.orValue('ethpandaops/assertoor-test') }}"
+        max_issues:
+          value: "${{ 500.0 }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+  fingerprint_each:
+    needs: [adapt, issue_context]
+    if: "${{ has(tasks.adapt.outputs.values.normalized_failures) && size(tasks.adapt.outputs.values.normalized_failures) > 0 }}"
+    inputs:
+      values:
+        existing_issues:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ has(tasks.issue_context.outputs.values.issues) ? tasks.issue_context.outputs.values.issues : [] }}"
+    matrix:
+      axes:
+        failure:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.adapt.outputs.values.normalized_failures }}"
+    tasks:
+      fp_item:
+        inputs:
+          values:
+            failure:
+              required: true
+              schema: { type: object }
+              value: "${{ matrix.failure }}"
+            existing_issues:
+              required: true
+              schema: { type: array, items: { type: object } }
+              value: "${{ inputs.values.existing_issues }}"
+        tasks:
+          fp:
+            uses: dev.wagie/assertoor-ci-fingerprint@1.0.0
+            inputs:
+              values:
+                failure:
+                  value: "${{ {'job_id': inputs.values.failure.?job_id.orValue(''), 'job_name': inputs.values.failure.?job_name.orValue(''), 'shard_id': inputs.values.failure.?shard_id.orValue(''), 'test_name': inputs.values.failure.?test_name.orValue(''), 'failed_step': inputs.values.failure.?failed_step.orValue(''), 'category': inputs.values.failure.?category.orValue(''), 'error_signature': inputs.values.failure.?error_signature.orValue(''), 'prior_ai_summary': inputs.values.failure.?prior_ai_summary.orValue(''), 'failed_task_leaves': inputs.values.failure.?failed_task_leaves.orValue([]), 'affected_client_pairs': inputs.values.failure.?affected_client_pairs.orValue([]), 'client_pairs': inputs.values.failure.?client_pairs.orValue([]), 'original_artifact_evidence': inputs.values.failure.?original_artifact_evidence.orValue([]), 'component_hints': inputs.values.failure.?component_hints.orValue([]), 'evidence_brief': inputs.values.failure.?evidence_brief.orValue({})} }}"
+                existing_issues:
+                  value: "${{ inputs.values.existing_issues.map(e, {'number': e.?number.orValue(0.0), 'url': e.?url.orValue(''), 'title': e.?title.orValue(''), 'cheap_fingerprint': e.?cheap_fingerprint.orValue(''), 'classification': e.?classification.orValue(''), 'body_excerpt': e.?body_excerpt.orValue('')}) }}"
+        outputs:
+          values:
+            fingerprint:
+              required: true
+              schema:
+                type: object
+                properties:
+                  index:
+                    type: number
+                  cheap_fingerprint:
+                    type: string
+                  cluster_label:
+                    type: string
+                required: [index, cheap_fingerprint, cluster_label]
+              value: "${{ {'index': self.combo[0], 'cheap_fingerprint': tasks.fp.outputs.values.cheap_fingerprint, 'cluster_label': tasks.fp.outputs.values.cluster_label} }}"
+    outputs:
+      values:
+        fingerprints:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                index:
+                  type: number
+                cheap_fingerprint:
+                  type: string
+                cluster_label:
+                  type: string
+              required: [index, cheap_fingerprint, cluster_label]
+          value: "${{ tasks.fp_item.outputs.values.fingerprint }}"
+  cluster:
+    needs: [adapt, fingerprint_each]
+    if: "${{ has(tasks.adapt.outputs.values.normalized_failures) && size(tasks.adapt.outputs.values.normalized_failures) > 0 }}"
+    uses: dev.wagie/failure-cluster@1.0.0
+    inputs:
+      values:
+        failures:
+          value: "${{ tasks.adapt.outputs.values.normalized_failures.map(f, {'job_id': f.?job_id.orValue(''), 'shard_id': f.?shard_id.orValue(''), 'test_name': f.?test_name.orValue(''), 'failed_step': f.?failed_step.orValue(''), 'category': f.?category.orValue(''), 'error_signature': f.?error_signature.orValue(''), 'prior_ai_summary': f.?prior_ai_summary.orValue(''), 'original_artifact_evidence': f.?original_artifact_evidence.orValue([]), 'evidence_brief': f.?evidence_brief.orValue({})}) }}"
+        fingerprints:
+          value: "${{ has(tasks.fingerprint_each.outputs.values.fingerprints) ? tasks.fingerprint_each.outputs.values.fingerprints : [] }}"
+  state_check:
+    needs: [issue_context, cluster]
+    if: "${{ has(tasks.cluster.outputs.values.clusters) && size(tasks.cluster.outputs.values.clusters) > 0 }}"
+    uses: dev.wagie/ci-investigate-issue-state-check@1.0.0
+    inputs:
+      values:
+        issues:
+          value: "${{ (has(tasks.issue_context.outputs.values.issues) ? tasks.issue_context.outputs.values.issues : []).map(i, {'number': i.?number.orValue(0.0), 'url': i.?url.orValue(''), 'title': i.?title.orValue(''), 'created_at': i.?created_at.orValue(''), 'updated_at': i.?updated_at.orValue(''), 'labels': i.?labels.orValue([]), 'cheap_fingerprint': i.?cheap_fingerprint.orValue(''), 'schema_version': i.?schema_version.orValue(0.0), 'classification': i.?classification.orValue(''), 'body_excerpt': i.?body_excerpt.orValue('')}) }}"
+        fingerprints:
+          value: "${{ tasks.cluster.outputs.values.cluster_fingerprints }}"
+  investigate_each:
+    needs: [fetch, adapt, cluster, state_check]
+    inputs:
+      values:
+        clusters:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ has(tasks.cluster.outputs.values.clusters) ? tasks.cluster.outputs.values.clusters : [] }}"
+        cluster_fingerprints:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ has(tasks.cluster.outputs.values.cluster_fingerprints) ? tasks.cluster.outputs.values.cluster_fingerprints : [] }}"
+        cluster_labels:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ has(tasks.cluster.outputs.values.cluster_labels) ? tasks.cluster.outputs.values.cluster_labels : [] }}"
+        statuses:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ has(tasks.state_check.outputs.values.statuses) ? tasks.state_check.outputs.values.statuses : [] }}"
+        normalized_failures:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ has(tasks.adapt.outputs.values.normalized_failures) ? tasks.adapt.outputs.values.normalized_failures : [] }}"
+        run_id:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.fetch.outputs.values.run_id }}"
+        run_url:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.fetch.outputs.values.run_url }}"
+        run_started_at:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.fetch.outputs.values.run_started_at }}"
+        head_branch:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.fetch.outputs.values.head_branch }}"
+        source_repo:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?source_repo.orValue('ethpandaops/assertoor-test') }}"
+        workflow_ref:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?workflow_ref.orValue('run-scheduled.yml') }}"
+        skip_reproduction:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?skip_reproduction.orValue(false) }}"
+        max_bug_hunt_rounds:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?max_bug_hunt_rounds.orValue(3.0) }}"
+        reproduction_attempt_timeout_minutes:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?reproduction_attempt_timeout_minutes.orValue(360.0) }}"
+        reproduction_attempts:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?reproduction_attempts.orValue(4.0) }}"
+        narrow_to_failing_test:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?narrow_to_failing_test.orValue(true) }}"
+        enable_source_dive:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?enable_source_dive.orValue(true) }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+    matrix:
+      axes:
+        work_item:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.state_check.outputs.values.items }}"
+    tasks:
+      item:
+        inputs:
+          values:
+            cluster_index:
+              required: true
+              schema: { type: number }
+              value: "${{ matrix.work_item.?cluster_index.orValue(0.0) }}"
+            representative_raw:
+              required: true
+              schema: { type: object }
+              value: "${{ inputs.values.normalized_failures[?int(inputs.values.clusters[?int(matrix.work_item.?cluster_index.orValue(0.0))].orValue({}).?representative_index.orValue(0.0))].orValue({}) }}"
+            clusters:
+              required: true
+              schema: { type: array, items: { type: object } }
+              value: "${{ inputs.values.clusters }}"
+            cluster_fingerprints:
+              required: true
+              schema: { type: array, items: { type: string } }
+              value: "${{ inputs.values.cluster_fingerprints }}"
+            cluster_labels:
+              required: true
+              schema: { type: array, items: { type: string } }
+              value: "${{ inputs.values.cluster_labels }}"
+            statuses:
+              required: true
+              schema: { type: array, items: { type: object } }
+              value: "${{ inputs.values.statuses }}"
+            run_id:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.run_id }}"
+            run_url:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.run_url }}"
+            run_started_at:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.run_started_at }}"
+            head_branch:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.head_branch }}"
+            source_repo:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.source_repo }}"
+            workflow_ref:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.workflow_ref }}"
+            skip_reproduction:
+              required: true
+              schema: { type: boolean }
+              value: "${{ inputs.values.skip_reproduction }}"
+            max_bug_hunt_rounds:
+              required: true
+              schema: { type: number }
+              value: "${{ inputs.values.max_bug_hunt_rounds }}"
+            reproduction_attempt_timeout_minutes:
+              required: true
+              schema: { type: number }
+              value: "${{ inputs.values.reproduction_attempt_timeout_minutes }}"
+            reproduction_attempts:
+              required: true
+              schema: { type: number }
+              value: "${{ inputs.values.reproduction_attempts }}"
+            narrow_to_failing_test:
+              required: true
+              schema: { type: boolean }
+              value: "${{ inputs.values.narrow_to_failing_test }}"
+            enable_source_dive:
+              required: true
+              schema: { type: boolean }
+              value: "${{ inputs.values.enable_source_dive }}"
+          secrets:
+            gh_token:
+              ref: inputs.secrets.gh_token
+        tasks:
+          investigate:
+            uses: dev.wagie/assertoor-ci-cluster-investigate@1.0.0
+            inputs:
+              values:
+                cluster_idx:
+                  value: "${{ inputs.values.cluster_index }}"
+                cluster:
+                  value: "${{ inputs.values.clusters[?int(inputs.values.cluster_index)].orValue({}) }}"
+                cheap_fingerprint:
+                  value: "${{ inputs.values.cluster_fingerprints[?int(inputs.values.cluster_index)].orValue('') }}"
+                cluster_label:
+                  value: "${{ inputs.values.cluster_labels[?int(inputs.values.cluster_index)].orValue('') }}"
+                status:
+                  value: "${{ inputs.values.statuses[?int(inputs.values.cluster_index)].orValue({}) }}"
+                representative:
+                  value: "${{ {'test_name': inputs.values.representative_raw.?test_name.orValue(''), 'failed_step': inputs.values.representative_raw.?failed_step.orValue(''), 'root_failed_step': inputs.values.representative_raw.?root_failed_step.orValue(''), 'category': inputs.values.representative_raw.?category.orValue(''), 'error_signature': inputs.values.representative_raw.?error_signature.orValue(''), 'shard_id': inputs.values.representative_raw.?shard_id.orValue(''), 'head_sha': inputs.values.representative_raw.?head_sha.orValue(''), 'run_started_at': inputs.values.representative_raw.?run_started_at.orValue(''), 'kurtosis_params_path': inputs.values.representative_raw.?kurtosis_params_path.orValue(''), 'prior_ai_summary': inputs.values.representative_raw.?prior_ai_summary.orValue(''), 'log_excerpts': inputs.values.representative_raw.?log_excerpts.orValue([]), 'evidence_brief': inputs.values.representative_raw.?evidence_brief.orValue({}), 'artifact_coverage': inputs.values.representative_raw.?artifact_coverage.orValue({}), 'runtime_components': inputs.values.representative_raw.?runtime_components.orValue([]), 'package_runtime_identity': inputs.values.representative_raw.?package_runtime_identity.orValue({}), 'original_artifact_evidence': inputs.values.representative_raw.?original_artifact_evidence.orValue([]), 'affected_client_pairs': inputs.values.representative_raw.?affected_client_pairs.orValue([]), 'failed_task_leaves': inputs.values.representative_raw.?failed_task_leaves.orValue([]), 'component_hints': inputs.values.representative_raw.?component_hints.orValue([]), 'client_pairs': inputs.values.representative_raw.?client_pairs.orValue([])} }}"
+                skip_reproduction:
+                  value: "${{ inputs.values.skip_reproduction }}"
+                max_bug_hunt_rounds:
+                  value: "${{ inputs.values.max_bug_hunt_rounds }}"
+                reproduction_attempt_timeout_minutes:
+                  value: "${{ inputs.values.reproduction_attempt_timeout_minutes }}"
+                reproduction_attempts:
+                  value: "${{ inputs.values.reproduction_attempts }}"
+                narrow_to_failing_test:
+                  value: "${{ inputs.values.narrow_to_failing_test }}"
+                enable_source_dive:
+                  value: "${{ inputs.values.enable_source_dive }}"
+                source_repo:
+                  value: "${{ inputs.values.source_repo }}"
+                enclave_name:
+                  value: "${{ 'ci-investigate-' + inputs.values.run_id + '-' + string(int(inputs.values.cluster_index)) }}"
+                workflow_ref:
+                  value: "${{ inputs.values.workflow_ref }}"
+                head_branch:
+                  value: "${{ inputs.values.head_branch }}"
+                run_id:
+                  value: "${{ inputs.values.run_id }}"
+                run_url:
+                  value: "${{ inputs.values.run_url }}"
+                run_started_at:
+                  value: "${{ inputs.values.run_started_at }}"
+              secrets:
+                gh_token:
+                  ref: inputs.secrets.gh_token
+        outputs:
+          values:
+            raw_finding:
+              required: true
+              schema: { type: object }
+              value: "${{ tasks.investigate.outputs.values.raw_finding }}"
+    outputs:
+      values:
+        raw_findings:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.item.outputs.values.raw_finding }}"
+  render_cluster_reports:
+    needs: [fetch, investigate_each]
+    uses: dev.wagie/assertoor-ci-issue-render@1.0.0
+    inputs:
+      values:
+        raw_findings:
+          value: "${{ has(tasks.investigate_each.outputs.values.raw_findings) ? tasks.investigate_each.outputs.values.raw_findings : [] }}"
+        target_repo:
+          value: "${{ inputs.values.?issue_repo.orValue('') != '' ? inputs.values.?issue_repo.orValue('') : inputs.values.?source_repo.orValue('ethpandaops/assertoor-test') }}"
+        run_id:
+          value: "${{ tasks.fetch.outputs.values.run_id }}"
+        run_url:
+          value: "${{ tasks.fetch.outputs.values.run_url }}"
+        run_started_at:
+          value: "${{ tasks.fetch.outputs.values.run_started_at }}"
+  publish:
+    needs: [fetch, render_cluster_reports]
+    uses: dev.wagie/ci-investigate-issue-publish-by-fingerprint@1.0.0
+    inputs:
+      values:
+        target_repo:
+          value: "${{ inputs.values.?issue_repo.orValue('') != '' ? inputs.values.?issue_repo.orValue('') : inputs.values.?source_repo.orValue('ethpandaops/assertoor-test') }}"
+        cluster_reports:
+          value: "${{ (has(tasks.render_cluster_reports.outputs.values.cluster_reports) ? tasks.render_cluster_reports.outputs.values.cluster_reports : []).map(c, {'cheap_fingerprint': c.?cheap_fingerprint.orValue(''), 'issue_title': c.?issue_title.orValue(''), 'classification': c.?classification.orValue(''), 'diagnosis_confidence': c.?diagnosis_confidence.orValue(0.0), 'notification_confidence': c.?notification_confidence.orValue(0.0), 'confidence_bucket': c.?confidence_bucket.orValue(''), 'issue_body_md': c.?issue_body_md.orValue(''), 'labels': c.?labels.orValue([])}) }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+  report_run:
+    needs: [fetch, adapt, cluster, state_check, investigate_each, render_cluster_reports, publish]
+    if: "${{ tasks.fetch.outputs.values.no_failures != true }}"
+    uses: dev.wagie/assertoor-ci-run-report@1.0.0
+    inputs:
+      values:
+        source_repo:
+          value: "${{ inputs.values.?source_repo.orValue('ethpandaops/assertoor-test') }}"
+        issue_repo:
+          value: "${{ inputs.values.?issue_repo.orValue('') != '' ? inputs.values.?issue_repo.orValue('') : inputs.values.?source_repo.orValue('ethpandaops/assertoor-test') }}"
+        workflow_ref:
+          value: "${{ inputs.values.?workflow_ref.orValue('run-scheduled.yml') }}"
+        requested_run_id:
+          value: "${{ inputs.values.?run_id.orValue('') }}"
+        run_id:
+          value: "${{ tasks.fetch.outputs.values.run_id }}"
+        run_url:
+          value: "${{ tasks.fetch.outputs.values.run_url }}"
+        run_started_at:
+          value: "${{ tasks.fetch.outputs.values.run_started_at }}"
+        head_sha:
+          value: "${{ tasks.fetch.outputs.values.head_sha }}"
+        head_branch:
+          value: "${{ tasks.fetch.outputs.values.head_branch }}"
+        workflow_path:
+          value: "${{ tasks.fetch.outputs.values.workflow_path }}"
+        no_failures:
+          value: "${{ tasks.fetch.outputs.values.no_failures }}"
+        failures_count:
+          value: "${{ size(tasks.fetch.outputs.values.failures) }}"
+        clusters_count:
+          value: "${{ has(tasks.cluster.outputs.values.clusters) ? size(tasks.cluster.outputs.values.clusters) : 0 }}"
+        clusters:
+          value: "${{ has(tasks.cluster.outputs.values.clusters) ? tasks.cluster.outputs.values.clusters : [] }}"
+        state_check_statuses:
+          value: "${{ has(tasks.state_check.outputs.values.statuses) ? tasks.state_check.outputs.values.statuses : [] }}"
+        investigation_items:
+          value: "${{ has(tasks.state_check.outputs.values.items) ? tasks.state_check.outputs.values.items : [] }}"
+        skipped_items:
+          value: "${{ has(tasks.state_check.outputs.values.skipped_items) ? tasks.state_check.outputs.values.skipped_items : [] }}"
+        raw_findings:
+          value: "${{ has(tasks.investigate_each.outputs.values.raw_findings) ? tasks.investigate_each.outputs.values.raw_findings : [] }}"
+        cluster_reports:
+          value: "${{ has(tasks.render_cluster_reports.outputs.values.cluster_reports) ? tasks.render_cluster_reports.outputs.values.cluster_reports : [] }}"
+        publish_results:
+          value: "${{ has(tasks.publish.outputs.values.results) ? tasks.publish.outputs.values.results : [] }}"
+  notify_discord:
+    needs: [fetch, render_cluster_reports, publish]
+    if: "${{ has(tasks.publish.outputs.values.results) && size(tasks.publish.outputs.values.results) > 0 }}"
+    uses: dev.wagie/discord-webhook-notify@1.0.0
+    inputs:
+      values:
+        title:
+          value: "${{ 'Assertoor CI triage issues published' }}"
+        summary:
+          value: "${{ has(tasks.render_cluster_reports.outputs.values.summary) ? tasks.render_cluster_reports.outputs.values.summary : '' }}"
+        source_repo:
+          value: "${{ inputs.values.?source_repo.orValue('ethpandaops/assertoor-test') }}"
+        issue_repo:
+          value: "${{ inputs.values.?issue_repo.orValue('') != '' ? inputs.values.?issue_repo.orValue('') : inputs.values.?source_repo.orValue('ethpandaops/assertoor-test') }}"
+        workflow_ref:
+          value: "${{ inputs.values.?workflow_ref.orValue('run-scheduled.yml') }}"
+        run_id:
+          value: "${{ tasks.fetch.outputs.values.run_id }}"
+        run_url:
+          value: "${{ tasks.fetch.outputs.values.run_url }}"
+        cluster_reports:
+          value: "${{ has(tasks.render_cluster_reports.outputs.values.cluster_reports) ? tasks.render_cluster_reports.outputs.values.cluster_reports : [] }}"
+        publish_results:
+          value: "${{ tasks.publish.outputs.values.results }}"
+        min_confidence:
+          value: "${{ inputs.values.?discord_min_confidence.orValue(65.0) }}"
+      secrets:
+        webhook_url:
+          ref: inputs.secrets.discord_webhook_url
+  report_no_failures:
+    needs: [fetch]
+    if: "${{ tasks.fetch.outputs.values.no_failures == true }}"
+    uses: dev.wagie/assertoor-ci-run-report@1.0.0
+    inputs:
+      values:
+        source_repo:
+          value: "${{ inputs.values.?source_repo.orValue('ethpandaops/assertoor-test') }}"
+        issue_repo:
+          value: "${{ inputs.values.?issue_repo.orValue('') != '' ? inputs.values.?issue_repo.orValue('') : inputs.values.?source_repo.orValue('ethpandaops/assertoor-test') }}"
+        workflow_ref:
+          value: "${{ inputs.values.?workflow_ref.orValue('run-scheduled.yml') }}"
+        requested_run_id:
+          value: "${{ inputs.values.?run_id.orValue('') }}"
+        run_id:
+          value: "${{ tasks.fetch.outputs.values.run_id }}"
+        run_url:
+          value: "${{ tasks.fetch.outputs.values.run_url }}"
+        run_started_at:
+          value: "${{ tasks.fetch.outputs.values.run_started_at }}"
+        head_sha:
+          value: "${{ tasks.fetch.outputs.values.head_sha }}"
+        head_branch:
+          value: "${{ tasks.fetch.outputs.values.head_branch }}"
+        workflow_path:
+          value: "${{ tasks.fetch.outputs.values.workflow_path }}"
+        no_failures:
+          value: "${{ tasks.fetch.outputs.values.no_failures }}"
+        failures_count:
+          value: "${{ size(tasks.fetch.outputs.values.failures) }}"
+        clusters_count:
+          value: "${{ 0 }}"
+        clusters:
+          value: "${{ [] }}"
+        state_check_statuses:
+          value: "${{ [] }}"
+        investigation_items:
+          value: "${{ [] }}"
+        skipped_items:
+          value: "${{ [] }}"
+        raw_findings:
+          value: "${{ [] }}"
+        cluster_reports:
+          value: "${{ [] }}"
+        publish_results:
+          value: "${{ [] }}"
+outputs:
+  values:
+    run_id:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch.outputs.values.run_id }}"
+    run_url:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch.outputs.values.run_url }}"
+    no_failures:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.fetch.outputs.values.no_failures }}"
+    failures_count:
+      required: true
+      schema: { type: number }
+      value: "${{ size(tasks.fetch.outputs.values.failures) }}"
+    clusters_count:
+      required: true
+      schema: { type: number }
+      value: "${{ has(tasks.cluster.outputs.values.clusters) ? size(tasks.cluster.outputs.values.clusters) : 0 }}"
+    clusters:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ has(tasks.cluster.outputs.values.clusters) ? tasks.cluster.outputs.values.clusters : [] }}"
+    state_check_statuses:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ has(tasks.state_check.outputs.values.statuses) ? tasks.state_check.outputs.values.statuses : [] }}"
+    raw_findings:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ has(tasks.investigate_each.outputs.values.raw_findings) ? tasks.investigate_each.outputs.values.raw_findings : [] }}"
+    cluster_reports:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ has(tasks.render_cluster_reports.outputs.values.cluster_reports) ? tasks.render_cluster_reports.outputs.values.cluster_reports : [] }}"
+    publish_results:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ has(tasks.publish.outputs.values.results) ? tasks.publish.outputs.values.results : [] }}"
+    fetch_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch.outputs.values.summary }}"
+    cluster_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ has(tasks.cluster.outputs.values.summary) ? tasks.cluster.outputs.values.summary : '' }}"
+    state_check_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ has(tasks.state_check.outputs.values.summary) ? tasks.state_check.outputs.values.summary : '' }}"
+    publish_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ has(tasks.publish.outputs.values.summary) ? tasks.publish.outputs.values.summary : '' }}"
+    investigation_items:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ has(tasks.state_check.outputs.values.items) ? tasks.state_check.outputs.values.items : [] }}"
+    skipped_items:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ has(tasks.state_check.outputs.values.skipped_items) ? tasks.state_check.outputs.values.skipped_items : [] }}"
+    discord_notification_sent:
+      required: true
+      schema: { type: boolean }
+      value: "${{ has(tasks.notify_discord.outputs.values.sent) ? tasks.notify_discord.outputs.values.sent : false }}"
+    discord_notification_issue_count:
+      required: true
+      schema: { type: number }
+      value: "${{ has(tasks.notify_discord.outputs.values.issue_count) ? tasks.notify_discord.outputs.values.issue_count : 0.0 }}"
+    discord_notification_omitted_issue_count:
+      required: true
+      schema: { type: number }
+      value: "${{ has(tasks.notify_discord.outputs.values.omitted_issue_count) ? tasks.notify_discord.outputs.values.omitted_issue_count : 0.0 }}"
+    discord_notification_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ has(tasks.notify_discord.outputs.values.summary) ? tasks.notify_discord.outputs.values.summary : '' }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ has(tasks.report_run.outputs.values.summary) ? tasks.report_run.outputs.values.summary : (has(tasks.report_no_failures.outputs.values.summary) ? tasks.report_no_failures.outputs.values.summary : '') }}"
+  artifacts:
+    report:
+      ref: tasks.report_run.outputs.artifacts.report

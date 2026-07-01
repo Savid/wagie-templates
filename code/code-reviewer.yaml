@@ -1,0 +1,201 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/code-reviewer
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when code needs review from a single specialized perspective; applies a
+  detailed reviewer persona with focus area and principles to produce scored
+  findings.
+tags: ["code-review", "persona", "reviewer"]
+inputs:
+  values:
+    diff:
+      required: true
+      description: "Git diff output or equivalent patch content (e.g. git diff main...HEAD)"
+      schema: { type: string }
+    persona:
+      required: true
+      description: Reviewer persona defining role, focus area, and review principles
+      schema:
+        type: object
+        properties:
+          role:
+            type: string
+            description: "Reviewer role title (e.g. Security Auditor, Performance Engineer)"
+          focus:
+            type: string
+            description: "Specific areas to examine (e.g. SQL injection, XSS, secrets, OWASP Top 10)"
+          principles:
+            type: string
+            description: "Review stance and guiding principles (e.g. Assume vulnerable until proven otherwise)"
+          severity_default:
+            type: string
+            description: "Default severity for findings from this persona (critical, high, medium, low)"
+          requires_tools:
+            type: boolean
+            description: "Whether this persona needs tool-use capability (e.g. web search, doc lookup). When true, the worker must have tool-use in addition to reasoning."
+        required: [role, focus]
+    threshold:
+      description: Minimum score to pass (0-100)
+      schema: { type: number, default: 90 }
+    repo:
+      description: "Repository identifier (e.g. owner/name) for context"
+      schema: { type: string }
+    ref:
+      description: "Git ref being reviewed (e.g. branch name, PR number)"
+      schema: { type: string }
+    context:
+      description: Optional repository or architectural context to inform the review
+      schema: { type: string }
+    dismissed_findings:
+      description: "Findings from prior review iterations dismissed as false positives with reasoning. Reviewers must not re-flag these unless the code has materially changed."
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            finding:
+              type: string
+              description: The original finding that was dismissed
+            reasoning:
+              type: string
+              description: Why this was dismissed as a false positive
+          required: [finding, reasoning]
+tasks:
+  review:
+    quality-gate: "${{ outputs.values.score >= 0 && outputs.values.score <= 100 && has(outputs.values.verdict) && (outputs.values.verdict == 'pass' || outputs.values.verdict == 'fail') && has(outputs.values.findings) && has(outputs.values.reasoning) && size(outputs.values.reasoning) > 0 }}"
+    instructions: |
+      You are a code reviewer with deep expertise in your assigned specialty.
+      Adopt the persona fully — your role, focus area, and principles define
+      what you look for and how critically you assess. A worker with tool-use
+      (web search, documentation lookup) is preferred, and required when the
+      persona sets requires_tools.
+
+      CRITICAL RULE: Only flag issues in lines that were added or modified
+      in the diff (lines starting with +). Do not flag issues in unchanged
+      context lines — those are outside the scope of this review.
+
+      Review process:
+      1. Read the diff through the lens of your persona's focus area
+      2. Apply your principles as the standard for judgment
+      3. Identify specific issues with exact locations (file:line)
+      4. Assess severity based on real-world impact, not pedantry — if the
+         persona specifies a severity_default, use it unless the finding
+         clearly warrants a different level
+      5. Suggest concrete fixes, not vague recommendations
+      6. Acknowledge strengths where the code handles your focus area well
+
+      Scoring calibration (0-100 scale):
+      - 90-100: No issues in your focus area, exemplary practices
+      - 70-89: Minor issues only, generally well-handled
+      - 50-69: Notable issues that should be addressed before merge
+      - 30-49: Significant problems requiring rework
+      - 0-29: Critical issues, unsafe to merge
+
+      Each finding must reference specific lines from the diff. Do not flag
+      issues outside your persona's focus area — stay in your lane. If the
+      diff has no relevance to your specialty, score 90+ and say so.
+
+      Dismissed findings (when provided):
+      You may receive dismissed findings — a list of findings from previous
+      review iterations that the developer dismissed as false positives, each
+      with reasoning explaining why. You MUST respect these dismissals:
+      - Do not re-flag a dismissed finding unless the code has materially
+        changed in a way that invalidates the dismissal reasoning
+      - If you believe a dismissal is wrong, note your disagreement in your
+        reasoning output but do not include it as a finding
+      - Dismissed findings should not penalize the score
+
+      Tool-augmented review (when you have access to web search, doc lookup,
+      or similar tools):
+      - Use tools to verify findings against official documentation before
+        reporting them — a sourced finding is stronger than one from memory
+      - Search for deprecation notices, CVEs, and migration guides relevant
+        to libraries and APIs in the diff
+      - Include the source URL or doc reference in the finding's source field
+        when you can back it with external evidence
+      - If your persona has requires_tools set, you MUST actively research
+        every library, API, and pattern in the diff rather than relying on
+        static knowledge. Only report findings you can back with a concrete
+        external source
+
+      Set verdict to "pass" if score >= threshold, "fail" otherwise.
+    inputs:
+      values:
+        diff:
+          schema: { type: string }
+          value: "${{ inputs.values.diff }}"
+        persona:
+          schema: { type: object }
+          value: "${{ inputs.values.persona }}"
+        threshold:
+          schema: { type: number }
+          value: "${{ inputs.values.?threshold.orValue(90) }}"
+        repo:
+          schema: { type: string }
+          value: "${{ inputs.values.?repo.orValue('') }}"
+        ref:
+          schema: { type: string }
+          value: "${{ inputs.values.?ref.orValue('') }}"
+        context:
+          schema: { type: string }
+          value: "${{ inputs.values.?context.orValue('') }}"
+        dismissed_findings:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?dismissed_findings.orValue([]) }}"
+    outputs:
+      values:
+        score:
+          required: true
+          schema: { type: number, description: Review score from 0 to 100 }
+        verdict:
+          required: true
+          schema:
+            type: string
+            enum: [pass, fail]
+            description: Whether the code passes this reviewer's assessment
+        findings:
+          required: true
+          schema:
+            type: array
+            description: Specific findings from this reviewer's perspective
+            items:
+              type: object
+              properties:
+                type: { type: string, enum: [issue, strength] }
+                severity: { type: string, enum: [critical, high, medium, low, info] }
+                location: { type: string, description: File path and line or code reference }
+                observation: { type: string }
+                impact: { type: string }
+                suggestion: { type: string }
+                source: { type: string, description: URL or documentation reference supporting this finding (required when persona has requires_tools set) }
+              required: [type, severity, location, observation, impact]
+        reasoning:
+          required: true
+          schema: { type: string, description: Overall assessment from this persona's perspective }
+outputs:
+  values:
+    score:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.review.outputs.values.score }}"
+    verdict:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.review.outputs.values.verdict }}"
+    findings:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.review.outputs.values.findings }}"
+    reasoning:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.review.outputs.values.reasoning }}"
+    reviewer_role:
+      required: true
+      schema: { type: string }
+      value: "${{ inputs.values.persona.role }}"

@@ -1,0 +1,84 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-notes
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a workflow needs the canonical operator notes for an Ethereum devnet; resolves the expected notes URL, extracts the most relevant network setup guidance, and summarizes assumptions or gaps.
+tags: ["devnet", "ethereum", "ethpandaops", "notes", "context"]
+inputs:
+  values:
+    network:
+      required: true
+      description: Target devnet name to resolve notes for
+      schema: { type: string }
+    notes_url:
+      description: Optional explicit notes URL override
+      schema: { type: string }
+tasks:
+  fetch_notes:
+    quality-gate: "${{ has(outputs.values.notes_url) && size(outputs.values.notes_url) > 0 && has(outputs.values.notes_summary) && size(outputs.values.notes_summary) > 0 }}"
+    instructions: |-
+      Resolve and summarize the canonical notes for the target devnet.
+      A worker with tool-use is required.
+
+      Use the `panda` CLI and MCP tools to discover the notes URL when an explicit URL is not provided.
+      Use the expected ethpandaops notes URL pattern as a fallback.
+
+      Required behavior:
+      1. Resolve the notes URL for the target devnet.
+      2. Fetch the notes content and extract only the details that materially help debugging or Kurtosis reproduction.
+      3. Prioritize: client readiness, image hints, fork/network settings, special flags, fork activation epochs, any example Kurtosis or ethereum-package config fragments.
+      4. Separate concrete facts from assumptions or stale-looking guidance.
+      5. Return a concise summary plus a short list of the most reusable highlights.
+
+      Fork-boundary context: pay special attention to fork activation epochs, client version requirements, and any mentions of parameter changes that could affect consensus.
+    inputs:
+      values:
+        network:
+          schema: { type: string }
+          value: "${{ inputs.values.network }}"
+        notes_url:
+          schema: { type: string }
+          value: "${{ inputs.values.?notes_url.orValue('') }}"
+    outputs:
+      values:
+        notes_url:
+          required: true
+          schema: { type: string, description: Resolved notes URL used for the devnet }
+        notes_summary:
+          required: true
+          schema: { type: string, description: Concise summary of the most relevant notes content }
+        highlights:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: High-signal details worth reusing in downstream workflows
+        assumptions:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Assumptions or caveats where the notes were incomplete or ambiguous
+outputs:
+  values:
+    notes_url:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch_notes.outputs.values.notes_url }}"
+    notes_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.fetch_notes.outputs.values.notes_summary }}"
+    highlights:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.fetch_notes.outputs.values.highlights }}"
+    assumptions:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.fetch_notes.outputs.values.assumptions }}"

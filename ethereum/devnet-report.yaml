@@ -1,0 +1,182 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-report
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a workflow needs a shareable Ethereum devnet report; renders structured outputs (from baseline, debug, or finality assessment) into concise markdown for operators and stakeholders. Works for both incident reports and routine status reports.
+tags: ["devnet", "ethereum", "ethpandaops", "reporting", "status", "incident"]
+inputs:
+  values:
+    network_name:
+      required: true
+      description: Resolved target devnet name
+      schema: { type: string }
+    investigation_timeframe:
+      required: true
+      description: Active investigation timeframe
+      schema: { type: string }
+    problem_statement:
+      description: User-reported symptom or debugging goal
+      schema: { type: string }
+    context_summary:
+      required: true
+      description: Normalized context summary
+      schema: { type: string }
+    issue_type:
+      description: Top-level issue classification (e.g. healthy, network-split, finality-delay)
+      schema: { type: string, default: healthy }
+    root_cause:
+      description: Most likely root cause (empty for healthy networks)
+      schema: { type: string, default: "" }
+    severity:
+      description: Overall severity estimate
+      schema: { type: string }
+    baseline_summary:
+      description: Baseline network state summary
+      schema: { type: string }
+    findings_summary:
+      description: Investigation findings summary
+      schema: { type: string, default: "" }
+    affected_instances:
+      description: Instances most likely involved
+      schema:
+        type: array
+        items: { type: string }
+        default: []
+    evidence:
+      description: Supporting observations
+      schema:
+        type: array
+        items: { type: string }
+        default: []
+    instance_reports:
+      description: Instance-level findings using full resolved instance names
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            instance_name:
+              type: string
+            role:
+              type: string
+            client:
+              type: string
+            status:
+              type: string
+            summary:
+              type: string
+            evidence:
+              type: array
+              items:
+                type: string
+            suggested_actions:
+              type: array
+              items:
+                type: string
+          required: [instance_name, summary]
+        default: []
+    log_examples:
+      description: Concrete log or RPC evidence examples
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            instance_name:
+              type: string
+            source:
+              type: string
+            excerpt:
+              type: string
+            significance:
+              type: string
+          required: [source, excerpt, significance]
+        default: []
+    recommended_actions:
+      description: Suggested next actions
+      schema:
+        type: array
+        items: { type: string }
+        default: []
+tasks:
+  render_report:
+    instructions: |-
+      Render a concise markdown devnet report for sharing.
+
+      Adapt the report structure to the situation:
+      - For incidents (issue_type is not "healthy"): emphasize root cause, affected scope, and remediation.
+      - For status reports (issue_type is "healthy" or empty): emphasize current state, health metrics, and any observations.
+
+      Sections (include all that have data, skip empty ones):
+      1. Title — include network name and date
+      2. Situation — what was observed or requested
+      3. Current assessment — network state, issue classification if applicable
+      4. Affected instances — only if there are affected instances
+      5. Concrete log / RPC evidence — only if log examples are provided
+      6. Recommended actions — next steps or "no action required"
+
+      Keep the report compact and operational. Use bullets where they improve scanability.
+      Prefer full resolved instance names over shortened labels.
+      Include concrete evidence excerpts when available, not just paraphrases.
+      Make the recommended actions debuggable and actionable for an operator.
+      If a section has little data, say so directly instead of padding.
+      Write the rendered report as the `report` output artifact.
+    inputs:
+      values:
+        network_name:
+          schema: { type: string }
+          value: "${{ inputs.values.network_name }}"
+        investigation_timeframe:
+          schema: { type: string }
+          value: "${{ inputs.values.investigation_timeframe }}"
+        problem_statement:
+          schema: { type: string }
+          value: "${{ inputs.values.?problem_statement.orValue('') }}"
+        context_summary:
+          schema: { type: string }
+          value: "${{ inputs.values.context_summary }}"
+        issue_type:
+          schema: { type: string }
+          value: "${{ inputs.values.?issue_type.orValue('healthy') }}"
+        root_cause:
+          schema: { type: string }
+          value: "${{ inputs.values.?root_cause.orValue('') }}"
+        severity:
+          schema: { type: string }
+          value: "${{ inputs.values.?severity.orValue('medium') }}"
+        baseline_summary:
+          schema: { type: string }
+          value: "${{ inputs.values.?baseline_summary.orValue('') }}"
+        findings_summary:
+          schema: { type: string }
+          value: "${{ inputs.values.?findings_summary.orValue('') }}"
+        affected_instances:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?affected_instances.orValue([]) }}"
+        evidence:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?evidence.orValue([]) }}"
+        instance_reports:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?instance_reports.orValue([]) }}"
+        log_examples:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?log_examples.orValue([]) }}"
+        recommended_actions:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?recommended_actions.orValue([]) }}"
+    outputs:
+      artifacts:
+        report:
+          required: true
+          contentType: text/markdown
+          description: Shareable markdown devnet report
+outputs:
+  artifacts:
+    report:
+      ref: tasks.render_report.outputs.artifacts.report

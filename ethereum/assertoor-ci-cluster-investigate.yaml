@@ -1,0 +1,779 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/assertoor-ci-cluster-investigate
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when one new assertoor CI failure cluster needs local Kurtosis reproduction, reproduction-guided bug-hunt, classification, source-dive, and cleanup.
+tags: ["assertoor", "ci", "ethereum", "cluster", "investigation", "kurtosis", "source-dive"]
+inputs:
+  values:
+    cluster_idx:
+      required: true
+      schema: { type: number }
+    cluster:
+      required: true
+      schema:
+        type: object
+        properties:
+          member_shard_ids:
+            type: array
+            items:
+              type: string
+          representative_index:
+            type: number
+          member_count:
+            type: number
+    cheap_fingerprint:
+      required: true
+      schema: { type: string }
+    cluster_label:
+      required: true
+      schema: { type: string }
+    status:
+      required: true
+      schema:
+        type: object
+        properties:
+          status:
+            type: string
+          issue_number:
+            type: number
+          issue_url:
+            type: string
+    representative:
+      required: true
+      schema:
+        type: object
+        properties:
+          test_name:
+            type: string
+          failed_step:
+            type: string
+          root_failed_step:
+            type: string
+          category:
+            type: string
+          error_signature:
+            type: string
+          shard_id:
+            type: string
+          head_sha:
+            type: string
+          kurtosis_params_path:
+            type: string
+          prior_ai_summary:
+            type: string
+          log_excerpts:
+            type: array
+            items:
+              type: string
+          evidence_brief:
+            type: object
+            properties:
+              headline:
+                type: string
+              failure_shape:
+                type: string
+              client_scope:
+                type: string
+              task_scope:
+                type: string
+              artifact_signal:
+                type: string
+              component_hints:
+                type: string
+              routing_notes:
+                type: string
+          artifact_coverage:
+            type: object
+            properties:
+              has_summary:
+                type: boolean
+              has_enclave_dump:
+                type: boolean
+              has_ai_summary_artifact:
+                type: boolean
+              has_kurtosis_params:
+                type: boolean
+              missing:
+                type: array
+                items:
+                  type: string
+              notes:
+                type: string
+          runtime_components:
+            type: array
+            items:
+              type: object
+              properties:
+                service_name:
+                  type: string
+                role:
+                  type: string
+                client:
+                  type: string
+                image_ref:
+                  type: string
+                image_id:
+                  type: string
+                manifest_digest:
+                  type: string
+                source_repo:
+                  type: string
+                source_revision:
+                  type: string
+                version:
+                  type: string
+                build_info:
+                  type: string
+                source:
+                  type: string
+          package_runtime_identity:
+            type: object
+            properties:
+              package_ref:
+                type: string
+              package_started_at:
+                type: string
+              source_repo:
+                type: string
+              source_revision:
+                type: string
+              source:
+                type: string
+              evidence:
+                type: string
+          original_artifact_evidence:
+            type: array
+            items:
+              type: object
+              properties:
+                source:
+                  type: string
+                category:
+                  type: string
+                summary:
+                  type: string
+                excerpt:
+                  type: string
+        required: [test_name, failed_step, category, error_signature]
+    skip_reproduction:
+      schema: { type: boolean, default: false }
+    max_bug_hunt_rounds:
+      schema: { type: number, default: 3 }
+    reproduction_attempt_timeout_minutes:
+      schema: { type: number, default: 360 }
+    reproduction_attempts:
+      schema: { type: number, default: 4 }
+    narrow_to_failing_test:
+      schema: { type: boolean, default: true }
+    enable_source_dive:
+      schema: { type: boolean, default: true }
+    source_repo:
+      required: true
+      schema: { type: string }
+    enclave_name:
+      required: true
+      schema: { type: string }
+    workflow_ref:
+      required: true
+      schema: { type: string }
+    head_branch:
+      schema: { type: string, default: "" }
+    run_id:
+      required: true
+      schema: { type: string }
+    run_url:
+      schema: { type: string, default: "" }
+    run_started_at:
+      schema: { type: string, default: "" }
+  secrets:
+    gh_token:
+      required: false
+      description: Optional GitHub token secret passed to GitHub-facing child templates as GH_TOKEN. When unset, children use ambient gh authentication.
+tasks:
+  inspect_test:
+    if: "${{ has(inputs.values.representative.test_name) && inputs.values.representative.test_name != '' && inputs.values.representative.test_name != 'kurtosis-startup' }}"
+    uses: dev.wagie/assertoor-ci-test-inspect@1.0.0
+    inputs:
+      values:
+        test_name:
+          value: "${{ inputs.values.representative.test_name }}"
+        source_repo:
+          value: "${{ inputs.values.source_repo }}"
+        head_sha:
+          value: "${{ inputs.values.representative.?head_sha.orValue('') }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+  regression_window:
+    if: "${{ has(inputs.values.representative.shard_id) && inputs.values.representative.shard_id != '' }}"
+    uses: dev.wagie/assertoor-ci-regression-window@1.0.0
+    inputs:
+      values:
+        source_repo:
+          value: "${{ inputs.values.source_repo }}"
+        workflow_ref:
+          value: "${{ inputs.values.workflow_ref }}"
+        head_branch:
+          value: "${{ inputs.values.?head_branch.orValue('') }}"
+        shard_id:
+          value: "${{ inputs.values.representative.?shard_id.orValue('') }}"
+        test_name:
+          value: "${{ inputs.values.representative.test_name }}"
+        current_run_id:
+          value: "${{ inputs.values.run_id }}"
+        current_run_url:
+          value: "${{ inputs.values.?run_url.orValue('') }}"
+        current_run_started_at:
+          value: "${{ inputs.values.?run_started_at.orValue('') }}"
+        current_head_sha:
+          value: "${{ inputs.values.representative.?head_sha.orValue('') }}"
+        current_failure:
+          value: "${{ inputs.values.representative }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+  kurtosis_repro_session:
+    needs: [inspect_test, regression_window]
+    if: "${{ inputs.values.?skip_reproduction.orValue(false) != true && has(inputs.values.representative.kurtosis_params_path) && inputs.values.representative.kurtosis_params_path != '' }}"
+    inputs:
+      values:
+        cluster:
+          required: true
+          schema: { type: object }
+          value: "${{ inputs.values.cluster }}"
+        enclave_name:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.enclave_name }}"
+        force:
+          required: true
+          schema: { type: boolean }
+          value: "${{ true }}"
+        cluster_label:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.cluster_label }}"
+        representative:
+          required: true
+          schema:
+            type: object
+            properties:
+              test_name:
+                type: string
+              failed_step:
+                type: string
+              root_failed_step:
+                type: string
+              category:
+                type: string
+              error_signature:
+                type: string
+              shard_id:
+                type: string
+              head_sha:
+                type: string
+              kurtosis_params_path:
+                type: string
+              prior_ai_summary:
+                type: string
+              evidence_brief:
+                type: object
+                properties:
+                  headline:
+                    type: string
+                  failure_shape:
+                    type: string
+                  client_scope:
+                    type: string
+                  task_scope:
+                    type: string
+                  artifact_signal:
+                    type: string
+                  component_hints:
+                    type: string
+                  routing_notes:
+                    type: string
+              runtime_components:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    service_name:
+                      type: string
+                    role:
+                      type: string
+                    client:
+                      type: string
+                    image_ref:
+                      type: string
+                    image_id:
+                      type: string
+                    manifest_digest:
+                      type: string
+                    source_repo:
+                      type: string
+                    source_revision:
+                      type: string
+                    version:
+                      type: string
+                    build_info:
+                      type: string
+                    source:
+                      type: string
+              package_runtime_identity:
+                type: object
+                properties:
+                  package_ref:
+                    type: string
+                  package_started_at:
+                    type: string
+                  source_repo:
+                    type: string
+                  source_revision:
+                    type: string
+                  source:
+                    type: string
+                  evidence:
+                    type: string
+            required: [test_name, failed_step, category, error_signature]
+          value: "${{ inputs.values.representative }}"
+        run_started_at:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?run_started_at.orValue('') }}"
+        max_bug_hunt_rounds:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?max_bug_hunt_rounds.orValue(3.0) }}"
+        reproduction_attempt_timeout_minutes:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?reproduction_attempt_timeout_minutes.orValue(360.0) }}"
+        reproduction_attempts:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?reproduction_attempts.orValue(4.0) }}"
+        narrow_to_failing_test:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?narrow_to_failing_test.orValue(true) }}"
+        test_context:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.inspect_test.outputs.values.test_summary) ? tasks.inspect_test.outputs.values.test_summary : '' }}"
+        regression_context:
+          required: true
+          schema: { type: object }
+          value: "${{ has(tasks.regression_window.outputs.values.regression_window) ? tasks.regression_window.outputs.values.regression_window : {} }}"
+        regression_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.regression_window.outputs.values.baseline_summary) ? tasks.regression_window.outputs.values.baseline_summary : 'not available' }}"
+        regression_target_ranking:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ has(tasks.regression_window.outputs.values.target_ranking) ? tasks.regression_window.outputs.values.target_ranking : [] }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+    tasks:
+      reproduce:
+        uses: dev.wagie/assertoor-ci-kurtosis-reproduce@1.0.0
+        inputs:
+          values:
+            enclave_name:
+              value: "${{ inputs.values.enclave_name }}"
+            kurtosis_params_path:
+              value: "${{ inputs.values.representative.?kurtosis_params_path.orValue('') }}"
+            assertoor_test_name:
+              value: "${{ inputs.values.representative.test_name }}"
+            run_started_at:
+              value: "${{ inputs.values.run_started_at }}"
+            runtime_components:
+              value: "${{ inputs.values.representative.?runtime_components.orValue([]) }}"
+            package_runtime_identity:
+              value: "${{ inputs.values.representative.?package_runtime_identity.orValue({}) }}"
+            reproduction_attempt_timeout_minutes:
+              value: "${{ inputs.values.reproduction_attempt_timeout_minutes }}"
+            narrow_to_failing_test:
+              value: "${{ inputs.values.narrow_to_failing_test }}"
+            reproduction_attempts:
+              value: "${{ inputs.values.reproduction_attempts }}"
+            prior_summary:
+              value: "${{ inputs.values.representative.?prior_ai_summary.orValue('') }}"
+          secrets:
+            gh_token:
+              ref: inputs.secrets.gh_token
+      bug_hunt:
+        needs: [reproduce]
+        if: "${{ has(tasks.reproduce.outputs.values.reproduced) && tasks.reproduce.outputs.values.reproduced == true }}"
+        uses: dev.wagie/kurtosis-ethereum-bug-hunt@1.0.0
+        inputs:
+          values:
+            enclave_name:
+              value: "${{ inputs.values.enclave_name }}"
+            launch:
+              value: "${{ false }}"
+            auto_cleanup:
+              value: "${{ false }}"
+            config_source:
+              value: "${{ 'existing-enclave' }}"
+            max_iterations:
+              value: "${{ inputs.values.max_bug_hunt_rounds }}"
+            min_iterations:
+              value: "${{ 1.0 }}"
+            stop_on_sufficient:
+              value: "${{ true }}"
+            prior_summary:
+              value: "${{ inputs.values.representative.?prior_ai_summary.orValue('') }}"
+            test_context:
+              value: "${{ inputs.values.test_context }}"
+            regression_window:
+              value: "${{ inputs.values.regression_context }}"
+            hunt_focus:
+              value: "${{ inputs.values.representative.category == 'infra-startup' ? 'service-health' : 'general' }}"
+            goal:
+              value: |-
+                ${{
+                  "Investigate this assertoor failure using the local reproduction that just reached the same failing outcome.\n" +
+                  "Test: " + inputs.values.representative.test_name + "\n" +
+                  "Failed step: " + inputs.values.representative.failed_step + "\n" +
+                  "Root failed step: " + inputs.values.representative.?root_failed_step.orValue(inputs.values.representative.failed_step) + "\n" +
+                  "Failure category: " + inputs.values.representative.category + "\n" +
+                  "Error signature: " + inputs.values.representative.error_signature + "\n" +
+                  "Cluster label: " + inputs.values.cluster_label + "\n" +
+                  "Affected shards count: " + string(size(inputs.values.cluster.?member_shard_ids.orValue([]))) + "\n" +
+                  "Evidence brief:\n" +
+                  "- Headline: " + inputs.values.representative.?evidence_brief.?headline.orValue("") + "\n" +
+                  "- Failure shape: " + inputs.values.representative.?evidence_brief.?failure_shape.orValue("") + "\n" +
+                  "- Client scope: " + inputs.values.representative.?evidence_brief.?client_scope.orValue("") + "\n" +
+                  "- Task scope: " + inputs.values.representative.?evidence_brief.?task_scope.orValue("") + "\n" +
+                  "- Original artifact signal: " + inputs.values.representative.?evidence_brief.?artifact_signal.orValue("") + "\n" +
+                  "- Component hints: " + inputs.values.representative.?evidence_brief.?component_hints.orValue("") + "\n" +
+                  "- Routing notes: " + inputs.values.representative.?evidence_brief.?routing_notes.orValue("") + "\n" +
+                  "Regression window summary:\n" + inputs.values.regression_summary + "\n" +
+                  "Regression target ranking entries: " + string(size(inputs.values.regression_target_ranking)) + "\n\n" +
+                  "Focus on confirming the root cause rather than rediscovering symptoms. The CI-side prior summary and original artifact evidence are provided separately; validate or refute them with concrete local reproduction evidence (logs, state, RPC). Compare the reproduced network against the original dump evidence and distinguish mechanisms when relevant: devnet/network propagation, client-local policy or state handling, caller/workload account lifecycle, test design/config, and plain infra flake.\n\n" +
+                  "Investigation order:\n" +
+                  "- If the original artifacts contain a concrete RPC/API/log error emitted by a named client/service, probe that emitting component first: logs, RPC/API state, runtime image/build identity, and behavior. Treat the caller/orchestrator/generator as fallback unless there is evidence it sent invalid input.\n" +
+                  "- If the reproduced network differs from the original run because timeouts, config, image tags, workload parameters, or material queue/order effects changed, mark the repro as non-faithful. Intentional narrowing to the target test is acceptable for target-level reproduction unless evidence shows the original failure depends on earlier queued tests.\n" +
+                  "- Use the previous-success baseline to ask what changed between last known-good and current failure. Floating tags are meaningful only after resolving to digest/build/source revision from artifacts."
+                }}
+    finally:
+      cleanup_enclave:
+        uses: dev.wagie/kurtosis-enclave-cleanup@1.0.0
+        inputs:
+          values:
+            enclave_name:
+              value: "${{ inputs.values.enclave_name }}"
+            force:
+              value: "${{ inputs.values.force }}"
+    outputs:
+      values:
+        launched:
+          required: true
+          schema: { type: boolean }
+          value: "${{ has(tasks.reproduce.outputs.values.launched) ? tasks.reproduce.outputs.values.launched : false }}"
+        enclave_name:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.reproduce.outputs.values.enclave_name) ? tasks.reproduce.outputs.values.enclave_name : inputs.values.enclave_name }}"
+        assertoor_url:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.reproduce.outputs.values.assertoor_url) ? tasks.reproduce.outputs.values.assertoor_url : '' }}"
+        services:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ has(tasks.reproduce.outputs.values.services) ? tasks.reproduce.outputs.values.services : [] }}"
+        launch_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.reproduce.outputs.values.launch_summary) ? tasks.reproduce.outputs.values.launch_summary : '' }}"
+        runtime_fidelity_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.reproduce.outputs.values.runtime_fidelity_summary) ? tasks.reproduce.outputs.values.runtime_fidelity_summary : '' }}"
+        package_ref_used:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.reproduce.outputs.values.package_ref_used) ? tasks.reproduce.outputs.values.package_ref_used : '' }}"
+        pinned_images:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ has(tasks.reproduce.outputs.values.pinned_images) ? tasks.reproduce.outputs.values.pinned_images : [] }}"
+        unpinned_images:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ has(tasks.reproduce.outputs.values.unpinned_images) ? tasks.reproduce.outputs.values.unpinned_images : [] }}"
+        reproduced:
+          required: true
+          schema: { type: boolean }
+          value: "${{ has(tasks.reproduce.outputs.values.reproduced) ? tasks.reproduce.outputs.values.reproduced : false }}"
+        test_result:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.reproduce.outputs.values.test_result) ? tasks.reproduce.outputs.values.test_result : 'not-run' }}"
+        reproduction_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.reproduce.outputs.values.reproduction_summary) ? tasks.reproduce.outputs.values.reproduction_summary : '' }}"
+        evidence:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ has(tasks.reproduce.outputs.values.evidence) ? tasks.reproduce.outputs.values.evidence : [] }}"
+        matches_prior:
+          required: true
+          schema: { type: boolean }
+          value: "${{ has(tasks.reproduce.outputs.values.matches_prior) ? tasks.reproduce.outputs.values.matches_prior : false }}"
+        attempts_made:
+          required: true
+          schema: { type: number }
+          value: "${{ has(tasks.reproduce.outputs.values.attempts_made) ? tasks.reproduce.outputs.values.attempts_made : 0.0 }}"
+        attempts_converged:
+          required: true
+          schema: { type: boolean }
+          value: "${{ has(tasks.reproduce.outputs.values.attempts_converged) ? tasks.reproduce.outputs.values.attempts_converged : false }}"
+        bug_hunt_findings:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                title:
+                  type: string
+                severity:
+                  type: string
+                summary:
+                  type: string
+                affected_scope:
+                  type: string
+                category:
+                  type: string
+                confidence:
+                  type: number
+                status:
+                  type: string
+                evidence:
+                  type: array
+                  items:
+                    type: string
+                warrants_devnet_debug:
+                  type: boolean
+                next_check:
+                  type: string
+          value: "${{ has(tasks.bug_hunt.outputs.values.findings) ? tasks.bug_hunt.outputs.values.findings : [] }}"
+        bug_hunt_remaining_gaps:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                question:
+                  type: string
+                priority:
+                  type: string
+                reason:
+                  type: string
+          value: "${{ has(tasks.bug_hunt.outputs.values.remaining_gaps) ? tasks.bug_hunt.outputs.values.remaining_gaps : [] }}"
+        bug_hunt_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.bug_hunt.outputs.values.summary) ? tasks.bug_hunt.outputs.values.summary : '' }}"
+        bug_hunt_recommended_actions:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ has(tasks.bug_hunt.outputs.values.recommended_actions) ? tasks.bug_hunt.outputs.values.recommended_actions : [] }}"
+        bug_hunt_completeness:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.bug_hunt.outputs.values.completeness) ? tasks.bug_hunt.outputs.values.completeness : '' }}"
+        bug_hunt_information_gain:
+          required: true
+          schema: { type: string }
+          value: "${{ has(tasks.bug_hunt.outputs.values.information_gain) ? tasks.bug_hunt.outputs.values.information_gain : '' }}"
+        bug_hunt_iterations_used:
+          required: true
+          schema: { type: number }
+          value: "${{ has(tasks.bug_hunt.outputs.values.iterations_used) ? tasks.bug_hunt.outputs.values.iterations_used : 0.0 }}"
+        bug_hunt_converged:
+          required: true
+          schema: { type: boolean }
+          value: "${{ has(tasks.bug_hunt.outputs.values.converged) ? tasks.bug_hunt.outputs.values.converged : false }}"
+  classify:
+    needs: [kurtosis_repro_session, regression_window]
+    uses: dev.wagie/assertoor-ci-classify@1.0.0
+    inputs:
+      values:
+        cluster_label:
+          value: "${{ inputs.values.cluster_label }}"
+        representative:
+          value: "${{ inputs.values.representative }}"
+        reproduction_launched:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.launched) ? tasks.kurtosis_repro_session.outputs.values.launched : false }}"
+        reproduction_reproduced:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.reproduced) ? tasks.kurtosis_repro_session.outputs.values.reproduced : false }}"
+        reproduction_test_result:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.test_result) ? tasks.kurtosis_repro_session.outputs.values.test_result : 'not-run' }}"
+        reproduction_matches_prior:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.matches_prior) ? tasks.kurtosis_repro_session.outputs.values.matches_prior : false }}"
+        reproduction_summary:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.reproduction_summary) ? tasks.kurtosis_repro_session.outputs.values.reproduction_summary : 'not run' }}"
+        reproduction_fidelity_summary:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.runtime_fidelity_summary) ? tasks.kurtosis_repro_session.outputs.values.runtime_fidelity_summary : '' }}"
+        regression_summary:
+          value: "${{ has(tasks.regression_window.outputs.values.baseline_summary) ? tasks.regression_window.outputs.values.baseline_summary : '' }}"
+        regression_window:
+          value: "${{ has(tasks.regression_window.outputs.values.regression_window) ? tasks.regression_window.outputs.values.regression_window : {} }}"
+        bug_hunt_findings:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_findings) ? tasks.kurtosis_repro_session.outputs.values.bug_hunt_findings : [] }}"
+        bug_hunt_summary:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_summary) ? tasks.kurtosis_repro_session.outputs.values.bug_hunt_summary : '' }}"
+  source_dive:
+    needs: [classify, kurtosis_repro_session, regression_window]
+    if: "${{ inputs.values.?enable_source_dive.orValue(true) == true && has(tasks.classify.outputs.values.decision) && (tasks.classify.outputs.values.decision == 'framework-bug' || tasks.classify.outputs.values.decision == 'framework-dependency' || tasks.classify.outputs.values.decision == 'single-client' || tasks.classify.outputs.values.decision == 'multi-client' || tasks.classify.outputs.values.decision == 'devnet-network' || tasks.classify.outputs.values.decision == 'config-issue' || tasks.classify.outputs.values.decision == 'mixed') }}"
+    uses: dev.wagie/ethereum-component-source-dive@1.0.0
+    inputs:
+      values:
+        classification:
+          value: "${{ tasks.classify.outputs.values.decision }}"
+        representative:
+          value: "${{ inputs.values.representative }}"
+        source_repo:
+          value: "${{ inputs.values.source_repo }}"
+        bug_hunt_findings:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_findings) ? tasks.kurtosis_repro_session.outputs.values.bug_hunt_findings : [] }}"
+        bug_hunt_summary:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_summary) ? tasks.kurtosis_repro_session.outputs.values.bug_hunt_summary : '' }}"
+        baseline_context:
+          value: "${{ has(tasks.regression_window.outputs.values.baseline_summary) ? tasks.regression_window.outputs.values.baseline_summary : '' }}"
+        regression_window:
+          value: "${{ has(tasks.regression_window.outputs.values.regression_window) ? tasks.regression_window.outputs.values.regression_window : {} }}"
+        reproduction_evidence:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.evidence) ? tasks.kurtosis_repro_session.outputs.values.evidence : [] }}"
+        reproduction_matches_prior:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.matches_prior) ? tasks.kurtosis_repro_session.outputs.values.matches_prior : false }}"
+  launcher_audit:
+    needs: [classify, source_dive, kurtosis_repro_session]
+    if: "${{ inputs.values.?enable_source_dive.orValue(true) == true && has(tasks.classify.outputs.values.decision) && tasks.classify.outputs.values.decision == 'single-client' && (!(has(tasks.source_dive.outputs.values.cloned) && tasks.source_dive.outputs.values.cloned == true) || !(has(tasks.source_dive.outputs.values.source_surface_confidence) && tasks.source_dive.outputs.values.source_surface_confidence >= 75)) }}"
+    uses: dev.wagie/ethereum-package-launcher-audit@1.0.0
+    inputs:
+      values:
+        client_name:
+          value: "${{ has(tasks.source_dive.outputs.values.client_name) ? tasks.source_dive.outputs.values.client_name : '' }}"
+        bug_hunt_summary:
+          value: "${{ has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_summary) ? tasks.kurtosis_repro_session.outputs.values.bug_hunt_summary : '' }}"
+        root_cause_description:
+          value: "${{ has(tasks.source_dive.outputs.values.root_cause_description) ? tasks.source_dive.outputs.values.root_cause_description : '' }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+outputs:
+  values:
+    raw_finding:
+      required: true
+      schema: { type: object }
+      value: |-
+        ${{
+          {
+            "cluster_idx": inputs.values.cluster_idx,
+            "cluster": inputs.values.cluster,
+            "cheap_fingerprint": inputs.values.cheap_fingerprint,
+            "cluster_label": inputs.values.cluster_label,
+            "status": inputs.values.status,
+            "representative": inputs.values.representative,
+            "test_inspection": {
+              "attempted": has(tasks.inspect_test.outputs.values.test_summary),
+              "summary": has(tasks.inspect_test.outputs.values.test_summary) ? tasks.inspect_test.outputs.values.test_summary : "",
+              "recent_changes": has(tasks.inspect_test.outputs.values.recent_test_changes) ? tasks.inspect_test.outputs.values.recent_test_changes : ""
+            },
+            "reproduction": {
+              "attempted": has(tasks.kurtosis_repro_session.outputs.values.launched),
+              "launched": has(tasks.kurtosis_repro_session.outputs.values.launched) ? tasks.kurtosis_repro_session.outputs.values.launched : false,
+              "reproduced": has(tasks.kurtosis_repro_session.outputs.values.reproduced) ? tasks.kurtosis_repro_session.outputs.values.reproduced : false,
+              "test_result": has(tasks.kurtosis_repro_session.outputs.values.test_result) ? tasks.kurtosis_repro_session.outputs.values.test_result : "",
+              "summary": has(tasks.kurtosis_repro_session.outputs.values.reproduction_summary) ? tasks.kurtosis_repro_session.outputs.values.reproduction_summary : "",
+              "launch_summary": has(tasks.kurtosis_repro_session.outputs.values.launch_summary) ? tasks.kurtosis_repro_session.outputs.values.launch_summary : "",
+              "runtime_fidelity_summary": has(tasks.kurtosis_repro_session.outputs.values.runtime_fidelity_summary) ? tasks.kurtosis_repro_session.outputs.values.runtime_fidelity_summary : "",
+              "package_ref_used": has(tasks.kurtosis_repro_session.outputs.values.package_ref_used) ? tasks.kurtosis_repro_session.outputs.values.package_ref_used : "",
+              "pinned_images": has(tasks.kurtosis_repro_session.outputs.values.pinned_images) ? tasks.kurtosis_repro_session.outputs.values.pinned_images : [],
+              "unpinned_images": has(tasks.kurtosis_repro_session.outputs.values.unpinned_images) ? tasks.kurtosis_repro_session.outputs.values.unpinned_images : [],
+              "evidence": has(tasks.kurtosis_repro_session.outputs.values.evidence) ? tasks.kurtosis_repro_session.outputs.values.evidence : [],
+              "matches_prior": has(tasks.kurtosis_repro_session.outputs.values.matches_prior) ? tasks.kurtosis_repro_session.outputs.values.matches_prior : false,
+              "attempts_made": has(tasks.kurtosis_repro_session.outputs.values.attempts_made) ? tasks.kurtosis_repro_session.outputs.values.attempts_made : 0.0,
+              "attempts_converged": has(tasks.kurtosis_repro_session.outputs.values.attempts_converged) ? tasks.kurtosis_repro_session.outputs.values.attempts_converged : false
+            },
+            "regression": {
+              "attempted": has(tasks.regression_window.outputs.values.baseline_summary),
+              "found": has(tasks.regression_window.outputs.values.baseline_found) ? tasks.regression_window.outputs.values.baseline_found : false,
+              "summary": has(tasks.regression_window.outputs.values.baseline_summary) ? tasks.regression_window.outputs.values.baseline_summary : "",
+              "window": has(tasks.regression_window.outputs.values.regression_window) ? tasks.regression_window.outputs.values.regression_window : {},
+              "component_changes": has(tasks.regression_window.outputs.values.component_changes) ? tasks.regression_window.outputs.values.component_changes : [],
+              "changed_components": has(tasks.regression_window.outputs.values.changed_components) ? tasks.regression_window.outputs.values.changed_components : [],
+              "unchanged_components": has(tasks.regression_window.outputs.values.unchanged_components) ? tasks.regression_window.outputs.values.unchanged_components : [],
+              "unresolved_components": has(tasks.regression_window.outputs.values.unresolved_components) ? tasks.regression_window.outputs.values.unresolved_components : [],
+              "target_ranking": has(tasks.regression_window.outputs.values.target_ranking) ? tasks.regression_window.outputs.values.target_ranking : [],
+              "commit_ranges": has(tasks.regression_window.outputs.values.commit_ranges) ? tasks.regression_window.outputs.values.commit_ranges : []
+            },
+            "bug_hunt": {
+              "attempted": has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_findings),
+              "findings": has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_findings) ? tasks.kurtosis_repro_session.outputs.values.bug_hunt_findings : [],
+              "summary": has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_summary) ? tasks.kurtosis_repro_session.outputs.values.bug_hunt_summary : "",
+              "recommended_actions": has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_recommended_actions) ? tasks.kurtosis_repro_session.outputs.values.bug_hunt_recommended_actions : [],
+              "completeness": has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_completeness) ? tasks.kurtosis_repro_session.outputs.values.bug_hunt_completeness : "",
+              "iterations_used": has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_iterations_used) ? tasks.kurtosis_repro_session.outputs.values.bug_hunt_iterations_used : 0.0,
+              "converged": has(tasks.kurtosis_repro_session.outputs.values.bug_hunt_converged) ? tasks.kurtosis_repro_session.outputs.values.bug_hunt_converged : false
+            },
+            "classification": {
+              "attempted": has(tasks.classify.outputs.values.decision),
+              "decision": has(tasks.classify.outputs.values.decision) ? tasks.classify.outputs.values.decision : "unknown",
+              "confidence": has(tasks.classify.outputs.values.confidence) ? tasks.classify.outputs.values.confidence : 0.0,
+              "reasoning": has(tasks.classify.outputs.values.reasoning) ? tasks.classify.outputs.values.reasoning : ""
+            },
+            "source_dive": {
+              "attempted": has(tasks.source_dive.outputs.values.target_kind),
+              "target_kind": has(tasks.source_dive.outputs.values.target_kind) ? tasks.source_dive.outputs.values.target_kind : "",
+              "skip_reason": has(tasks.source_dive.outputs.values.skip_reason) ? tasks.source_dive.outputs.values.skip_reason : "",
+              "repo_url": has(tasks.source_dive.outputs.values.repo_url) ? tasks.source_dive.outputs.values.repo_url : "",
+              "commit_sha": has(tasks.source_dive.outputs.values.commit_sha) ? tasks.source_dive.outputs.values.commit_sha : "",
+              "component": has(tasks.source_dive.outputs.values.component) ? tasks.source_dive.outputs.values.component : "",
+              "client_name": has(tasks.source_dive.outputs.values.client_name) ? tasks.source_dive.outputs.values.client_name : "",
+              "resolution_method": has(tasks.source_dive.outputs.values.resolution_method) ? tasks.source_dive.outputs.values.resolution_method : "",
+              "commit_exact": has(tasks.source_dive.outputs.values.commit_exact) ? tasks.source_dive.outputs.values.commit_exact : false,
+              "resolution_caveat": has(tasks.source_dive.outputs.values.resolution_caveat) ? tasks.source_dive.outputs.values.resolution_caveat : "",
+              "cloned": has(tasks.source_dive.outputs.values.cloned) ? tasks.source_dive.outputs.values.cloned : false,
+              "alternate_targets": has(tasks.source_dive.outputs.values.alternate_targets) ? tasks.source_dive.outputs.values.alternate_targets : [],
+              "root_cause_description": has(tasks.source_dive.outputs.values.root_cause_description) ? tasks.source_dive.outputs.values.root_cause_description : "",
+              "suggested_change_md": has(tasks.source_dive.outputs.values.suggested_change_md) ? tasks.source_dive.outputs.values.suggested_change_md : "",
+              "top_candidates": has(tasks.source_dive.outputs.values.top_candidates) ? tasks.source_dive.outputs.values.top_candidates : [],
+              "code_refs": has(tasks.source_dive.outputs.values.code_refs) ? tasks.source_dive.outputs.values.code_refs : [],
+              "alternate_probe_summary": has(tasks.source_dive.outputs.values.alternate_probe_summary) ? tasks.source_dive.outputs.values.alternate_probe_summary : "",
+              "alternate_probe_target": has(tasks.source_dive.outputs.values.alternate_probe_target) ? tasks.source_dive.outputs.values.alternate_probe_target : {},
+              "alternate_code_refs": has(tasks.source_dive.outputs.values.alternate_code_refs) ? tasks.source_dive.outputs.values.alternate_code_refs : [],
+              "alternate_probe_confidence": has(tasks.source_dive.outputs.values.alternate_probe_confidence) ? tasks.source_dive.outputs.values.alternate_probe_confidence : 0.0,
+              "confidence": has(tasks.source_dive.outputs.values.confidence) ? tasks.source_dive.outputs.values.confidence : 0.0,
+              "source_surface_confidence": has(tasks.source_dive.outputs.values.source_surface_confidence) ? tasks.source_dive.outputs.values.source_surface_confidence : (has(tasks.source_dive.outputs.values.confidence) ? tasks.source_dive.outputs.values.confidence : 0.0),
+              "regression_pin_confidence": has(tasks.source_dive.outputs.values.regression_pin_confidence) ? tasks.source_dive.outputs.values.regression_pin_confidence : 0.0,
+              "fix_target_confidence": has(tasks.source_dive.outputs.values.fix_target_confidence) ? tasks.source_dive.outputs.values.fix_target_confidence : 0.0,
+              "confidence_note": has(tasks.source_dive.outputs.values.confidence_note) ? tasks.source_dive.outputs.values.confidence_note : "",
+              "search_summary": has(tasks.source_dive.outputs.values.search_summary) ? tasks.source_dive.outputs.values.search_summary : "",
+              "regression_context": has(tasks.source_dive.outputs.values.regression_context) ? tasks.source_dive.outputs.values.regression_context : "",
+              "literal_search_signal": has(tasks.source_dive.outputs.values.literal_search_signal) ? tasks.source_dive.outputs.values.literal_search_signal : 0.0,
+              "recent_change_signal": has(tasks.source_dive.outputs.values.recent_change_signal) ? tasks.source_dive.outputs.values.recent_change_signal : 0.0,
+              "recent_change_signal_notes": has(tasks.source_dive.outputs.values.recent_change_signal_notes) ? tasks.source_dive.outputs.values.recent_change_signal_notes : ""
+            },
+            "launcher_audit": {
+              "attempted": has(tasks.launcher_audit.outputs.values.audit_summary),
+              "summary": has(tasks.launcher_audit.outputs.values.audit_summary) ? tasks.launcher_audit.outputs.values.audit_summary : "",
+              "verdict": has(tasks.launcher_audit.outputs.values.verdict) ? tasks.launcher_audit.outputs.values.verdict : ""
+            }
+          }
+        }}

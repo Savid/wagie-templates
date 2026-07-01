@@ -1,0 +1,137 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/ci-investigate-issue-context
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a ci-investigate run needs compact context from existing GitHub issues so similar current failures can reuse an existing issue fingerprint.
+tags: ["ci", "ci-investigate", "github-issues", "dedup", "fingerprint", "context"]
+inputs:
+  values:
+    target_repo:
+      required: true
+      description: GitHub repository in owner/name form where ci-investigate issues live
+      schema: { type: string }
+    max_issues:
+      description: Maximum ci-investigate issues to include in the merged context
+      schema: { type: number, default: 500 }
+  secrets:
+    gh_token:
+      required: false
+      description: Optional GitHub token secret used as GH_TOKEN for gh CLI commands. When unset, use ambient gh authentication.
+tasks:
+  collect:
+    quality-gate: "${{ has(outputs.values.issues) && has(outputs.values.fingerprints) && has(outputs.values.summary) }}"
+    instructions: |-
+      Collect compact context from existing ci-investigate issues in `target_repo`, regardless of whether GitHub currently marks them open or closed. This context helps fingerprinting reuse stable names.
+
+      This task is READ-ONLY against GitHub — never run any `gh` write commands here. ALL `gh` commands MUST be scoped to `target_repo` via `--repo <target_repo>`.
+
+      GitHub authentication:
+      - `gh_token` is an optional secret. When present, use it only as the `GH_TOKEN` environment variable for `gh` commands and set `GH_PROMPT_DISABLED=1`.
+      - When `gh_token` is absent, use the worker's ambient `gh` authentication (`gh auth status` should pass).
+      - Command examples below omit the environment wrapper; apply the authentication environment to every `gh` invocation.
+      - Do not run `gh auth login`, `gh auth token`, or `gh auth status --show-token`. Do not print, echo, persist, return, or write the token into files. Keep shell tracing and `GH_DEBUG` disabled while a token is in scope.
+
+      Fail closed on marker lookup uncertainty. If the marker-bearing issue query or any candidate body fetch fails, fail the task with a concise error instead of returning incomplete context. Incomplete context can cause fingerprint drift and duplicate issue creation.
+
+      Procedure:
+
+      1. Build a de-duplicated candidate issue set. Use `max_issues` as the per-query limit, then sort and cap the merged result to `max_issues` after de-duplication.
+         - List labelled issues:
+           `gh issue list --repo <target_repo> --state all --label ci-investigate --limit <max_issues> --json number,url,title,createdAt,updatedAt,labels`.
+         - Also list marker-bearing issues even if labels are missing:
+           `gh issue list --repo <target_repo> --state all --search "in:body ci-investigate:cheap-fingerprint" --limit <max_issues> --json number,url,title,createdAt,updatedAt,labels`.
+         - The marker-bearing query is required. If it fails, fail the task. The labelled query is supplemental; if it fails but the marker-bearing query succeeds, continue and mention the labelled-query limitation in `summary`.
+         - Merge by issue number.
+
+      2. Fetch each candidate body with `gh issue view <number> --repo <target_repo> --json number,url,title,createdAt,updatedAt,labels,body`.
+
+      3. Normalize labels and parse ci-investigate HTML markers from the body:
+         - GitHub CLI returns `labels` as objects. Immediately convert labels to a flat array of label names using each object's `.name` value. Treat absent/null labels as an empty array.
+         - `ci-investigate:schema-version`
+         - `ci-investigate:cheap-fingerprint`
+         - `ci-investigate:classification`
+
+      4. Skip issues that do not carry a `ci-investigate:cheap-fingerprint` marker. Do not skip `ci-investigate:ignore` here; ignored issues still provide fingerprint context so a matching current failure can reuse the suppressed fingerprint.
+
+      5. Build `body_excerpt` for each issue as compact matching context, not a full archive:
+         - Remove the ci-investigate HTML marker lines from the excerpt.
+         - Prefer high-signal sections such as Summary, Verdict, Root Cause, Current State, Evidence, and Suggested Actions when present.
+         - Include enough surrounding text for a fingerprinting worker to tell whether the mechanism matches a current failure.
+         - Cap each excerpt at roughly 3000 characters.
+
+      Return issues sorted by `updated_at` descending. Return `fingerprints` as the flat list of parsed `cheap_fingerprint` values in the same issue order. Return a short `summary` with the number collected and skipped.
+    inputs:
+      values:
+        target_repo:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.target_repo }}"
+        max_issues:
+          schema: { type: number }
+          value: "${{ inputs.values.?max_issues.orValue(500) }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+    outputs:
+      values:
+        issues:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                number:
+                  type: number
+                url:
+                  type: string
+                title:
+                  type: string
+                created_at:
+                  type: string
+                updated_at:
+                  type: string
+                labels:
+                  type: array
+                  items:
+                    type: string
+                cheap_fingerprint:
+                  type: string
+                schema_version:
+                  type: number
+                classification:
+                  type: string
+                body_excerpt:
+                  type: string
+              required: [number, url, title, cheap_fingerprint, body_excerpt]
+            description: ci-investigate issues with compact body context for semantic fingerprint reuse, including ignored issues so suppression fingerprints can be reused.
+        fingerprints:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+            description: Existing ci-investigate cheap fingerprints, aligned with issues
+        summary:
+          required: true
+          schema:
+            type: string
+outputs:
+  values:
+    issues:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.collect.outputs.values.issues }}"
+    fingerprints:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.collect.outputs.values.fingerprints }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.collect.outputs.values.summary }}"

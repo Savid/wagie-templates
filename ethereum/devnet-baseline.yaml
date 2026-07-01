@@ -1,0 +1,547 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-baseline
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a workflow needs an Ethereum devnet health assessment; checks fork status, participation, missed slots, node sync, and validator activity, then classifies the network state. Works for both routine status checks and incident triage.
+tags: ["devnet", "ethereum", "ethpandaops", "debugging", "status", "health", "baseline"]
+inputs:
+  values:
+    problem_statement:
+      description: User-reported symptom or debugging goal (empty for routine status checks)
+      schema: { type: string, default: "" }
+    focus:
+      description: Optional focus such as split, offline-nodes, finality-delay, logs, or rpc-validation
+      schema: { type: string, default: general }
+    network_name:
+      required: true
+      description: Resolved target devnet name
+      schema: { type: string }
+    investigation_timeframe:
+      required: true
+      description: Active investigation timeframe
+      schema: { type: string }
+    instances:
+      description: Specific instances to inspect first
+      schema:
+        type: array
+        items: { type: string }
+        default: []
+    data_profile:
+      required: true
+      description: Available debugging surfaces and recommended mode
+      schema:
+        type: object
+        properties:
+          mode:
+            type: string
+            enum: [local, remote]
+          has_dora:
+            type: boolean
+          has_loki:
+            type: boolean
+          loki_datasource:
+            type: string
+          has_ethnode:
+            type: boolean
+          has_clickhouse:
+            type: boolean
+          has_prometheus:
+            type: boolean
+          has_direct_node_access:
+            type: boolean
+          loki_schema:
+            type: string
+            enum: [ethpandaops, kurtosis]
+        required: [mode, has_dora, has_loki, loki_datasource, has_ethnode, has_direct_node_access, loki_schema]
+    context_summary:
+      description: Normalized context summary from intake
+      schema: { type: string }
+    notes_summary:
+      description: Optional high-signal notes summary for the devnet
+      schema: { type: string }
+    notes_highlights:
+      description: Optional structured notes highlights worth preserving in baseline analysis
+      schema:
+        type: array
+        items: { type: string }
+        default: []
+    notes_assumptions:
+      description: Optional caveats or assumptions from the devnet notes
+      schema:
+        type: array
+        items: { type: string }
+        default: []
+tasks:
+  observe:
+    quality-gate: "${{ has(outputs.values.baseline_summary) && size(outputs.values.baseline_summary) > 0 }}"
+    instructions: |-
+      Build an initial devnet baseline using the available surfaces. Your goal is to give an
+      operator a clear picture of network health so they can decide what to investigate next.
+      A worker with reasoning and tool-use is required.
+
+      Use the `panda` CLI as the primary tool surface. For Python API calls (Dora HTTP endpoints,
+      ClickHouse queries, etc.), use heredoc stdin — this avoids shell quote escaping issues:
+      ```
+      panda execute <<'PYEOF'
+      <python code here — no escaping needed>
+      PYEOF
+      ```
+
+      ## CLI quick reference
+
+      Discovery:
+      - `panda datasources` — list all available data surfaces.
+      - `panda search runbooks "debug devnet"` — tested baseline procedures.
+      - `panda search examples "<topic>"` — find query patterns for a topic.
+      - `panda docs <module>` — Python API reference (dora, ethnode, loki, clickhouse, prometheus).
+
+      Dora (beacon chain explorer):
+      - `panda dora overview <network>` — current epoch, slot, participation rate, finalized status.
+        JSON output (`-o json`) returns: current_epoch, current_slot, finalized (bool), participation_rate.
+      - `panda dora epoch <network> <epoch>` — epoch-level detail including blockscount, missedblocks,
+        globalparticipationrate, validatorscount, eligibleether, votedether, finalized status.
+      - `panda dora slot <network> <slot>` — slot detail including proposer, status, attestation count.
+      - `panda dora validator <network> <index>` — validator detail.
+      - `panda dora networks` — list networks with Dora explorers.
+
+      Fork/split detection (requires `panda execute`):
+      ```
+      panda execute <<'PYEOF'
+      from ethpandaops import dora
+      import httpx, json
+      base_url = dora.get_base_url("<network>")
+      with httpx.Client(timeout=30) as client:
+          resp = client.get(f"{base_url}/forks", headers={"Accept": "application/json"})
+          resp.raise_for_status()
+          forks = resp.json()
+      fork_list = forks.get("forks", [])
+      print(f"Fork count: {len(fork_list)}")
+      for fork in fork_list:
+          print(f"  head_slot={fork['head_slot']} head_root={fork['head_root'][:16]}... clients={fork['client_count']}")
+          for c in fork.get("clients", []):
+              print(f"    {c['name']} ({c['version']}) status={c['status']} head_slot={c['head_slot']} distance={c['distance']}")
+      PYEOF
+      ```
+      Each fork object contains: head_slot, head_root, client_count, and a clients array with
+      name, version, status (online/synchronizing), head_slot, distance, and error per node.
+
+      Missing proposers (requires `panda execute`):
+      ```
+      panda execute <<'PYEOF'
+      from ethpandaops import dora
+      import httpx, json
+      network = "<network>"
+      base_url = dora.get_base_url(network)
+      overview = dora.get_network_overview(network)
+      current_slot = overview["current_slot"]
+      with httpx.Client(timeout=30) as client:
+          resp = client.get(f"{base_url}/api/v1/slots", params={
+              "with_missing": 2,
+              "min_slot": current_slot - 300,
+              "limit": 500,
+          })
+          resp.raise_for_status()
+          data = resp.json()
+      slots = data.get("data", {}).get("slots", [])
+      missing = [s for s in slots if s["status"] == "Missing"]
+      print(f"Missing slots (last 300): {len(missing)}")
+      for s in missing[:20]:
+          print(f"  slot={s['slot']} proposer={s['proposer']} proposer_name={s['proposer_name']}")
+      PYEOF
+      ```
+      Response is `{"status":"OK","data":{"slots":[...]}}`. Each slot has: slot, epoch, status
+      (Proposed/Missing/Scheduled/Orphaned), proposer, proposer_name, attestation_count, etc.
+
+      Offline attesters (requires `panda execute`):
+      ```
+      panda execute <<'PYEOF'
+      from ethpandaops import dora
+      import httpx, json
+      network = "<network>"
+      base_url = dora.get_base_url(network)
+      with httpx.Client(timeout=30) as client:
+          resp = client.get(f"{base_url}/api/v1/validators/activity", params={
+              "group": 3,
+              "order": "offline-d",
+              "limit": 50,
+          })
+          resp.raise_for_status()
+          data = resp.json()
+      groups = data.get("data", {}).get("groups", [])
+      print(f"Validator activity by node (sorted by offline count):")
+      for g in groups:
+          print(f"  {g['group']}: {g['online']}/{g['validators']} online, {g['offline']} offline")
+      PYEOF
+      ```
+      Response is `{"status":"OK","data":{"groups":[...]}}`. Each group has: group (node name),
+      validators, activated, online, offline, exited, slashed.
+
+      Ethnode (direct node APIs):
+      - `panda ethnode syncing <network> <instance>` — CL sync status (head_slot, sync_distance, is_syncing).
+      - `panda ethnode finality <network> <instance>` — finality checkpoints (justified, finalized epochs/roots).
+      - `panda ethnode header <network> <instance>` — latest beacon block header.
+      - `panda ethnode peers <network> <instance>` — peer count (connected, connecting, disconnected).
+      - `panda ethnode health <network> <instance>` — beacon node health status code.
+      - `panda ethnode version <network> <instance>` — CL client software version.
+      - `panda ethnode block-number <network> <instance>` — latest EL block number.
+      - `panda ethnode exec-rpc <network> <instance> <method> [params...]` — arbitrary EL JSON-RPC.
+      - `panda ethnode beacon-get <network> <instance> <path>` — arbitrary CL beacon API GET.
+
+      Loki (logs):
+      - `panda loki labels <datasource>` — list all label names for a datasource.
+      - `panda loki label-values <datasource> <label>` — list values for a label.
+      - `panda loki query <datasource> '<logql>' --limit N --start <time>` — execute LogQL range query. Use `data_profile.loki_datasource`.
+      Key labels for remote devnets (ethpandaops datasource): network, instance, container_name,
+      service_name, ethereum_cl, ethereum_el. Filter by network first, then narrow.
+      Useful container names: beacon, validator, execution.
+      Example: `panda loki query <data_profile.loki_datasource> '{network="<network>",container_name="beacon"} |= "error"' --limit 50 --start now-1h`
+
+      ClickHouse (xatu event data — remote devnets only):
+      - `panda clickhouse query xatu-experimental "<sql>"` — query devnet event data.
+      - Filter by `meta_network_name = '<network>'` and the table's partition key.
+      - Use `panda schema` or `panda schema <table>` to discover tables and columns.
+      - Use `panda search examples "<topic>"` to find proven query patterns.
+      Useful baseline queries:
+        * Recent block events: `SELECT slot, slot_start_date_time, meta_client_name FROM default.beacon_api_eth_v1_events_block WHERE meta_network_name = '<network>' AND slot_start_date_time > now() - INTERVAL 1 HOUR ORDER BY slot DESC LIMIT 20`
+        * Block production by client: `SELECT meta_client_name, count() as blocks FROM default.beacon_api_eth_v1_events_block WHERE meta_network_name = '<network>' AND slot_start_date_time > now() - INTERVAL 1 HOUR GROUP BY meta_client_name ORDER BY blocks DESC`
+
+      Prometheus (metrics — devnets datasource):
+      - `panda prometheus query devnets '<promql>'` — instant query.
+      - `panda prometheus query-range devnets '<promql>' --start <time> --end <time> --step <step>` — range query.
+      - `panda prometheus labels devnets` / `panda prometheus label-values devnets <label>` — discover labels.
+      - Filter by `network="<network>"` label.
+
+      ## Guidance
+
+      Use whatever combination of the above tools makes sense for the available surfaces.
+      Fork detection via the /forks endpoint is the highest-signal single check — start there
+      when Dora is available, since a split explains most other symptoms.
+
+      The head epoch is always in progress and shows artificially low participation. Analyze
+      from head_epoch - 1.
+
+      If a split is detected, identify the divergence point and focus investigation there —
+      other symptoms (low participation, missed slots) are likely consequences.
+
+      If Dora is unavailable, fall back to ethnode for per-node sync status, finality
+      checkpoints, and head comparison. If only Loki is available, use error/warning log
+      patterns to build a best-effort baseline.
+
+      Use full resolved instance names (e.g. "lighthouse-geth-1", not "LH-1").
+
+      ## Baseline checklist
+
+      Cover these points — say "unknown" or "insufficient data" for any you cannot determine:
+      1. Single fork or split?
+      2. Is finality progressing?
+      3. Participation rate — above or below 66.7%?
+      4. Missed slots — how many, which proposers?
+      5. Node health — which nodes are offline, synchronizing, or degraded?
+      6. Client distribution — are failures concentrated on one client type?
+
+      ## Finality flag
+
+      Set `has_finality_issues` to true if ANY of these are observed:
+      - Finality checkpoints are stalled (finalized epoch not advancing)
+      - Participation rate is below 66.7%
+      - Network is split (multiple forks detected)
+      - Overview shows finalized=false
+      This flag triggers deeper finality analysis downstream, regardless of the root cause.
+
+      If the network looks healthy (single fork, finality progressing, participation > 95%)
+      but the user reports issues, say so — present what you found and note the discrepancy.
+
+      <example>
+      Good baseline summary:
+      "epbs-devnet-0 has split into 2 forks. Fork A (lodestar-geth-1/2/3, lighthouse-geth-2/3)
+      is at head slot 125051. Fork B (prysm-geth-1/2/3, grandine-geth-1, nimbus-geth-1) is
+      stuck at slot ~109000, ~16k slots behind. Participation is 30% (well below 66.7% finality
+      threshold). 22/32 slots missed in epoch 3911. All prysm nodes show 200/200 validators
+      offline. Finality last progressed at epoch 3741."
+      </example>
+
+      ## Report artifact
+
+      Build a markdown report as you go. Append raw API responses after each collection
+      step — this is the evidence trail for operators to review. Write the final report
+      as the `report` output artifact.
+
+      ## Evidence and uncertainty
+
+      Ground every observation in a specific tool output. If a data source is unavailable or
+      a query fails, say so rather than inferring. If the evidence is ambiguous or incomplete,
+      express that uncertainty — a qualified finding is more useful than a confident wrong one.
+    inputs:
+      values:
+        problem_statement:
+          schema: { type: string }
+          value: "${{ inputs.values.?problem_statement.orValue('') }}"
+        focus:
+          schema: { type: string }
+          value: "${{ inputs.values.?focus.orValue('general') }}"
+        network_name:
+          schema: { type: string }
+          value: "${{ inputs.values.network_name }}"
+        investigation_timeframe:
+          schema: { type: string }
+          value: "${{ inputs.values.investigation_timeframe }}"
+        instances:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?instances.orValue([]) }}"
+        data_profile:
+          schema: { type: object }
+          value: "${{ inputs.values.data_profile }}"
+        context_summary:
+          schema: { type: string }
+          value: "${{ inputs.values.?context_summary.orValue('') }}"
+        notes_summary:
+          schema: { type: string }
+          value: "${{ inputs.values.?notes_summary.orValue('') }}"
+        notes_highlights:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?notes_highlights.orValue([]) }}"
+        notes_assumptions:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?notes_assumptions.orValue([]) }}"
+    outputs:
+      values:
+        baseline_summary:
+          required: true
+          schema:
+            type: string
+            description: Concise baseline summary of network state
+        affected_instances:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+            description: Instances most likely involved in the incident
+        baseline_evidence:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+            description: Concrete observations supporting the baseline
+        instance_reports:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                instance_name:
+                  type: string
+                role:
+                  type: string
+                client:
+                  type: string
+                status:
+                  type: string
+                  enum: [online, synchronizing, offline, degraded, unknown]
+                head_slot:
+                  type: number
+                distance:
+                  type: number
+                fork_index:
+                  type: number
+                validators_online:
+                  type: number
+                validators_offline:
+                  type: number
+                summary:
+                  type: string
+                evidence:
+                  type: array
+                  items:
+                    type: string
+              required: [instance_name, status, summary]
+            description: Instance-level status notes using full resolved instance names
+        fork_data:
+          required: true
+          schema:
+            type: object
+            properties:
+              fork_count:
+                type: number
+              forks:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    head_slot:
+                      type: number
+                    head_root:
+                      type: string
+                    client_count:
+                      type: number
+                    clients:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          version:
+                            type: string
+                          status:
+                            type: string
+                          head_slot:
+                            type: number
+                          distance:
+                            type: number
+                        required: [name]
+                  required: [head_slot, head_root]
+            required: [fork_count, forks]
+            description: Full fork detection data from Dora /forks endpoint
+        validator_activity:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                node_name:
+                  type: string
+                validators:
+                  type: number
+                online:
+                  type: number
+                offline:
+                  type: number
+              required: [node_name]
+            description: Per-node validator online/offline counts from Dora activity endpoint
+        epoch_snapshots:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                epoch:
+                  type: number
+                finalized:
+                  type: boolean
+                participation_rate:
+                  type: number
+                proposed_blocks:
+                  type: number
+                missed_blocks:
+                  type: number
+              required: [epoch, participation_rate]
+            description: Epoch-level participation and block production data
+        node_sync_status:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                instance_name:
+                  type: string
+                head_slot:
+                  type: number
+                sync_distance:
+                  type: number
+                is_syncing:
+                  type: boolean
+              required: [instance_name, head_slot, is_syncing]
+            description: Per-node CL sync status when ethnode was queried
+        has_finality_issues:
+          required: true
+          schema:
+            type: boolean
+            description: True if finality is not progressing normally (finalized=false, participation below 66.7%, finality checkpoints stalled, or network split detected)
+      artifacts:
+        report:
+          required: true
+          contentType: text/markdown
+          description: Full baseline report with all raw API responses
+  classify_issue:
+    needs: [observe]
+    uses: dev.wagie/decide@1.0.0
+    inputs:
+      values:
+        question:
+          value: "${{ 'Based on the devnet baseline observations, what is the most likely issue type?' }}"
+        options:
+          value: "${{ ['healthy', 'network-split', 'offline-nodes', 'finality-delay', 'client-bug', 'execution-issue', 'unknown'] }}"
+        context:
+          value: |-
+            ${{
+              "Problem statement: " + inputs.values.?problem_statement.orValue('') + "\n" +
+              "Focus: " + inputs.values.?focus.orValue('general') + "\n" +
+              "Baseline summary: " + tasks.observe.outputs.values.baseline_summary + "\n" +
+              "Baseline evidence count: " + string(size(tasks.observe.outputs.values.baseline_evidence)) + "\n" +
+              "Instance reports count: " + string(size(tasks.observe.outputs.values.instance_reports)) + "\n" +
+              "Fork count: " + string(tasks.observe.outputs.values.fork_data.?fork_count.orValue(0.0)) + "\n" +
+              "Validator activity entries: " + string(size(tasks.observe.outputs.values.validator_activity)) + "\n" +
+              "Epoch snapshots count: " + string(size(tasks.observe.outputs.values.epoch_snapshots)) + "\n\n" +
+              "Diagnostic signatures for each issue type:\n" +
+              "- healthy: Single fork, finality progressing, participation > 95%, no missed slot clusters.\n" +
+              "- network-split: /forks endpoint shows multiple fork objects with different head_root values; nodes disagree on head; fork divergence at a specific slot. If a split is present, it takes priority — other symptoms are likely consequences.\n" +
+              "- offline-nodes: Nodes unreachable or not producing attestations; validator activity shows high offline counts; specific instances absent or synchronizing with large distance.\n" +
+              "- finality-delay: Participation < 66.7%; missed slots rising; finality checkpoints stalled for >2 epochs; overview shows finalized=false.\n" +
+              "- client-bug: Single client type failing uniformly; all instances of that client show the same error pattern, sync status, or validator offline count.\n" +
+              "- execution-issue: CL engine API errors in logs; EL returning invalid payloads; CL nodes healthy but EL nodes erroring; block production failures correlated with EL client.\n" +
+              "- unknown: Symptoms don't match known patterns or evidence is insufficient to classify."
+            }}
+outputs:
+  values:
+    suspected_issue_type:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.classify_issue.outputs.values.decision }}"
+    issue_type_confidence:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.classify_issue.outputs.values.confidence }}"
+    issue_type_reasoning:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.classify_issue.outputs.values.reasoning }}"
+    baseline_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.observe.outputs.values.baseline_summary }}"
+    affected_instances:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.observe.outputs.values.affected_instances }}"
+    baseline_evidence:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.observe.outputs.values.baseline_evidence }}"
+    instance_reports:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.observe.outputs.values.instance_reports }}"
+    fork_data:
+      required: true
+      schema: { type: object }
+      value: "${{ tasks.observe.outputs.values.fork_data }}"
+    validator_activity:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.observe.outputs.values.validator_activity }}"
+    epoch_snapshots:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.observe.outputs.values.epoch_snapshots }}"
+    node_sync_status:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.observe.outputs.values.node_sync_status }}"
+    has_finality_issues:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.observe.outputs.values.has_finality_issues }}"
+  artifacts:
+    report:
+      ref: tasks.observe.outputs.artifacts.report

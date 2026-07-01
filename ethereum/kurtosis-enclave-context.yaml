@@ -1,0 +1,95 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/kurtosis-enclave-context
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a workflow needs normalized Kurtosis enclave context; inspects enclave state, services, and reachable endpoints for follow-on debugging or validation.
+tags: ["kurtosis", "ethereum", "ethpandaops", "context"]
+inputs:
+  values:
+    enclave_name:
+      required: true
+      description: Kurtosis enclave to inspect
+      schema: { type: string }
+    focus:
+      description: Optional inspection focus such as services, ports, logs, or endpoints
+      schema: { type: string, default: general }
+    service_name:
+      description: Optional specific service to prioritize
+      schema: { type: string }
+    include_logs:
+      description: Whether to inspect targeted service logs during context collection
+      schema: { type: boolean, default: false }
+tasks:
+  inspect_enclave:
+    quality-gate: "${{ has(outputs.values.status_summary) && size(outputs.values.status_summary) > 0 && has(outputs.values.service_names) }}"
+    instructions: |-
+      Collect normalized context for a Kurtosis enclave.
+
+      Use the `kurtosis` CLI as the primary tool surface for this task. A worker
+      with reasoning and tool-use is preferred.
+
+      Priorities:
+      - Inspect the enclave and summarize service health.
+      - Identify important service names, exposed endpoints, and relevant operator next steps.
+      - If `include_logs` is true, fetch only targeted logs for the prioritized service or the most relevant failing service.
+      - Keep the result operational and concise.
+    inputs:
+      values:
+        enclave_name:
+          schema: { type: string }
+          value: "${{ inputs.values.enclave_name }}"
+        focus:
+          schema: { type: string }
+          value: "${{ inputs.values.?focus.orValue('general') }}"
+        service_name:
+          schema: { type: string }
+          value: "${{ inputs.values.?service_name.orValue('') }}"
+        include_logs:
+          schema: { type: boolean }
+          value: "${{ inputs.values.?include_logs.orValue(false) }}"
+    outputs:
+      values:
+        status_summary:
+          required: true
+          schema: { type: string, description: Concise enclave status summary }
+        service_names:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Services discovered in the enclave
+        public_endpoints:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Important reachable endpoints or ports
+        suggested_next_commands:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Useful follow-on Kurtosis commands
+outputs:
+  values:
+    status_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.inspect_enclave.outputs.values.status_summary }}"
+    service_names:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.inspect_enclave.outputs.values.service_names }}"
+    public_endpoints:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.inspect_enclave.outputs.values.public_endpoints }}"
+    suggested_next_commands:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.inspect_enclave.outputs.values.suggested_next_commands }}"

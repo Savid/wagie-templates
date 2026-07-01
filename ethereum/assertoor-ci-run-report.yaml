@@ -1,0 +1,493 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/assertoor-ci-run-report
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when an assertoor CI investigation has finished and needs an operator-facing markdown run report.
+tags: ["assertoor", "ci", "report", "triage", "summary"]
+inputs:
+  values:
+    source_repo:
+      required: true
+      description: GitHub repository where the CI run occurred.
+      schema: { type: string }
+    issue_repo:
+      required: true
+      description: GitHub repository where ci-investigate issues are created.
+      schema: { type: string }
+    workflow_ref:
+      required: true
+      description: Workflow file path or filename selected by the caller.
+      schema: { type: string }
+    requested_run_id:
+      description: Run id provided by the caller, when pinned; empty means the fetch step selected the run.
+      schema: { type: string, default: "" }
+    run_id:
+      required: true
+      description: GitHub Actions run id actually investigated.
+      schema: { type: string }
+    run_url:
+      required: true
+      description: URL of the GitHub Actions run actually investigated.
+      schema: { type: string }
+    run_started_at:
+      description: Run start timestamp from GitHub Actions, when available.
+      schema: { type: string, default: "" }
+    head_sha:
+      description: Head commit SHA for the run.
+      schema: { type: string, default: "" }
+    head_branch:
+      description: Head branch for the run.
+      schema: { type: string, default: "" }
+    workflow_path:
+      description: Workflow path reported by the fetch step.
+      schema: { type: string, default: "" }
+    no_failures:
+      description: True when the selected run had no failures to investigate.
+      schema: { type: boolean, default: false }
+    failures_count:
+      description: Number of failed shards or jobs from the fetched run.
+      schema: { type: number, default: 0 }
+    clusters_count:
+      description: Number of root-cause clusters produced by clustering.
+      schema: { type: number, default: 0 }
+    clusters:
+      description: Root-cause clusters from failure clustering.
+      schema:
+        type: array
+        default: []
+        items:
+          type: object
+          properties:
+            cheap_fingerprint:
+              type: string
+            cluster_label:
+              type: string
+            representative_index:
+              type: number
+            member_indices:
+              type: array
+              items:
+                type: number
+            member_shard_ids:
+              type: array
+              items:
+                type: string
+            member_count:
+              type: number
+            rationale:
+              type: string
+    state_check_statuses:
+      description: Issue state-check results aligned to clusters.
+      schema:
+        type: array
+        default: []
+        items:
+          type: object
+          properties:
+            fingerprint:
+              type: string
+            status:
+              type: string
+            issue_number:
+              type: number
+            issue_url:
+              type: string
+            schema_version:
+              type: number
+            classification:
+              type: string
+    investigation_items:
+      description: State-check entries that were investigated.
+      schema:
+        type: array
+        default: []
+        items:
+          type: object
+          properties:
+            cluster_index:
+              type: number
+            fingerprint:
+              type: string
+            action:
+              type: string
+            state_check_status:
+              type: string
+            issue_number:
+              type: number
+            issue_url:
+              type: string
+            reason:
+              type: string
+    skipped_items:
+      description: State-check entries skipped because no action was needed, an ignored issue suppresses them, an existing issue already covers them, or the status was unknown.
+      schema:
+        type: array
+        default: []
+        items:
+          type: object
+          properties:
+            cluster_index:
+              type: number
+            fingerprint:
+              type: string
+            state_check_status:
+              type: string
+            issue_number:
+              type: number
+            issue_url:
+              type: string
+            reason:
+              type: string
+    raw_findings:
+      description: Per-cluster investigation findings emitted by assertoor-ci-investigate.
+      schema:
+        type: array
+        default: []
+        items:
+          type: object
+          properties:
+            cluster_idx:
+              type: number
+            cheap_fingerprint:
+              type: string
+            cluster_label:
+              type: string
+            representative:
+              type: object
+              properties:
+                test_name:
+                  type: string
+                shard_id:
+                  type: string
+                category:
+                  type: string
+                affected_client_pairs:
+                  type: array
+                  items:
+                    type: string
+                artifact_coverage:
+                  type: object
+                  properties:
+                    has_summary:
+                      type: boolean
+                    has_enclave_dump:
+                      type: boolean
+                    has_ai_summary_artifact:
+                      type: boolean
+                    has_kurtosis_params:
+                      type: boolean
+                    missing:
+                      type: array
+                      items:
+                        type: string
+                    notes:
+                      type: string
+                package_runtime_identity:
+                  type: object
+                  properties:
+                    package_ref:
+                      type: string
+                    package_started_at:
+                      type: string
+                    source_repo:
+                      type: string
+                    source_revision:
+                      type: string
+                    source:
+                      type: string
+                    evidence:
+                      type: string
+            test_inspection:
+              type: object
+              properties:
+                summary:
+                  type: string
+            reproduction:
+              type: object
+              properties:
+                attempted:
+                  type: boolean
+                launched:
+                  type: boolean
+                reproduced:
+                  type: boolean
+                test_result:
+                  type: string
+                summary:
+                  type: string
+                launch_summary:
+                  type: string
+                runtime_fidelity_summary:
+                  type: string
+                package_ref_used:
+                  type: string
+                pinned_images:
+                  type: array
+                  items:
+                    type: string
+                unpinned_images:
+                  type: array
+                  items:
+                    type: string
+            regression:
+              type: object
+              properties:
+                summary:
+                  type: string
+            bug_hunt:
+              type: object
+              properties:
+                summary:
+                  type: string
+            classification:
+              type: object
+              properties:
+                decision:
+                  type: string
+                confidence:
+                  type: number
+                reasoning:
+                  type: string
+            source_dive:
+              type: object
+              properties:
+                target_kind:
+                  type: string
+                cloned:
+                  type: boolean
+                root_cause_description:
+                  type: string
+                repo_url:
+                  type: string
+                commit_sha:
+                  type: string
+                component:
+                  type: string
+                client_name:
+                  type: string
+                resolution_method:
+                  type: string
+                commit_exact:
+                  type: boolean
+                resolution_caveat:
+                  type: string
+                recent_change_signal:
+                  type: number
+                recent_change_signal_notes:
+                  type: string
+                alternate_probe_summary:
+                  type: string
+                alternate_probe_confidence:
+                  type: number
+                confidence:
+                  type: number
+                source_surface_confidence:
+                  type: number
+                regression_pin_confidence:
+                  type: number
+                fix_target_confidence:
+                  type: number
+            launcher_audit:
+              type: object
+              properties:
+                summary:
+                  type: string
+                verdict:
+                  type: string
+    cluster_reports:
+      description: Per-cluster issue bodies and labels produced by issue rendering.
+      schema:
+        type: array
+        default: []
+        items:
+          type: object
+          properties:
+            cheap_fingerprint:
+              type: string
+            cluster_label:
+              type: string
+            issue_title:
+              type: string
+            classification:
+              type: string
+            diagnosis_confidence:
+              type: number
+            notification_confidence:
+              type: number
+            confidence_bucket:
+              type: string
+            issue_body_md:
+              type: string
+            labels:
+              type: array
+              items:
+                type: string
+    publish_results:
+      description: GitHub issue create/skipped results from final issue publishing.
+      schema:
+        type: array
+        default: []
+        items:
+          type: object
+          properties:
+            cheap_fingerprint:
+              type: string
+            issue_title:
+              type: string
+            issue_number:
+              type: number
+            issue_url:
+              type: string
+            action:
+              type: string
+            issue_body_chars:
+              type: number
+            note:
+              type: string
+tasks:
+  render:
+    quality-gate: "${{ has(outputs.values.summary) && size(outputs.values.summary) > 0 }}"
+    instructions: |-
+      Produce an operator-facing markdown report for this ci-investigate run. The reader is whoever opened the artifact looking for "what happened in last night's triage?" - write for that audience. A reasoning-capable worker is preferred.
+
+      The report is delivered both as a `report` markdown artifact and a short `summary` string suitable for notifications or a workflow step-summary header.
+
+      Sections (in order):
+
+      1. **Title + run metadata.** Title: `# CI Investigation Report - <human-friendly run identifier>`. Below it: source repo (read-only, where the CI ran), issue repo (where issues land - call out explicitly when source and issue repo differ), workflow path, run id linked to run_url, run started_at, head branch + short SHA.
+
+      2. **Top-line verdict (3-5 bullets).** Counts of: failed shards, root-cause clusters, issues created vs skipped. When `no_failures == true`, say so prominently and skip investigation sections.
+
+      3. **Per-cluster table.** One row per created/published cluster, plus skipped rows that explain why no new investigation ran. Columns: `#`, `Issue title`, `Classification`, `Confidence`, `Issue`, `Action`, `Members`, `Affected pairs`, `Reproduced?`. For created/published rows, use `cluster_report.issue_title` as the visible title and fall back to `cluster_label` only if needed. For skipped rows without a fresh `cluster_report`, use the early cluster `cluster_label`. The `Issue` column links to the issue using `<issue_url>` from `publish_results` or `skipped_items`. The `Action` column shows `created | skipped`. For created/published rows, render confidence from `confidence_bucket` when present, otherwise derive it from `notification_confidence`: `High` >= 80, `Medium` >= 60, `Low` > 0, `Unknown` otherwise. For skipped rows without a fresh `cluster_report`, render `Confidence` as `Existing issue` when `state_check_status == "covered-existing"`, `Ignored` when `state_check_status == "ignored"`, and `Not rerun` otherwise. Do not render `Unknown` for a state-check-suppressed existing issue; no fresh diagnosis was attempted. Do not show numeric confidence values in the table. `Reproduced?` reflects the nested `reproduction` outcome (`yes`, `no (success)`, `no (timeout)`, `blocked`, `scope mismatch`, `skipped`, `launch failed`) or `skipped` for rows that were not investigated.
+
+      4. **Per-cluster notes.** Keep this as an index, not a duplicate copy of the issue body. Use at most 3 bullets per created/published issue or skipped row:
+         - Issue link, action, and state-check status.
+         - For created/published rows: classification, confidence bucket, and one-line owner reasoning.
+         - For skipped rows: state-check status, prior classification when present, and the skip reason; say `not rerun` instead of inventing a confidence bucket.
+         - Only the highest-signal reproduction/regression/source-dive note, with code details left to the issue body. If a reproduction passed but `runtime_fidelity_summary` says image digests or package source were not pinned, call that out as a non-faithful replay rather than a clean refutation.
+
+      Read original CI context from `raw_findings[].representative.*` and stage outcomes from nested objects (`test_inspection`, `reproduction`, `regression`, `bug_hunt`, `classification`, `source_dive`, `launcher_audit`).
+
+      5. **Notable events.** Bullet list of anything worth flagging:
+         - Investigated clusters that did not publish an issue because no non-unknown verdict was produced (compare `raw_findings` to `cluster_reports`).
+         - Clusters skipped by state-check policy because an ignored issue suppresses them, an existing issue already covers them, or the status was unknown (use `skipped_items`).
+         - Source-dive resolution failures (target_kind != skip but cloned=false).
+         - Any cluster where `publish action == skipped` due to a GitHub publish failure.
+         - When `clusters_count == 0` but `failures_count > 0` say so.
+         Skip the section if nothing notable.
+
+      6. **Run identity.** A small footer with only durable context needed to find the run again: source repo, issue repo when different, workflow path/ref, requested run id when caller-pinned, resolved run id linked to run_url, run started_at, head branch, and short head SHA. Do not list internal knobs such as reproduction attempts, notification thresholds, or schema version.
+
+      Length: roughly 30-90 lines depending on cluster count. Do not embed raw log dumps or long source-dive prose; those live in CI artifacts and the issue body.
+
+      `summary` (separate output): a 4-8 line plain-text/markdown TL;DR suitable for a compact notification. Format roughly: one headline line, one counts line, one bullet per created issue (final issue title + link + action + classification + confidence bucket) and one concise bullet for any skipped existing/ignored issue (early cluster label + link + action + state-check status + `not rerun`). Do not include numeric confidence values, and do not write `confidence Unknown` for skipped rows that were not rerun. Never longer than 1500 chars.
+
+      Always write the markdown report to the `report` artifact slot. Always emit `summary`. When `no_failures == true`, both should still be produced - a "nothing failed tonight" report is itself useful.
+    inputs:
+      values:
+        source_repo:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.source_repo }}"
+        issue_repo:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.issue_repo }}"
+        workflow_ref:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.workflow_ref }}"
+        requested_run_id:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?requested_run_id.orValue('') }}"
+        run_id:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.run_id }}"
+        run_url:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.run_url }}"
+        run_started_at:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?run_started_at.orValue('') }}"
+        head_sha:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?head_sha.orValue('') }}"
+        head_branch:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?head_branch.orValue('') }}"
+        workflow_path:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?workflow_path.orValue('') }}"
+        no_failures:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?no_failures.orValue(false) }}"
+        failures_count:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?failures_count.orValue(0) }}"
+        clusters_count:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?clusters_count.orValue(0) }}"
+        clusters:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?clusters.orValue([]) }}"
+        state_check_statuses:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?state_check_statuses.orValue([]) }}"
+        investigation_items:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?investigation_items.orValue([]) }}"
+        skipped_items:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?skipped_items.orValue([]) }}"
+        raw_findings:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?raw_findings.orValue([]) }}"
+        cluster_reports:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?cluster_reports.orValue([]) }}"
+        publish_results:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?publish_results.orValue([]) }}"
+    outputs:
+      values:
+        summary:
+          required: true
+          schema:
+            type: string
+            description: Short plain-text/markdown TL;DR suitable for notifications and workflow step summaries
+      artifacts:
+        report:
+          required: true
+          contentType: text/markdown
+          description: Operator-facing markdown report summarising the whole ci-investigate run
+outputs:
+  values:
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.render.outputs.values.summary }}"
+  artifacts:
+    report:
+      ref: tasks.render.outputs.artifacts.report

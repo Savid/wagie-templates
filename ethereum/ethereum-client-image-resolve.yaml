@@ -1,0 +1,161 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/ethereum-client-image-resolve
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use to resolve an Ethereum client Docker image reference to its underlying Git repository URL and commit SHA for source investigation. Tries OCI labels first, then a curated map of known Ethereum client image patterns.
+tags: ["ethereum", "ethpandaops", "client", "image", "git", "resolve"]
+inputs:
+  values:
+    image_ref:
+      required: true
+      description: Docker image reference from the original CI runtime identity, e.g. `ethpandaops/reth:main` or a digest-pinned ref.
+      schema: { type: string }
+tasks:
+  resolve:
+    quality-gate: "${{ has(outputs.values.resolution_method) }}"
+    instructions: |-
+      Resolve an Ethereum client image to its git repo URL + commit SHA. Best-effort. You need a worker with tool-use (shell access to run docker/git). Always return — emit empty fields with `resolution_method = "failed"` when nothing can be resolved. Distinguish exact tested source identity from repository-only fallbacks; source links must not imply a mutable image tag was resolved to its tested commit.
+
+      Procedure:
+
+      1. If `image_ref` is empty, set `resolution_method = "failed"`, `commit_exact=false`, `resolution_caveat="image_ref was empty"`, and return empty fields.
+
+      2. Try OCI labels first:
+         - `docker inspect <image_ref> --format '{{json .Config.Labels}}'` (pull the image first if not local, with a short timeout — skip pulling if it would take more than ~30s).
+         - Look for `org.opencontainers.image.revision` → commit_sha.
+         - Look for `org.opencontainers.image.source` → repo_url.
+         - If `org.opencontainers.image.source` is absent but `org.opencontainers.image.url` points at `https://github.com/<owner>/<repo>/tree/<ref>` or `/blob/<ref>`, derive `repo_url = https://github.com/<owner>/<repo>`.
+         - If `org.opencontainers.image.revision` is absent but `org.opencontainers.image.version` is a release tag such as `v1.2.3`, and `repo_url` is known, resolve the tag to a commit with `git ls-remote --tags <repo_url> refs/tags/<version> refs/tags/<version>^{}` (prefer the peeled `^{}` commit for annotated tags). Use that as `commit_sha` when found.
+         - When `repo_url` is present and either a revision label or version-tag resolution produced `commit_sha`, set `resolution_method = "label"`, `commit_exact=true`, `resolution_caveat=""`, and return.
+
+      3. Fall back to curated overrides — these are image refs whose org or repo name differs from the upstream GitHub repo (so the generic step in (4) would resolve incorrectly):
+         - `prysmaticlabs/prysm-beacon-chain`, `prysmaticlabs/prysm-validator` → `https://github.com/OffchainLabs/prysm` (org changed). client_name=`prysm`.
+         - `ethereum/client-go` → `https://github.com/ethereum/go-ethereum` (repo renamed). client_name=`geth`.
+         - `ledgerwatch/erigon` → `https://github.com/erigontech/erigon` (org changed). client_name=`erigon`.
+         - `sifrai/grandine` → `https://github.com/grandinetech/grandine` (org changed). client_name=`grandine`.
+         - `statusim/nimbus-eth2` → `https://github.com/status-im/nimbus-eth2` (org spelling). client_name=`nimbus-eth2`.
+         - `consensys/teku` → `https://github.com/Consensys/teku` (case). client_name=`teku`.
+         - `chainsafe/lodestar` → `https://github.com/ChainSafe/lodestar` (case). client_name=`lodestar`.
+         - `nethermindeth/nethermind` → `https://github.com/NethermindEth/nethermind` (case). client_name=`nethermind`.
+         For any image whose repository starts with `ethpandaops/`, the org always re-maps. Strip the `ethpandaops/` prefix, drop any trailing `-bn`, `-vc`, `-validator`, `-beacon-chain`, `-rpc` suffix, and use the cleaned name to look up the upstream client in the curated list below OR derive via step 4:
+         - `reth` → paradigmxyz/reth (`https://github.com/paradigmxyz/reth`)
+         - `geth` → ethereum/go-ethereum
+         - `erigon` → erigontech/erigon
+         - `besu` → hyperledger/besu
+         - `nethermind` → NethermindEth/nethermind
+         - `teku` → Consensys/teku
+         - `lighthouse` → sigp/lighthouse
+         - `prysm`, `prysm-beacon-chain`, `prysm-validator` → OffchainLabs/prysm
+         - `nimbus-eth2`, `nimbus` → status-im/nimbus-eth2
+         - `lodestar` → ChainSafe/lodestar
+         - `grandine` → grandinetech/grandine
+         - `assertoor` → ethpandaops/assertoor (the one ethpandaops/* that stays in-org)
+         When matched, set `repo_url`, `client_name`, and `resolution_method = "tag-match"`.
+
+      4. Generic fallback for images NOT covered by step 3:
+         - Parse `image_ref` into `<registry>/<org>/<name>:<tag>` (or `<org>/<name>:<tag>` for docker hub).
+         - For docker hub images (no registry or `docker.io/`), default `repo_url = https://github.com/<org>/<name>`. Most modern OCI images on docker hub follow this convention.
+         - For `ghcr.io/<org>/<name>` images, default `repo_url = https://github.com/<org>/<name>` (literal mapping).
+         - For `gcr.io/`, `registry.gitlab.com/`, or other registries: do NOT guess — return `resolution_method = "failed"`. Forcing a wrong URL would cause avoidable clone failures for source inspection.
+         - Set `client_name` to `<name>` (lowercased, suffix-stripped like step 3 if matched there).
+         - Set `resolution_method = "tag-match"`.
+
+      5. Commit SHA inference (regardless of how repo_url was determined):
+         - If the image tag is a 7-40 char hex string, use it as `commit_sha`.
+         - If the tag has a `-g<sha>` suffix (common for git-describe builds), extract the SHA from after `g`.
+         - If the tag is a semver like `v1.2.3` or `release-v1.2.3`, resolve that tag against `repo_url` with `git ls-remote --tags` and return the tag commit when found. Do not leave it empty unless tag resolution fails.
+         - If the tag is `latest`, `main`, `master`, `nightly`, `dev`, or another mutable/unresolved tag: leave `commit_sha` empty and set `resolution_method = "default-head-fallback"` when `repo_url` is known. This means source inspection may use the repo's current default branch, not the exact source revision that built the tested image.
+
+      6. Set exactness metadata:
+         - `commit_exact=true` when `commit_sha` came from an OCI revision label, an exact hex tag, a git-describe suffix, or a resolved semver/release tag.
+         - `commit_exact=false` when `commit_sha` is empty or was not tied to the tested image identity.
+         - `resolution_caveat` should be empty for exact commits. For `default-head-fallback`, say `mutable/unresolved image tag; cloned repository HEAD is not proven to be the tested image commit`.
+
+      7. If even step 4 fails to produce a URL (non-docker-hub, non-ghcr registry), set `resolution_method = "failed"`, `commit_exact=false`, a concise `resolution_caveat`, and return empty fields. Do not invent a repo URL.
+
+      Always emit a short `summary` (1-2 sentences) describing what was tried and the outcome.
+    inputs:
+      values:
+        image_ref:
+          schema: { type: string }
+          value: "${{ inputs.values.image_ref }}"
+    outputs:
+      values:
+        repo_url:
+          required: true
+          schema:
+            type: string
+            description: HTTPS git repository URL (empty when resolution failed)
+        commit_sha:
+          required: true
+          schema:
+            type: string
+            description: 40-char hex commit SHA (or short SHA); empty when unknown
+        client_name:
+          required: true
+          schema:
+            type: string
+            description: Short client identifier (reth, geth, teku, …) inferred from image; empty when unknown
+        resolution_method:
+          required: true
+          schema:
+            type: string
+            enum: [label, tag-match, default-head-fallback, failed]
+            description: How the resolution was achieved
+        resolved_image_ref:
+          required: true
+          schema:
+            type: string
+            description: The image ref actually inspected
+        commit_exact:
+          required: true
+          schema:
+            type: boolean
+            description: True when commit_sha is tied to the tested image identity; false for default-branch fallbacks or unresolved mutable tags
+        resolution_caveat:
+          required: true
+          schema:
+            type: string
+            description: Human-readable caveat when source identity is not exact
+        summary:
+          required: true
+          schema: { type: string }
+outputs:
+  values:
+    repo_url:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.resolve.outputs.values.repo_url }}"
+    commit_sha:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.resolve.outputs.values.commit_sha }}"
+    client_name:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.resolve.outputs.values.client_name }}"
+    resolution_method:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.resolve.outputs.values.resolution_method }}"
+    resolved_image_ref:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.resolve.outputs.values.resolved_image_ref }}"
+    commit_exact:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.resolve.outputs.values.commit_exact }}"
+    resolution_caveat:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.resolve.outputs.values.resolution_caveat }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.resolve.outputs.values.summary }}"

@@ -1,0 +1,510 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/assertoor-ci-regression-window
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when an assertoor-test failure needs a factual last-known-good comparison before reproduction, bug-hunt, or source review. Emits a structured regression window rather than a root-cause verdict.
+tags: ["assertoor", "ci", "regression", "baseline", "github-actions", "ethereum", "ethpandaops"]
+inputs:
+  values:
+    source_repo:
+      required: true
+      description: GitHub repository whose Actions artifacts should be compared, e.g. ethpandaops/assertoor-test.
+      schema: { type: string }
+    workflow_ref:
+      required: true
+      description: Workflow file path or filename to search for the nearest previous success.
+      schema: { type: string }
+    head_branch:
+      description: Branch of the current failing run. Prefer previous successes on the same branch.
+      schema: { type: string, default: "" }
+    shard_id:
+      required: true
+      description: Matrix shard id to match across current and previous runs.
+      schema: { type: string }
+    test_name:
+      description: Failing assertoor test id, used to compare the exact test/config where possible.
+      schema: { type: string, default: "" }
+    current_run_id:
+      required: true
+      description: Current failing GitHub Actions run id.
+      schema: { type: string }
+    current_run_url:
+      description: Current failing GitHub Actions run URL.
+      schema: { type: string, default: "" }
+    current_run_started_at:
+      description: Current failing run start timestamp.
+      schema: { type: string, default: "" }
+    current_head_sha:
+      description: Source commit SHA tested by the current failing run.
+      schema: { type: string, default: "" }
+    current_failure:
+      required: true
+      description: NormalizedFailure for the representative failed shard.
+      schema:
+        type: object
+        properties:
+          shard_id:
+            type: string
+          test_name:
+            type: string
+          head_sha:
+            type: string
+          run_started_at:
+            type: string
+          artifact_paths:
+            type: array
+            items:
+              type: object
+              properties:
+                name:
+                  type: string
+                path:
+                  type: string
+          kurtosis_params_path:
+            type: string
+          runtime_components:
+            type: array
+            items:
+              type: object
+              properties:
+                service_name:
+                  type: string
+                role:
+                  type: string
+                client:
+                  type: string
+                image_ref:
+                  type: string
+                image_id:
+                  type: string
+                manifest_digest:
+                  type: string
+                source_repo:
+                  type: string
+                source_revision:
+                  type: string
+                version:
+                  type: string
+                build_info:
+                  type: string
+          package_runtime_identity:
+            type: object
+            properties:
+              package_ref:
+                type: string
+              package_started_at:
+                type: string
+              source_repo:
+                type: string
+              source_revision:
+                type: string
+              source:
+                type: string
+              evidence:
+                type: string
+          original_artifact_evidence:
+            type: array
+            items:
+              type: object
+              properties:
+                source:
+                  type: string
+                category:
+                  type: string
+                summary:
+                  type: string
+                excerpt:
+                  type: string
+          evidence_brief:
+            type: object
+            properties:
+              headline:
+                type: string
+              artifact_signal:
+                type: string
+              component_hints:
+                type: string
+              routing_notes:
+                type: string
+  secrets:
+    gh_token:
+      required: false
+      description: Optional GitHub token secret used as GH_TOKEN for gh CLI commands. When unset, use ambient gh authentication.
+tasks:
+  build:
+    quality-gate: "${{ has(outputs.values.baseline_summary) && has(outputs.values.component_changes) }}"
+    instructions: |-
+      Build a factual regression window by comparing this failed shard/test against the nearest previous successful workflow run for the same repo, branch, workflow, and shard. A worker with tool-use (gh CLI) is required.
+
+      This task does not assign root cause. It produces structured change facts for bug-hunt, classification, and source review.
+
+      GitHub authentication:
+      - `gh_token` is an optional secret. When present, use it only as the `GH_TOKEN` environment variable for `gh` commands and set `GH_PROMPT_DISABLED=1`.
+      - When `gh_token` is absent, use the worker's ambient `gh` authentication (`gh auth status` should pass).
+      - Command examples below omit the environment wrapper; apply the authentication environment to every `gh` invocation.
+      - Do not run `gh auth login`, `gh auth token`, or `gh auth status --show-token`. Do not print, echo, persist, return, or write the token into files. Keep shell tracing and `GH_DEBUG` disabled while a token is in scope.
+
+      Procedure:
+      1. Locate the nearest previous successful GitHub Actions run before current_run_started_at.
+         - Prefer same workflow_ref, same head_branch, same event class, and same shard_id.
+         - Use gh api or gh run list against source_repo.
+         - If no previous success is found in the first 100 runs, set baseline_found=false and preserve a useful limitation.
+      2. Download that previous success's artifacts for shard_id, especially summary-<shard_id> and enclave-dump-*<shard_id>.
+      3. Compare current vs previous:
+         - source repo head SHA
+         - test file path/commit when test_name is known
+         - configured participant image refs from kurtosis-params.yaml
+         - runtime image identity from service spec.json: Config.Image, Image, ImageManifestDescriptor.digest, OCI source/version/revision labels
+         - startup build/version lines from service output.log
+         - Kurtosis package runtime identity from kurtosis-api/output.log: package locator, package execution timestamp, resolved source repo, and resolved revision when available
+      4. Treat mutable tags such as latest, stable, master, main, nightly, dev, or unpinned repo images as unresolved until converted to a manifest digest or build/source revision from artifacts.
+      5. Include the Kurtosis package source as a comparable component when either current or previous artifact evidence identifies it. Use `component="ethereum-package"` (or the package repo name), `role="kurtosis-package"`, package locators as image_ref fields when no image ref applies, and source revisions/timestamps in the revision/evidence fields.
+      6. Build component_changes as one row per comparable runtime, configured component, or package source:
+         {component, service_name, role, previous_image_ref, current_image_ref, previous_digest, current_digest, previous_revision, current_revision, previous_version, current_version, changed, evidence}
+      7. Split component_changes into:
+         - changed_components: changed=true or strong evidence of different source/build identity
+         - unchanged_components: confidently same digest/revision/version
+         - unresolved_components: mutable or missing identity where equality cannot be proven
+      8. Build target_ranking. Rank components highest when they both changed across the window and emitted concrete original artifact evidence. If no emitter changed, rank the smallest changed set before unresolved components.
+      9. Build commit_ranges when both previous_revision and current_revision look like commits in the same source repo, including the package source repo when comparable.
+      10. Render baseline_summary as compact markdown under 100 lines:
+         - previous success run id/url/timestamp/head sha
+         - current failure run id/url/timestamp/head sha
+         - changed components
+         - unchanged components
+         - unresolved components
+         - suggested first diff target
+
+      Degrade gracefully. Missing artifacts should produce baseline_found=false or unresolved components, not a failed task.
+    inputs:
+      values:
+        source_repo:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.source_repo }}"
+        workflow_ref:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.workflow_ref }}"
+        head_branch:
+          schema: { type: string }
+          value: "${{ inputs.values.?head_branch.orValue('') }}"
+        shard_id:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.shard_id }}"
+        test_name:
+          schema: { type: string }
+          value: "${{ inputs.values.?test_name.orValue('') }}"
+        current_run_id:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.current_run_id }}"
+        current_run_url:
+          schema: { type: string }
+          value: "${{ inputs.values.?current_run_url.orValue('') }}"
+        current_run_started_at:
+          schema: { type: string }
+          value: "${{ inputs.values.?current_run_started_at.orValue('') }}"
+        current_head_sha:
+          schema: { type: string }
+          value: "${{ inputs.values.?current_head_sha.orValue('') }}"
+        current_failure:
+          required: true
+          schema: { type: object }
+          value: "${{ inputs.values.current_failure }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+    outputs:
+      values:
+        baseline_found:
+          required: true
+          schema: { type: boolean }
+        previous_success_run_id:
+          required: true
+          schema: { type: string }
+        previous_success_run_url:
+          required: true
+          schema: { type: string }
+        previous_success_started_at:
+          required: true
+          schema: { type: string }
+        previous_success_head_sha:
+          required: true
+          schema: { type: string }
+        same_source_sha:
+          required: true
+          schema: { type: boolean }
+        same_test_sha:
+          required: true
+          schema: { type: boolean }
+        baseline_summary:
+          required: true
+          schema: { type: string }
+        component_changes:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                component:
+                  type: string
+                service_name:
+                  type: string
+                role:
+                  type: string
+                previous_image_ref:
+                  type: string
+                current_image_ref:
+                  type: string
+                previous_digest:
+                  type: string
+                current_digest:
+                  type: string
+                previous_revision:
+                  type: string
+                current_revision:
+                  type: string
+                previous_version:
+                  type: string
+                current_version:
+                  type: string
+                changed:
+                  type: boolean
+                evidence:
+                  type: string
+        changed_components:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                component:
+                  type: string
+                service_name:
+                  type: string
+                role:
+                  type: string
+                previous_image_ref:
+                  type: string
+                current_image_ref:
+                  type: string
+                previous_digest:
+                  type: string
+                current_digest:
+                  type: string
+                previous_revision:
+                  type: string
+                current_revision:
+                  type: string
+                changed:
+                  type: boolean
+                evidence:
+                  type: string
+        unchanged_components:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                component:
+                  type: string
+                service_name:
+                  type: string
+                role:
+                  type: string
+                previous_digest:
+                  type: string
+                current_digest:
+                  type: string
+                previous_revision:
+                  type: string
+                current_revision:
+                  type: string
+                evidence:
+                  type: string
+        unresolved_components:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                component:
+                  type: string
+                service_name:
+                  type: string
+                role:
+                  type: string
+                previous_image_ref:
+                  type: string
+                current_image_ref:
+                  type: string
+                reason:
+                  type: string
+                evidence:
+                  type: string
+        target_ranking:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                component:
+                  type: string
+                service_name:
+                  type: string
+                target_kind:
+                  type: string
+                rank:
+                  type: number
+                reason:
+                  type: string
+                confidence:
+                  type: number
+        commit_ranges:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                component:
+                  type: string
+                repo_url:
+                  type: string
+                previous_revision:
+                  type: string
+                current_revision:
+                  type: string
+                range:
+                  type: string
+        confidence:
+          required: true
+          schema: { type: number }
+        limitations:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+outputs:
+  values:
+    baseline_found:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.build.outputs.values.baseline_found }}"
+    previous_success_run_id:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.build.outputs.values.previous_success_run_id }}"
+    previous_success_run_url:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.build.outputs.values.previous_success_run_url }}"
+    previous_success_started_at:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.build.outputs.values.previous_success_started_at }}"
+    previous_success_head_sha:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.build.outputs.values.previous_success_head_sha }}"
+    current_run_id:
+      required: true
+      schema: { type: string }
+      value: "${{ inputs.values.current_run_id }}"
+    current_run_url:
+      required: true
+      schema: { type: string }
+      value: "${{ inputs.values.?current_run_url.orValue('') }}"
+    current_run_started_at:
+      required: true
+      schema: { type: string }
+      value: "${{ inputs.values.?current_run_started_at.orValue('') }}"
+    current_head_sha:
+      required: true
+      schema: { type: string }
+      value: "${{ inputs.values.?current_head_sha.orValue('') }}"
+    same_source_sha:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.build.outputs.values.same_source_sha }}"
+    same_test_sha:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.build.outputs.values.same_test_sha }}"
+    baseline_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.build.outputs.values.baseline_summary }}"
+    component_changes:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.build.outputs.values.component_changes }}"
+    changed_components:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.build.outputs.values.changed_components }}"
+    unchanged_components:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.build.outputs.values.unchanged_components }}"
+    unresolved_components:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.build.outputs.values.unresolved_components }}"
+    target_ranking:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.build.outputs.values.target_ranking }}"
+    commit_ranges:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.build.outputs.values.commit_ranges }}"
+    confidence:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.build.outputs.values.confidence }}"
+    limitations:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.build.outputs.values.limitations }}"
+    regression_window:
+      required: true
+      schema: { type: object }
+      value: |-
+        ${{
+          {
+            "baseline_found": tasks.build.outputs.values.baseline_found,
+            "previous_success_run_id": tasks.build.outputs.values.previous_success_run_id,
+            "previous_success_run_url": tasks.build.outputs.values.previous_success_run_url,
+            "previous_success_started_at": tasks.build.outputs.values.previous_success_started_at,
+            "previous_success_head_sha": tasks.build.outputs.values.previous_success_head_sha,
+            "current_run_id": inputs.values.current_run_id,
+            "current_run_url": inputs.values.?current_run_url.orValue(''),
+            "current_run_started_at": inputs.values.?current_run_started_at.orValue(''),
+            "current_head_sha": inputs.values.?current_head_sha.orValue(''),
+            "same_source_sha": tasks.build.outputs.values.same_source_sha,
+            "same_test_sha": tasks.build.outputs.values.same_test_sha,
+            "baseline_summary": tasks.build.outputs.values.baseline_summary,
+            "component_changes": tasks.build.outputs.values.component_changes,
+            "changed_components": tasks.build.outputs.values.changed_components,
+            "unchanged_components": tasks.build.outputs.values.unchanged_components,
+            "unresolved_components": tasks.build.outputs.values.unresolved_components,
+            "target_ranking": tasks.build.outputs.values.target_ranking,
+            "commit_ranges": tasks.build.outputs.values.commit_ranges,
+            "confidence": tasks.build.outputs.values.confidence,
+            "limitations": tasks.build.outputs.values.limitations
+          }
+        }}

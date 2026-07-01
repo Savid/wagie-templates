@@ -1,0 +1,878 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/kurtosis-ethereum-bug-hunt
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a workflow needs to launch or inspect a Kurtosis Ethereum network and iteratively hunt for candidate bugs or anomalies. Carries forward typed findings and remaining gaps across rounds until coverage is sufficient or additional probing has diminishing value.
+tags: ["kurtosis", "ethereum", "ethpandaops", "bug-hunt", "debugging", "investigation", "iterative"]
+inputs:
+  values:
+    goal:
+      required: true
+      description: Desired network setup or bug-hunting objective
+      schema: { type: string }
+    enclave_name:
+      required: true
+      description: Kurtosis enclave name to create or inspect
+      schema: { type: string }
+    hunt_focus:
+      description: Optional focus such as finality, interop, forks, or service-health
+      schema: { type: string, default: general }
+    constraints:
+      description: Optional implementation constraints
+      schema: { type: string }
+    example_hint:
+      description: Optional CI example or package feature hint
+      schema: { type: string }
+    package_ref:
+      description: Kurtosis package reference to run
+      schema: { type: string, default: github.com/ethpandaops/ethereum-package }
+    config_mode:
+      description: Whether to design a sensible minimal config or replicate an existing devnet profile
+      schema:
+        type: string
+        default: minimal
+        enum: [minimal, devnet-profile]
+    config_source:
+      description: >-
+        Forwarded to the inner lifecycle. `design` (default) generates config via `kurtosis-ethereum-config`. `existing-enclave` skips config design and inspects an already-running enclave, synthesizing `config_summary` and `effective_client_pairs` from observed services - use when the enclave was launched by an upstream step (e.g. `assertoor-ci-kurtosis-reproduce`).
+      schema:
+        type: string
+        default: design
+        enum: [design, existing-enclave]
+    devnet_name:
+      description: Existing devnet or devnet-group name to model when `config_mode` is `devnet-profile`
+      schema: { type: string }
+    client_type:
+      description: Optional client type to preserve explicitly in the generated config
+      schema: { type: string }
+    image_hint:
+      description: Optional image or build hint to preserve explicitly in the generated config
+      schema: { type: string }
+    client_pairs:
+      description: Optional explicit client-pair and image combinations to pass through to config design
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            el_type: { type: string }
+            cl_type: { type: string }
+            vc_type: { type: string }
+            el_image: { type: string }
+            cl_image: { type: string }
+            vc_image: { type: string }
+            el_extra_params: { type: array, items: { type: string } }
+            cl_extra_params: { type: array, items: { type: string } }
+            vc_extra_params: { type: array, items: { type: string } }
+            count: { type: number }
+          required: [el_type, cl_type]
+    max_iterations:
+      description: Maximum bug-hunt probe rounds before returning the best accumulated result
+      schema: { type: number, default: 3 }
+    min_iterations:
+      description: Minimum probe rounds before convergence is allowed. Guards against premature exit when the first round looks decisive but might be wrong. Set to 1 to allow single-round convergence.
+      schema: { type: number, default: 2 }
+    stop_on_sufficient:
+      description: When true, the loop may stop after min_iterations once assess_progress marks completeness sufficient. Set false when a caller wants extra attribution rounds even after the symptom is understood.
+      schema: { type: boolean, default: true }
+    prior_summary:
+      description: Optional prior AI summary or hypothesis (e.g. from upstream CI triage). When non-empty, the first probe round validates this hypothesis against live network evidence rather than starting broad.
+      schema: { type: string, default: "" }
+    test_context:
+      description: Optional summary of the test that produced the observed failure (assertions, thresholds, key task dependencies, prior known-flaky history). When provided, helps probe rounds distinguish "test config too strict" from "actual bug."
+      schema: { type: string, default: "" }
+    regression_window:
+      description: Optional structured last-known-good comparison from a previous-success baseline. Used as factual change context, not as proof of root cause.
+      schema:
+        type: object
+        properties:
+          baseline_found: { type: boolean }
+          baseline_summary: { type: string }
+          changed_components:
+            type: array
+            items:
+              type: object
+              properties:
+                component: { type: string }
+                service_name: { type: string }
+                role: { type: string }
+                evidence: { type: string }
+          unresolved_components:
+            type: array
+            items:
+              type: object
+              properties:
+                component: { type: string }
+                service_name: { type: string }
+                reason: { type: string }
+          target_ranking:
+            type: array
+            items:
+              type: object
+              properties:
+                component: { type: string }
+                service_name: { type: string }
+                reason: { type: string }
+                confidence: { type: number }
+    launch:
+      description: Whether to launch a fresh network before hunting
+      schema: { type: boolean, default: true }
+    auto_cleanup:
+      description: Whether to remove the enclave after the hunt
+      schema: { type: boolean, default: true }
+tasks:
+  run:
+    inputs:
+      values:
+        goal:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        enclave_name:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.enclave_name }}"
+        hunt_focus:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?hunt_focus.orValue('general') }}"
+        constraints:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?constraints.orValue('') }}"
+        example_hint:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?example_hint.orValue('') }}"
+        package_ref:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?package_ref.orValue('github.com/ethpandaops/ethereum-package') }}"
+        config_mode:
+          required: true
+          schema: { type: string, enum: [minimal, devnet-profile] }
+          value: "${{ inputs.values.?config_mode.orValue('minimal') }}"
+        config_source:
+          required: true
+          schema: { type: string, enum: [design, existing-enclave] }
+          value: "${{ inputs.values.?config_source.orValue('design') }}"
+        devnet_name:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?devnet_name.orValue('') }}"
+        client_type:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?client_type.orValue('') }}"
+        image_hint:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?image_hint.orValue('') }}"
+        client_pairs:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                el_type: { type: string }
+                cl_type: { type: string }
+                vc_type: { type: string }
+                el_image: { type: string }
+                cl_image: { type: string }
+                vc_image: { type: string }
+                el_extra_params: { type: array, items: { type: string } }
+                cl_extra_params: { type: array, items: { type: string } }
+                vc_extra_params: { type: array, items: { type: string } }
+                count: { type: number }
+              required: [el_type, cl_type]
+          value: "${{ inputs.values.?client_pairs.orValue([]) }}"
+        max_iterations:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?max_iterations.orValue(3) }}"
+        min_iterations:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?min_iterations.orValue(2.0) }}"
+        stop_on_sufficient:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?stop_on_sufficient.orValue(true) }}"
+        prior_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?prior_summary.orValue('') }}"
+        test_context:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?test_context.orValue('') }}"
+        regression_window:
+          required: true
+          schema: { type: object }
+          value: "${{ inputs.values.?regression_window.orValue({}) }}"
+        launch:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?launch.orValue(true) }}"
+        auto_cleanup:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?auto_cleanup.orValue(true) }}"
+        force:
+          required: true
+          schema: { type: boolean }
+          value: "${{ true }}"
+    tasks:
+      lifecycle:
+        uses: dev.wagie/kurtosis-ethereum-network-lifecycle@1.0.0
+        inputs:
+          values:
+            goal:
+              value: "${{ inputs.values.goal }}"
+            enclave_name:
+              value: "${{ inputs.values.enclave_name }}"
+            constraints:
+              value: "${{ inputs.values.constraints }}"
+            example_hint:
+              value: "${{ inputs.values.example_hint }}"
+            package_ref:
+              value: "${{ inputs.values.package_ref }}"
+            config_mode:
+              value: "${{ inputs.values.config_mode }}"
+            config_source:
+              value: "${{ inputs.values.config_source }}"
+            devnet_name:
+              value: "${{ inputs.values.devnet_name }}"
+            client_type:
+              value: "${{ inputs.values.client_type }}"
+            image_hint:
+              value: "${{ inputs.values.image_hint }}"
+            client_pairs:
+              value: "${{ inputs.values.client_pairs }}"
+            launch:
+              value: "${{ inputs.values.launch }}"
+            auto_cleanup:
+              value: "${{ false }}"
+      hunt:
+        needs: [lifecycle]
+        inputs:
+          values:
+            enclave_name:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.enclave_name }}"
+            goal:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.goal }}"
+            hunt_focus:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.hunt_focus }}"
+            config_summary:
+              required: true
+              schema: { type: string }
+              value: "${{ tasks.lifecycle.outputs.values.config_summary }}"
+            launch_summary:
+              required: true
+              schema: { type: string }
+              value: "${{ tasks.lifecycle.outputs.values.launch_summary }}"
+            status_summary:
+              required: true
+              schema: { type: string }
+              value: "${{ tasks.lifecycle.outputs.values.status_summary }}"
+            service_names:
+              required: true
+              schema: { type: array, items: { type: string } }
+              value: "${{ tasks.lifecycle.outputs.values.service_names }}"
+            public_endpoints:
+              required: true
+              schema: { type: array, items: { type: string } }
+              value: "${{ tasks.lifecycle.outputs.values.public_endpoints }}"
+            prior_summary:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.prior_summary }}"
+            test_context:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.test_context }}"
+            regression_window:
+              required: true
+              schema: { type: object }
+              value: "${{ inputs.values.regression_window }}"
+            min_iterations:
+              required: true
+              schema: { type: number }
+              value: "${{ inputs.values.min_iterations }}"
+            stop_on_sufficient:
+              required: true
+              schema: { type: boolean }
+              value: "${{ inputs.values.stop_on_sufficient }}"
+        loop:
+          max: "${{ inputs.values.max_iterations }}"
+          until: "${{ outputs.values.rounds_completed >= inputs.values.min_iterations && ((inputs.values.stop_on_sufficient == true && outputs.values.completeness == 'sufficient') || outputs.values.diminishing_streak >= 2.0) }}"
+          onMaxExhausted: continue
+        tasks:
+          probe_round:
+            quality-gate: "${{ has(outputs.values.summary) && size(outputs.values.summary) > 0 && has(outputs.values.findings) && has(outputs.values.suggested_gaps) }}"
+            instructions: |-
+              Run one focused Kurtosis Ethereum bug-hunt round.
+
+              Use the `kurtosis` CLI as the primary tool surface for enclave operations.
+              Use the `panda` CLI and MCP tools for network analysis when available.
+              A worker with reasoning and tool-use is required.
+
+              Strategy:
+              - If `previous_findings` is empty AND `prior_summary` is non-empty,
+                treat the prior summary as a strong hypothesis. Round 1 should
+                attempt to confirm or refute it with concrete evidence from the
+                running network, not start broad. Record the validated finding (or
+                its refutation) explicitly.
+              - If `previous_findings` is empty AND `prior_summary` is empty,
+                start broad: establish a baseline for service health, consensus
+                progress, finality, fork agreement, sync state, and obvious log
+                anomalies.
+              - If `gaps` are present, prioritize the highest-value unresolved
+                questions first and use targeted checks to confirm, refute, or
+                sharpen prior hypotheses.
+              - Do not repeat already-established findings unless you are materially
+                upgrading them with stronger evidence or refuting them.
+              - When `regression_window` is present, use it as change context:
+                prioritize changed or unresolved components that also emitted
+                concrete errors, but do not treat a changed image/commit as proof
+                without live evidence.
+
+              Evidence rules:
+              - Every finding must cite concrete evidence from this round.
+              - Reference specific commands, endpoints, log excerpts, or observed
+                service states rather than generic statements.
+              - Prefer a small number of substantive findings over a long weak list.
+
+              Null-hypothesis discipline (read before every round):
+              - The default assumption is that the system under test (the clients) is at fault. Your job is to identify WHICH client and HOW. Refute that assumption only with concrete code/RPC/log evidence — not with absence of client-side evidence.
+              - When `test_context` is non-empty, treat it as a NEUTRAL DESCRIPTION of what the test contract is. It exists so you can distinguish "test contract was violated by the system under test" from "test contract was met." It is NOT an invitation to argue "the test threshold is too strict" or "the test asserts something unreasonable." Such conclusions require affirmative evidence: a specific test assertion contradicting ethereum protocol spec or canonical client documentation. "Seems strict for a small devnet" is not evidence.
+              - When client behaviour appears correct under your probes, your finding should be that THIS specific client is fine — not that the test/framework/config must be at fault. Other clients in the matrix may still be the problem.
+              - If you cannot localise the problem to any specific client after thorough probing, return that explicitly as a `suggested_gap` ("which client is failing the contract?") — do NOT shift the hypothesis to test/framework/config without affirmative evidence.
+
+              For each finding:
+              - Set severity as critical, high, medium, or low.
+              - Set status as suspected, confirmed, or refuted.
+              - State the affected scope precisely.
+              - Include a confidence score from 0-100.
+              - Set `warrants_devnet_debug` when the finding deserves deeper
+                follow-up via a devnet-debug workflow.
+
+              Return only new or materially upgraded findings from this round.
+              Also return `suggested_gaps`: the next checks that would most improve
+              confidence or close unresolved ambiguity.
+            inputs:
+              values:
+                enclave_name:
+                  schema: { type: string }
+                  value: "${{ inputs.values.enclave_name }}"
+                goal:
+                  schema: { type: string }
+                  value: "${{ inputs.values.goal }}"
+                hunt_focus:
+                  schema: { type: string }
+                  value: "${{ inputs.values.hunt_focus }}"
+                prior_summary:
+                  schema: { type: string }
+                  value: "${{ inputs.values.prior_summary }}"
+                test_context:
+                  schema: { type: string }
+                  value: "${{ inputs.values.test_context }}"
+                config_summary:
+                  schema: { type: string }
+                  value: "${{ inputs.values.config_summary }}"
+                launch_summary:
+                  schema: { type: string }
+                  value: "${{ inputs.values.launch_summary }}"
+                status_summary:
+                  schema: { type: string }
+                  value: "${{ inputs.values.status_summary }}"
+                service_names:
+                  schema: { type: array, items: { type: string } }
+                  value: "${{ inputs.values.service_names }}"
+                public_endpoints:
+                  schema: { type: array, items: { type: string } }
+                  value: "${{ inputs.values.public_endpoints }}"
+                previous_findings:
+                  schema: { type: array, items: { type: object } }
+                  value: "${{ loop.findings.orValue([]) }}"
+                gaps:
+                  schema: { type: array, items: { type: object } }
+                  value: "${{ loop.gaps.orValue([]) }}"
+                regression_window:
+                  schema: { type: object }
+                  value: "${{ inputs.values.regression_window }}"
+            outputs:
+              values:
+                findings:
+                  required: true
+                  schema:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        title: { type: string }
+                        severity: { type: string, enum: [critical, high, medium, low] }
+                        summary: { type: string }
+                        affected_scope: { type: string }
+                        category: { type: string }
+                        confidence: { type: number }
+                        status: { type: string, enum: [suspected, confirmed, refuted] }
+                        evidence: { type: array, items: { type: string } }
+                        warrants_devnet_debug: { type: boolean }
+                        next_check: { type: string }
+                      required: [title, severity, summary, affected_scope, status, evidence]
+                    description: New or materially upgraded candidate bugs from this round
+                summary:
+                  required: true
+                  schema: { type: string, description: Concise summary of this probe round }
+                suggested_gaps:
+                  required: true
+                  schema:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        question: { type: string }
+                        priority: { type: string, enum: [high, medium, low] }
+                        reason: { type: string }
+                      required: [question, priority, reason]
+                    description: Targeted next checks suggested by this round
+          accumulate_findings:
+            needs: [probe_round]
+            quality-gate: "${{ has(outputs.values.findings) }}"
+            instructions: |
+              Merge prior bug-hunt findings with the latest probe round.
+              A worker with reasoning is required.
+
+              Rules:
+              - Preserve prior findings unless the new round materially upgrades
+                or refutes them.
+              - Do not duplicate the same anomaly under slightly different wording.
+              - Prefer the strongest available severity, confidence, and evidence.
+              - When new evidence strengthens an existing finding, update that
+                finding instead of appending a duplicate.
+              - When a prior finding is refuted, keep it but mark status as
+                `refuted` and explain why in the summary or evidence.
+              - Keep evidence concrete and attributable to specific tool outputs.
+              - When in doubt, preserve information rather than dropping it.
+            inputs:
+              values:
+                previous_findings:
+                  schema: { type: array, items: { type: object } }
+                  value: "${{ loop.findings.orValue([]) }}"
+                new_findings:
+                  schema: { type: array, items: { type: object } }
+                  value: "${{ tasks.probe_round.outputs.values.findings }}"
+            outputs:
+              values:
+                findings:
+                  required: true
+                  schema:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        title: { type: string }
+                        severity: { type: string, enum: [critical, high, medium, low] }
+                        summary: { type: string }
+                        affected_scope: { type: string }
+                        category: { type: string }
+                        confidence: { type: number }
+                        status: { type: string, enum: [suspected, confirmed, refuted] }
+                        evidence: { type: array, items: { type: string } }
+                        warrants_devnet_debug: { type: boolean }
+                        next_check: { type: string }
+                      required: [title, severity, summary, affected_scope, status, evidence]
+                    description: Accumulated Kurtosis Ethereum bug-hunt findings
+          assess_progress:
+            needs: [probe_round, accumulate_findings]
+            quality-gate: "${{ has(outputs.values.completeness) && has(outputs.values.information_gain) && has(outputs.values.gaps) && has(outputs.values.summary) && size(outputs.values.summary) > 0 }}"
+            instructions: |
+              Assess whether a Kurtosis Ethereum bug hunt should continue.
+              A worker with reasoning is required.
+
+              Evaluate the accumulated findings against the hunt objective and focus.
+
+              Completeness:
+              - Mark `sufficient` when the hunt has produced enough actionable signal
+                for follow-up, or when the network appears healthy and no meaningful
+                high-priority gaps remain.
+              - Mark `insufficient` when important high-priority uncertainties remain.
+
+              Information gain:
+              - `high` when the latest round materially improved understanding.
+              - `moderate` when it sharpened confidence but did not change the picture
+                dramatically.
+              - `diminishing` when it mostly repeated known information or left the
+                same unresolved gaps in place.
+
+              Gap rules:
+              - Merge `prior_gaps` and `suggested_gaps` into a concise deduplicated set.
+              - Keep only the highest-value remaining gaps.
+              - Prefer gaps that would confirm or refute the most severe or ambiguous
+                findings.
+              - Return at most 4 gaps.
+
+              Be direct. The point of this task is to decide whether another round is
+              worth the cost.
+            inputs:
+              values:
+                goal:
+                  schema: { type: string }
+                  value: "${{ inputs.values.goal }}"
+                hunt_focus:
+                  schema: { type: string }
+                  value: "${{ inputs.values.hunt_focus }}"
+                findings:
+                  schema: { type: array, items: { type: object } }
+                  value: "${{ tasks.accumulate_findings.outputs.values.findings }}"
+                prior_gaps:
+                  schema: { type: array, items: { type: object } }
+                  value: "${{ loop.gaps.orValue([]) }}"
+                suggested_gaps:
+                  schema: { type: array, items: { type: object } }
+                  value: "${{ tasks.probe_round.outputs.values.suggested_gaps }}"
+                previous_gap_count:
+                  schema: { type: number }
+                  value: "${{ loop.gap_count.orValue(0.0) }}"
+                latest_round_summary:
+                  schema: { type: string }
+                  value: "${{ tasks.probe_round.outputs.values.summary }}"
+            outputs:
+              values:
+                completeness:
+                  required: true
+                  schema: { type: string, enum: [insufficient, sufficient], description: Whether another probe round is materially necessary }
+                information_gain:
+                  required: true
+                  schema: { type: string, enum: [high, moderate, diminishing], description: Whether another round is likely to add substantial new information }
+                gaps:
+                  required: true
+                  schema:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        question: { type: string }
+                        priority: { type: string, enum: [high, medium, low] }
+                        reason: { type: string }
+                      required: [question, priority, reason]
+                    description: Highest-value remaining gaps for another probe round
+                summary:
+                  required: true
+                  schema: { type: string, description: Concise stop-or-continue assessment }
+          log_iteration:
+            needs: [probe_round, accumulate_findings, assess_progress]
+            quality-gate: "${{ has(outputs.values.iteration_summary) && size(outputs.values.iteration_summary) > 0 }}"
+            instructions: |
+              Produce a one-line summary of this bug-hunt iteration including:
+              new findings count, total findings count, remaining gaps count,
+              information gain, and whether findings increased from the previous
+              round or stayed flat.
+            inputs:
+              values:
+                new_findings_count:
+                  schema: { type: number }
+                  value: "${{ size(tasks.probe_round.outputs.values.findings) }}"
+                findings_count:
+                  schema: { type: number }
+                  value: "${{ size(tasks.accumulate_findings.outputs.values.findings) }}"
+                previous_findings_count:
+                  schema: { type: number }
+                  value: "${{ loop.findings_count.orValue(999.0) }}"
+                remaining_gap_count:
+                  schema: { type: number }
+                  value: "${{ size(tasks.assess_progress.outputs.values.gaps) }}"
+                information_gain:
+                  schema: { type: string }
+                  value: "${{ tasks.assess_progress.outputs.values.information_gain }}"
+                round_summary:
+                  schema: { type: string }
+                  value: "${{ tasks.probe_round.outputs.values.summary }}"
+            outputs:
+              values:
+                iteration_summary:
+                  required: true
+                  schema: { type: string, description: One-line summary of this bug-hunt iteration }
+        outputs:
+          values:
+            findings:
+              required: true
+              schema: { type: array, items: { type: object } }
+              value: "${{ tasks.accumulate_findings.outputs.values.findings }}"
+            gaps:
+              required: true
+              schema: { type: array, items: { type: object } }
+              value: "${{ tasks.assess_progress.outputs.values.gaps }}"
+            gap_count:
+              required: true
+              schema: { type: number }
+              value: "${{ size(tasks.assess_progress.outputs.values.gaps) }}"
+            findings_count:
+              required: true
+              schema: { type: number }
+              value: "${{ size(tasks.accumulate_findings.outputs.values.findings) }}"
+            prev_findings_count:
+              required: true
+              schema: { type: number }
+              value: "${{ loop.findings_count.orValue(999.0) }}"
+            rounds_completed:
+              required: true
+              schema: { type: number }
+              value: "${{ loop.rounds_completed.orValue(0.0) + 1.0 }}"
+            completeness:
+              required: true
+              schema: { type: string }
+              value: "${{ tasks.assess_progress.outputs.values.completeness }}"
+            information_gain:
+              required: true
+              schema: { type: string }
+              value: "${{ tasks.assess_progress.outputs.values.information_gain }}"
+            diminishing_streak:
+              required: true
+              schema: { type: number, description: "Consecutive rounds where information_gain has been diminishing; the loop exits when this reaches 2 (and min_iterations has been met)." }
+              value: "${{ tasks.assess_progress.outputs.values.information_gain == 'diminishing' ? loop.diminishing_streak.orValue(0.0) + 1.0 : 0.0 }}"
+            summary:
+              required: true
+              schema: { type: string }
+              value: "${{ tasks.assess_progress.outputs.values.summary }}"
+            iteration_log:
+              required: true
+              schema: { type: string }
+              value: '${{ loop.iteration_log.orValue('''') + "\n" + tasks.log_iteration.outputs.values.iteration_summary }}'
+            converged:
+              required: true
+              schema: { type: boolean }
+              value: "${{ (loop.rounds_completed.orValue(0.0) + 1.0) >= inputs.values.min_iterations && ((inputs.values.stop_on_sufficient == true && tasks.assess_progress.outputs.values.completeness == 'sufficient') || (tasks.assess_progress.outputs.values.information_gain == 'diminishing' ? loop.diminishing_streak.orValue(0.0) + 1.0 : 0.0) >= 2.0) }}"
+      render_report:
+        needs: [lifecycle, hunt]
+        quality-gate: "${{ has(outputs.values.summary) && size(outputs.values.summary) > 0 }}"
+        instructions: |-
+          Render a concise markdown bug-hunt report from the accumulated
+          findings and convergence state. A worker with reasoning is required.
+
+          Structure:
+          1. Title
+          2. Hunt objective and network context
+          3. Overall assessment
+          4. Candidate findings ranked by severity and confidence
+          5. Remaining gaps or unresolved questions
+          6. Recommended actions
+          7. Iteration log
+
+          Writing standards:
+          - Ground every finding in concrete evidence from the findings array.
+          - Call out confirmed findings separately from suspected ones.
+          - If no meaningful bug candidates were found, say so directly.
+          - Keep the report operational and easy to scan.
+
+          Write the rendered markdown as the `report` output.
+        inputs:
+          values:
+            goal:
+              schema: { type: string }
+              value: "${{ inputs.values.goal }}"
+            enclave_name:
+              schema: { type: string }
+              value: "${{ inputs.values.enclave_name }}"
+            hunt_focus:
+              schema: { type: string }
+              value: "${{ inputs.values.hunt_focus }}"
+            config_summary:
+              schema: { type: string }
+              value: "${{ tasks.lifecycle.outputs.values.config_summary }}"
+            launch_summary:
+              schema: { type: string }
+              value: "${{ tasks.lifecycle.outputs.values.launch_summary }}"
+            status_summary:
+              schema: { type: string }
+              value: "${{ tasks.lifecycle.outputs.values.status_summary }}"
+            findings:
+              schema: { type: array, items: { type: object } }
+              value: "${{ tasks.hunt.outputs.values.findings }}"
+            gaps:
+              schema: { type: array, items: { type: object } }
+              value: "${{ tasks.hunt.outputs.values.gaps }}"
+            completeness:
+              schema: { type: string }
+              value: "${{ tasks.hunt.outputs.values.completeness }}"
+            information_gain:
+              schema: { type: string }
+              value: "${{ tasks.hunt.outputs.values.information_gain }}"
+            iteration_log:
+              schema: { type: string }
+              value: "${{ tasks.hunt.outputs.values.iteration_log }}"
+            iterations_used:
+              schema: { type: number }
+              value: "${{ tasks.hunt.outputs.values.rounds_completed }}"
+            converged:
+              schema: { type: boolean }
+              value: "${{ tasks.hunt.outputs.values.converged }}"
+        outputs:
+          values:
+            report:
+              required: true
+              schema: { type: string, description: Bug hunt report with findings, summaries, and recommended actions }
+            summary:
+              required: true
+              schema: { type: string, description: Concise final bug-hunt summary }
+            recommended_actions:
+              required: true
+              schema:
+                type: array
+                items: { type: string }
+                description: Suggested next actions after the hunt
+    finally:
+      cleanup_enclave:
+        if: "${{ inputs.values.auto_cleanup == true && inputs.values.launch == true }}"
+        uses: dev.wagie/kurtosis-enclave-cleanup@1.0.0
+        inputs:
+          values:
+            enclave_name:
+              value: "${{ inputs.values.enclave_name }}"
+            force:
+              value: "${{ inputs.values.force }}"
+    outputs:
+      values:
+        resolved_network_name:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.lifecycle.outputs.values.resolved_network_name }}"
+        resolved_network_group:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.lifecycle.outputs.values.resolved_network_group }}"
+        config:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.lifecycle.outputs.values.config }}"
+        effective_client_pairs:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.lifecycle.outputs.values.effective_client_pairs }}"
+        fallback_pair_added:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.lifecycle.outputs.values.fallback_pair_added }}"
+        launch_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.lifecycle.outputs.values.launch_summary }}"
+        report:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.render_report.outputs.values.report }}"
+        findings:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.hunt.outputs.values.findings }}"
+        remaining_gaps:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.hunt.outputs.values.gaps }}"
+        summary:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.render_report.outputs.values.summary }}"
+        recommended_actions:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.render_report.outputs.values.recommended_actions }}"
+        completeness:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.hunt.outputs.values.completeness }}"
+        information_gain:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.hunt.outputs.values.information_gain }}"
+        converged:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.hunt.outputs.values.converged }}"
+        iterations_used:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.hunt.outputs.values.rounds_completed }}"
+        iteration_log:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.hunt.outputs.values.iteration_log }}"
+outputs:
+  values:
+    resolved_network_name:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.resolved_network_name }}"
+    resolved_network_group:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.resolved_network_group }}"
+    config:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.config }}"
+    effective_client_pairs:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.run.outputs.values.effective_client_pairs }}"
+    fallback_pair_added:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.run.outputs.values.fallback_pair_added }}"
+    launch_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.launch_summary }}"
+    report:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.report }}"
+    findings:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.run.outputs.values.findings }}"
+    remaining_gaps:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.run.outputs.values.remaining_gaps }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.summary }}"
+    recommended_actions:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.run.outputs.values.recommended_actions }}"
+    completeness:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.completeness }}"
+    information_gain:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.information_gain }}"
+    converged:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.run.outputs.values.converged }}"
+    iterations_used:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.run.outputs.values.iterations_used }}"
+    iteration_log:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.iteration_log }}"

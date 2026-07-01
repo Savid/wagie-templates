@@ -1,0 +1,713 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-debug
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when an Ethereum devnet needs structured diagnosis or a status report; gathers network context, builds a health baseline, investigates issues if found, validates findings, and returns an operator-ready summary. Works for both active incidents and routine status checks.
+tags: ["devnet", "ethereum", "ethpandaops", "debugging", "status", "health", "incident", "observability"]
+inputs:
+  values:
+    network:
+      required: true
+      description: Target devnet to investigate
+      schema: { type: string }
+    problem_statement:
+      description: User-reported symptom or debugging goal (empty for routine status checks)
+      schema: { type: string, default: "" }
+    timeframe:
+      description: Requested investigation timeframe or epoch range
+      schema: { type: string, default: past 1 hour }
+    focus:
+      description: Optional focus such as split, offline-nodes, finality-delay, logs, or rpc-validation
+      schema: { type: string, default: general }
+    suspected_instances:
+      description: Specific node instances to prioritize during baseline analysis
+      schema:
+        type: array
+        items: { type: string }
+        default: []
+tasks:
+  context:
+    uses: dev.wagie/devnet-context@1.0.0
+    inputs:
+      values:
+        network:
+          value: "${{ inputs.values.network }}"
+        timeframe:
+          value: "${{ inputs.values.?timeframe.orValue('past 1 hour') }}"
+        include_ci_surfaces:
+          value: "${{ true }}"
+  baseline:
+    needs: [context]
+    uses: dev.wagie/devnet-baseline@1.0.0
+    inputs:
+      values:
+        problem_statement:
+          value: "${{ inputs.values.?problem_statement.orValue('') }}"
+        focus:
+          value: "${{ inputs.values.?focus.orValue('general') }}"
+        network_name:
+          value: "${{ tasks.context.outputs.values.network_name }}"
+        investigation_timeframe:
+          value: "${{ tasks.context.outputs.values.investigation_timeframe }}"
+        instances:
+          value: "${{ size(inputs.values.?suspected_instances.orValue([])) > 0 ? inputs.values.?suspected_instances.orValue([]) : tasks.context.outputs.values.instances }}"
+        data_profile:
+          value: "${{ tasks.context.outputs.values.data_profile }}"
+        context_summary:
+          value: "${{ tasks.context.outputs.values.summary }}"
+        notes_summary:
+          value: "${{ tasks.context.outputs.values.notes_summary }}"
+        notes_highlights:
+          value: "${{ tasks.context.outputs.values.notes_highlights }}"
+        notes_assumptions:
+          value: "${{ tasks.context.outputs.values.notes_assumptions }}"
+  assess_finality:
+    needs: [context, baseline]
+    if: "${{ tasks.baseline.outputs.values.has_finality_issues == true }}"
+    uses: dev.wagie/devnet-finality-assessment@1.0.0
+    inputs:
+      values:
+        network_name:
+          value: "${{ tasks.context.outputs.values.network_name }}"
+        investigation_timeframe:
+          value: "${{ tasks.context.outputs.values.investigation_timeframe }}"
+        threshold_epochs:
+          value: "${{ 4 }}"
+        instances:
+          value: "${{ size(inputs.values.?suspected_instances.orValue([])) > 0 ? inputs.values.?suspected_instances.orValue([]) : tasks.context.outputs.values.instances }}"
+        data_profile:
+          value: "${{ tasks.context.outputs.values.data_profile }}"
+        context_summary:
+          value: "${{ tasks.context.outputs.values.summary }}"
+        notes_summary:
+          value: "${{ tasks.context.outputs.values.notes_summary }}"
+        notes_highlights:
+          value: "${{ tasks.context.outputs.values.notes_highlights }}"
+  analyze_finality_causes:
+    needs: [context, baseline, assess_finality]
+    if: "${{ tasks.baseline.outputs.values.has_finality_issues == true }}"
+    quality-gate: "${{ has(outputs.values.likely_causes) && size(outputs.values.likely_causes) > 0 && has(outputs.values.primary_cause) && size(outputs.values.primary_cause) > 0 && has(outputs.values.recommended_actions) && size(outputs.values.recommended_actions) > 0 }}"
+    instructions: |-
+      Analyze the most likely causes of the finality problem. You have finality assessment
+      data and baseline observations — use them to form and test hypotheses.
+      A worker with reasoning and tool-use is required.
+
+      Use the `panda` CLI. For Python API calls, use heredoc stdin:
+      ```
+      panda execute <<'PYEOF'
+      <python code here>
+      PYEOF
+      ```
+
+      ## Approach
+
+      1. **Hypothesize** — From the finality evidence, rank the most likely causes. State
+         what evidence would confirm or refute each.
+      2. **Investigate** — For each hypothesis (strongest first), gather targeted evidence.
+         Stop when a hypothesis is confirmed or clearly refuted.
+      3. **Correlate** — Check for temporal correlation, client clustering, and signal
+         agreement across data sources.
+      4. **Conclude** — State likely causes with supporting evidence, plus practical actions.
+         Set `primary_cause` to the single most likely cause.
+
+      ## Available tools
+
+      - Participation: `panda dora overview/epoch` (start from head_epoch - 1).
+      - Offline attesters: Dora `/api/v1/validators/activity` via `panda execute` heredoc.
+      - Node health: `panda ethnode syncing/finality`.
+      - Logs: `panda loki query <data_profile.loki_datasource> '{network="<network>", instance="<instance>"} |~ "(?i)(CRIT|ERR)"' --limit 100`
+      - Runbooks: `panda search runbooks "finality"`.
+
+      ## Cause categories
+
+      - Low participation / offline nodes / network split / client-specific bug
+      - Attestation processing bug (CPU spikes, attestation drops on one client type)
+      - Execution-side issue (EL errors blocking CL payload processing)
+      - Transient condition already recovering (participation trending up)
+      - Recent change correlation (client update, config change, fork activation)
+
+      ## Evidence and uncertainty
+
+      Ground every finding in a specific tool output. If evidence is unavailable or ambiguous,
+      say so rather than inferring. If you cannot definitively determine the cause, rank the
+      candidates by likelihood and note what additional evidence would resolve the ambiguity.
+
+      Use full resolved instance names. Include concrete log or RPC excerpts when they
+      materially support the conclusion.
+    inputs:
+      values:
+        network_name:
+          schema: { type: string }
+          value: "${{ tasks.context.outputs.values.network_name }}"
+        investigation_timeframe:
+          schema: { type: string }
+          value: "${{ tasks.context.outputs.values.investigation_timeframe }}"
+        data_profile:
+          schema: { type: object }
+          value: "${{ tasks.context.outputs.values.data_profile }}"
+        finality_status:
+          schema: { type: string }
+          value: "${{ tasks.assess_finality.outputs.values.?finality_status.orValue('') }}"
+        finality_summary:
+          schema: { type: string }
+          value: "${{ tasks.assess_finality.outputs.values.?finality_summary.orValue('') }}"
+        epochs_behind:
+          schema: { type: number }
+          value: "${{ tasks.assess_finality.outputs.values.?epochs_behind.orValue(0) }}"
+        finality_broke_epoch:
+          schema: { type: number }
+          value: "${{ tasks.assess_finality.outputs.values.?finality_broke_epoch.orValue(-1) }}"
+        participation_trend:
+          schema: { type: string }
+          value: "${{ tasks.assess_finality.outputs.values.?participation_trend.orValue('unknown') }}"
+        evidence:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.assess_finality.outputs.values.?evidence.orValue([]) }}"
+        finality_checkpoints:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.assess_finality.outputs.values.?finality_checkpoints.orValue([]) }}"
+        participation_by_epoch:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.assess_finality.outputs.values.?participation_by_epoch.orValue([]) }}"
+        affected_instances:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.baseline.outputs.values.affected_instances }}"
+        baseline_instance_reports:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.baseline.outputs.values.instance_reports }}"
+        fork_data:
+          schema: { type: object }
+          value: "${{ tasks.baseline.outputs.values.fork_data }}"
+        validator_activity:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.baseline.outputs.values.validator_activity }}"
+        notes_summary:
+          schema: { type: string }
+          value: "${{ tasks.context.outputs.values.notes_summary }}"
+        notes_highlights:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.context.outputs.values.notes_highlights }}"
+    outputs:
+      values:
+        likely_causes:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+            description: Ordered likely causes of the finality issue
+        primary_cause:
+          required: true
+          schema:
+            type: string
+            description: Single most likely cause (first element of likely_causes)
+        evidence:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+            description: Concrete observations supporting the finality root-cause analysis
+        recommended_actions:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+            description: Practical next actions for operators
+        summary:
+          required: true
+          schema:
+            type: string
+            description: Finality-incident summary
+        instance_reports:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                instance_name:
+                  type: string
+                role:
+                  type: string
+                client:
+                  type: string
+                status:
+                  type: string
+                summary:
+                  type: string
+                evidence:
+                  type: array
+                  items:
+                    type: string
+                suggested_actions:
+                  type: array
+                  items:
+                    type: string
+              required: [instance_name, summary]
+            description: Instance-level findings using full resolved instance names
+        log_examples:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                instance_name:
+                  type: string
+                source:
+                  type: string
+                excerpt:
+                  type: string
+                significance:
+                  type: string
+              required: [source, excerpt, significance]
+            description: Concrete log or RPC evidence examples supporting the finality diagnosis
+  investigate_generic:
+    needs: [context, baseline]
+    if: "${{ tasks.baseline.outputs.values.has_finality_issues != true }}"
+    quality-gate: "${{ has(outputs.values.findings_summary) && size(outputs.values.findings_summary) > 0 && has(outputs.values.suspected_root_cause) && size(outputs.values.suspected_root_cause) > 0 }}"
+    instructions: |-
+      Investigate the devnet issue using the baseline observations and available data surfaces.
+      A worker with reasoning and tool-use is required.
+
+      Use the `panda` CLI. For Python API calls, use heredoc stdin:
+      ```
+      panda execute <<'PYEOF'
+      <python code here>
+      PYEOF
+      ```
+
+      ## Approach
+
+      1. **Hypothesize** — From the baseline, rank the most likely root causes. State what
+         evidence would confirm or refute each.
+      2. **Investigate** — For each hypothesis (strongest first), gather targeted evidence.
+         Stop when confirmed or clearly refuted.
+      3. **Correlate** — Cross-reference: temporal correlation, scope clustering (region,
+         client type), signal agreement across data sources, recent changes.
+      4. **Conclude** — State the root cause with supporting evidence, plus practical actions.
+
+      Investigate CL before EL — the network moves forward via the CL, and most devnet
+      issues originate there.
+
+      ## Available tools
+
+      - Dora: `panda dora overview/epoch/slot` (start epochs from head_epoch - 1).
+      - Ethnode: `panda ethnode syncing/finality/peers/version/beacon-get`.
+      - Fork choice: `panda ethnode beacon-get <network> <instance> /eth/v1/debug/fork_choice`.
+      - Logs: `panda loki query <datasource> '<logql>' --limit N --start <time>`. Use `data_profile.loki_datasource` when `has_loki` is true.
+      - Runbooks: `panda search runbooks "debug devnet"`.
+
+      ## Log investigation
+
+      Use label filters in LogQL — unfiltered queries time out. Schema depends on `data_profile.loki_schema`:
+      - **ethpandaops** (remote): `{network="<network>", instance="<instance>"} |~ "(?i)(CRIT|ERR)" | json | line_format "{{.message}}"`. If `{{.message}}` is empty, try `{{.log}}` or raw lines.
+      - **kurtosis** (local): `{job="kurtosis"} | json | kurtosis_service_name="<service>" | log=~"(?i)(CRIT|ERR)" | line_format "{{.log}}"`.
+      - Escalate: CRIT/ERR first, then WARN, then INFO.
+
+      If `data_profile.mode == "local"` and `data_profile.has_loki != true`, fall back to
+      `kurtosis service logs <enclave> <service>` for targeted log inspection instead of trying
+      Loki queries.
+
+      CL/EL diagnostic matrix:
+      - CL errors only → consensus issue
+      - CL engine API errors + EL errors → execution issue
+      - CL clean + EL errors → EL struggling, not primary cause
+      - Both erroring → shared dependency or cascade
+
+      ## Issue type guidance
+
+      - **network-split**: compare fork views, find divergence slot, examine the divergence block.
+      - **offline-nodes**: confirm unreachable vs syncing vs isolated vs absent from logs.
+      - **client-bug / execution-issue**: compare CL and EL evidence, look for client-type patterns.
+
+      ## Evidence and uncertainty
+
+      Ground every finding in a specific tool output. If evidence is unavailable or ambiguous,
+      say so. If you cannot definitively determine root cause, rank candidates by likelihood
+      and note what additional evidence would help.
+
+      Use full resolved instance names. Include concrete log or RPC excerpts that help an
+      operator decide what to inspect next.
+    inputs:
+      values:
+        problem_statement:
+          schema: { type: string }
+          value: "${{ inputs.values.?problem_statement.orValue('') }}"
+        focus:
+          schema: { type: string }
+          value: "${{ inputs.values.?focus.orValue('general') }}"
+        network_name:
+          schema: { type: string }
+          value: "${{ tasks.context.outputs.values.network_name }}"
+        investigation_timeframe:
+          schema: { type: string }
+          value: "${{ tasks.context.outputs.values.investigation_timeframe }}"
+        data_profile:
+          schema: { type: object }
+          value: "${{ tasks.context.outputs.values.data_profile }}"
+        suspected_issue_type:
+          schema: { type: string }
+          value: "${{ tasks.baseline.outputs.values.suspected_issue_type }}"
+        baseline_summary:
+          schema: { type: string }
+          value: "${{ tasks.baseline.outputs.values.baseline_summary }}"
+        affected_instances:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.baseline.outputs.values.affected_instances }}"
+        baseline_evidence:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.baseline.outputs.values.baseline_evidence }}"
+        instance_reports:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.baseline.outputs.values.instance_reports }}"
+        fork_data:
+          schema: { type: object }
+          value: "${{ tasks.baseline.outputs.values.fork_data }}"
+        validator_activity:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.baseline.outputs.values.validator_activity }}"
+        epoch_snapshots:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.baseline.outputs.values.epoch_snapshots }}"
+        notes_summary:
+          schema: { type: string }
+          value: "${{ tasks.context.outputs.values.notes_summary }}"
+        notes_highlights:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.context.outputs.values.notes_highlights }}"
+    outputs:
+      values:
+        suspected_root_cause:
+          required: true
+          schema:
+            type: string
+            description: Most likely root cause hypothesis
+        findings_summary:
+          required: true
+          schema:
+            type: string
+            description: Summary of the key findings
+        evidence:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+            description: Concrete observations supporting the hypothesis
+        recommended_actions:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+            description: Practical next actions for operators
+        instance_reports:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                instance_name:
+                  type: string
+                role:
+                  type: string
+                client:
+                  type: string
+                status:
+                  type: string
+                summary:
+                  type: string
+                evidence:
+                  type: array
+                  items:
+                    type: string
+                suggested_actions:
+                  type: array
+                  items:
+                    type: string
+              required: [instance_name, summary]
+            description: Instance-level findings using full resolved instance names
+        log_examples:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                instance_name:
+                  type: string
+                source:
+                  type: string
+                excerpt:
+                  type: string
+                significance:
+                  type: string
+              required: [source, excerpt, significance]
+            description: Concrete log or RPC evidence examples supporting the diagnosis
+  verify_findings:
+    needs: [context, baseline, assess_finality, analyze_finality_causes, investigate_generic]
+    quality-gate: "${{ has(outputs.values.verification_summary) && size(outputs.values.verification_summary) > 0 && has(outputs.values.issues) }}"
+    instructions: |-
+      Audit the investigation findings before they reach the operator.
+      A worker with reasoning is required.
+
+      For each claim in the findings:
+      - Is it directly supported by a tool output from this session?
+      - Could the same evidence support a different conclusion?
+      - Are there contradictions between findings?
+
+      Flag issues as:
+      - over-confident: claim stronger than evidence supports
+      - under-supported: claim without cited tool output
+      - contradiction: findings that conflict with each other
+      - missing-perspective: obvious investigation path not taken
+
+      If issues are found, note what the adjusted conclusion should be.
+      If no issues are found, confirm the findings are well-supported.
+    inputs:
+      values:
+        suspected_issue_type:
+          schema: { type: string }
+          value: "${{ tasks.baseline.outputs.values.suspected_issue_type }}"
+        findings_summary:
+          schema: { type: string }
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?summary.orValue('') : tasks.investigate_generic.outputs.values.?findings_summary.orValue('') }}"
+        suspected_root_cause:
+          schema: { type: string }
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?primary_cause.orValue('') : tasks.investigate_generic.outputs.values.?suspected_root_cause.orValue('') }}"
+        evidence:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?evidence.orValue([]) : tasks.investigate_generic.outputs.values.?evidence.orValue([]) }}"
+        recommended_actions:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?recommended_actions.orValue([]) : tasks.investigate_generic.outputs.values.?recommended_actions.orValue([]) }}"
+    outputs:
+      values:
+        verification_summary:
+          required: true
+          schema:
+            type: string
+            description: Summary of verification audit
+        issues:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                type:
+                  type: string
+                  enum: [over-confident, under-supported, contradiction, missing-perspective]
+                description:
+                  type: string
+                suggestion:
+                  type: string
+              required: [type, description]
+            description: Issues found during verification
+  conclude:
+    needs: [context, baseline, assess_finality, analyze_finality_causes, investigate_generic, verify_findings]
+    quality-gate: "${{ has(outputs.values.severity) && size(outputs.values.severity) > 0 }}"
+    instructions: |-
+      Produce an operator-ready devnet debug summary.
+      A worker with reasoning is required.
+
+      Structure:
+      1. Symptoms: what is happening now (observable behavior).
+      2. Root cause: most likely root cause with the concrete evidence that supports it.
+      3. Affected scope: which nodes, clients, or forks are involved (use full instance names).
+      4. Confidence caveats: if the verification step flagged issues, note them here.
+      5. Dora links: include links to relevant epochs, slots, or validators when Dora data was available.
+      6. Suggested remediation: practical next steps — restart nodes, inspect a specific client, escalate to a client team, or continue observing.
+
+      Be direct and concise. This output should help a principal decide the immediate next action.
+      If the verification raised concerns, adjust the summary's confidence language accordingly.
+
+      Write the rendered debug summary as the `summary` output artifact.
+    inputs:
+      values:
+        network_name:
+          schema: { type: string }
+          value: "${{ tasks.context.outputs.values.network_name }}"
+        problem_statement:
+          schema: { type: string }
+          value: "${{ inputs.values.?problem_statement.orValue('') }}"
+        context_summary:
+          schema: { type: string }
+          value: "${{ tasks.context.outputs.values.summary }}"
+        notes_summary:
+          schema: { type: string }
+          value: "${{ tasks.context.outputs.values.notes_summary }}"
+        baseline_summary:
+          schema: { type: string }
+          value: "${{ tasks.baseline.outputs.values.baseline_summary }}"
+        suspected_issue_type:
+          schema: { type: string }
+          value: "${{ tasks.baseline.outputs.values.suspected_issue_type }}"
+        findings_summary:
+          schema: { type: string }
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?summary.orValue('') : tasks.investigate_generic.outputs.values.?findings_summary.orValue('') }}"
+        suspected_root_cause:
+          schema: { type: string }
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?primary_cause.orValue('') : tasks.investigate_generic.outputs.values.?suspected_root_cause.orValue('') }}"
+        evidence:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?evidence.orValue([]) : tasks.investigate_generic.outputs.values.?evidence.orValue([]) }}"
+        recommended_actions:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?recommended_actions.orValue([]) : tasks.investigate_generic.outputs.values.?recommended_actions.orValue([]) }}"
+        verification_summary:
+          schema: { type: string }
+          value: "${{ tasks.verify_findings.outputs.values.verification_summary }}"
+        verification_issues:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.verify_findings.outputs.values.issues }}"
+    outputs:
+      values:
+        severity:
+          required: true
+          schema:
+            type: string
+            description: Overall incident severity estimate
+            enum: [low, medium, high, critical]
+      artifacts:
+        summary:
+          required: true
+          contentType: text/markdown
+          description: Final operator-ready devnet debug summary
+  render_report:
+    needs: [context, baseline, assess_finality, analyze_finality_causes, investigate_generic, conclude]
+    uses: dev.wagie/devnet-report@1.0.0
+    inputs:
+      values:
+        network_name:
+          value: "${{ tasks.context.outputs.values.network_name }}"
+        investigation_timeframe:
+          value: "${{ tasks.context.outputs.values.investigation_timeframe }}"
+        problem_statement:
+          value: "${{ inputs.values.?problem_statement.orValue('') }}"
+        context_summary:
+          value: "${{ tasks.context.outputs.values.summary }}"
+        issue_type:
+          value: "${{ tasks.baseline.outputs.values.suspected_issue_type }}"
+        root_cause:
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?primary_cause.orValue('') : tasks.investigate_generic.outputs.values.?suspected_root_cause.orValue('') }}"
+        severity:
+          value: "${{ tasks.conclude.outputs.values.severity }}"
+        baseline_summary:
+          value: "${{ tasks.baseline.outputs.values.baseline_summary }}"
+        findings_summary:
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?summary.orValue('') : tasks.investigate_generic.outputs.values.?findings_summary.orValue('') }}"
+        affected_instances:
+          value: "${{ tasks.baseline.outputs.values.affected_instances }}"
+        evidence:
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?evidence.orValue([]) : tasks.investigate_generic.outputs.values.?evidence.orValue([]) }}"
+        instance_reports:
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? (size(tasks.analyze_finality_causes.outputs.values.?instance_reports.orValue([])) > 0 ? tasks.analyze_finality_causes.outputs.values.?instance_reports.orValue([]) : tasks.baseline.outputs.values.instance_reports) : tasks.investigate_generic.outputs.values.?instance_reports.orValue([]) }}"
+        log_examples:
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?log_examples.orValue([]) : tasks.investigate_generic.outputs.values.?log_examples.orValue([]) }}"
+        recommended_actions:
+          value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?recommended_actions.orValue([]) : tasks.investigate_generic.outputs.values.?recommended_actions.orValue([]) }}"
+outputs:
+  values:
+    network_name:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.context.outputs.values.network_name }}"
+    investigation_timeframe:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.context.outputs.values.investigation_timeframe }}"
+    context_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.context.outputs.values.summary }}"
+    notes_url:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.context.outputs.values.notes_url }}"
+    issue_type:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.baseline.outputs.values.suspected_issue_type }}"
+    issue_type_confidence:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.baseline.outputs.values.issue_type_confidence }}"
+    issue_type_reasoning:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.baseline.outputs.values.issue_type_reasoning }}"
+    baseline_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.baseline.outputs.values.baseline_summary }}"
+    baseline_evidence:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.baseline.outputs.values.baseline_evidence }}"
+    node_sync_status:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.baseline.outputs.values.node_sync_status }}"
+    affected_instances:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.baseline.outputs.values.affected_instances }}"
+    has_finality_issues:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.baseline.outputs.values.has_finality_issues }}"
+    finality_status:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.assess_finality.outputs.values.?finality_status.orValue('') }}"
+    finality_status_confidence:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.assess_finality.outputs.values.?finality_status_confidence.orValue(0) }}"
+    finality_status_reasoning:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.assess_finality.outputs.values.?finality_status_reasoning.orValue('') }}"
+    findings_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?summary.orValue('') : tasks.investigate_generic.outputs.values.?findings_summary.orValue('') }}"
+    root_cause:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?primary_cause.orValue('') : tasks.investigate_generic.outputs.values.?suspected_root_cause.orValue('') }}"
+    evidence:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?evidence.orValue([]) : tasks.investigate_generic.outputs.values.?evidence.orValue([]) }}"
+    instance_reports:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? (size(tasks.analyze_finality_causes.outputs.values.?instance_reports.orValue([])) > 0 ? tasks.analyze_finality_causes.outputs.values.?instance_reports.orValue([]) : tasks.baseline.outputs.values.instance_reports) : tasks.investigate_generic.outputs.values.?instance_reports.orValue([]) }}"
+    log_examples:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?log_examples.orValue([]) : tasks.investigate_generic.outputs.values.?log_examples.orValue([]) }}"
+    recommended_actions:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.baseline.outputs.values.has_finality_issues == true ? tasks.analyze_finality_causes.outputs.values.?recommended_actions.orValue([]) : tasks.investigate_generic.outputs.values.?recommended_actions.orValue([]) }}"
+    severity:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.conclude.outputs.values.severity }}"
+  artifacts:
+    summary:
+      ref: tasks.conclude.outputs.artifacts.summary
+    report:
+      ref: tasks.render_report.outputs.artifacts.report

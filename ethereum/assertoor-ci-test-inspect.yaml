@@ -1,0 +1,94 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/assertoor-ci-test-inspect
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when an assertoor CI investigation needs a factual reference card for the exact test YAML under investigation.
+tags: ["assertoor", "ci", "ethereum", "test-inspection", "github"]
+inputs:
+  values:
+    test_name:
+      required: true
+      description: Assertoor test id to locate, such as eoa-transactions-test.
+      schema: { type: string }
+    source_repo:
+      required: true
+      description: GitHub repository in owner/name form that contains the assertoor test YAML.
+      schema: { type: string }
+    head_sha:
+      description: Exact source revision tested by CI. When empty, inspect the repository default branch.
+      schema: { type: string, default: "" }
+  secrets:
+    gh_token:
+      required: false
+      description: Optional GitHub token secret used as GH_TOKEN for gh CLI commands. When unset, use ambient gh authentication.
+tasks:
+  inspect:
+    quality-gate: "${{ has(outputs.values.test_summary) && size(outputs.values.test_summary) > 0 }}"
+    instructions: |-
+      Produce a neutral, descriptive summary of the assertoor test YAML so investigations can anchor probes against the actual test contract. This is a DESCRIPTION of what the test checks, not an opinion on whether those checks are reasonable. A worker with tool-use (gh CLI, code search) is required.
+
+      Hard rule: do not editorialise on whether thresholds are strict, lenient, appropriate for a small devnet, or otherwise mis-tuned. Just describe what the test contract is; comparison against observed behavior is outside this task.
+
+      GitHub authentication:
+      - `gh_token` is an optional secret. When present, use it only as the `GH_TOKEN` environment variable for `gh` commands and set `GH_PROMPT_DISABLED=1`.
+      - When `gh_token` is absent, use the worker's ambient `gh` authentication (`gh auth status` should pass).
+      - Command examples below omit the environment wrapper; apply the authentication environment to every `gh` invocation.
+      - Do not run `gh auth login`, `gh auth token`, or `gh auth status --show-token`. Do not print, echo, persist, return, or write the token into files. Keep shell tracing and `GH_DEBUG` disabled while a token is in scope.
+
+      Procedure:
+      1. Locate the failing test YAML in `source_repo`. Assertoor-test commonly stores tests under `assertoor-tests/*.yaml`; also try `.github/tests/*.yaml`, `tests/*.yaml`, or similar. Try common paths first; if not found, use `gh search code` to locate the file by `id: <test_name>` or `name:` match.
+      2. Fetch via either:
+         - `gh api "/repos/<source_repo>/contents/<path>?ref=<head_sha>" --jq .content | base64 -d` when `head_sha` is available (preferred; exact tested revision).
+         - `gh api "/repos/<source_repo>/contents/<path>" --jq .content | base64 -d` when `head_sha` is empty.
+         - `git clone --depth 50 https://github.com/<source_repo>` plus checkout `<head_sha>` plus local read if the path is unclear.
+      3. Parse the YAML and produce `test_summary` with these sections, descriptive only:
+         - Test contract: list the top-level success conditions, quoting the YAML's literal language where useful.
+         - Task tree: top-to-bottom in 3-6 bullets, naming task types and evident purpose.
+         - Configuration values: literal thresholds, timeouts, and counts the test depends on.
+         - Termination conditions: what causes failure, success, or timeout per the YAML.
+      4. Check recent commits to the test file with `gh api "/repos/<source_repo>/commits?path=<path>&per_page=10"` and surface `recent_test_changes` as a factual list of commit subjects in the last 60 days. Do not infer that recent changes caused the failure unless the commit itself says so.
+
+      Keep `test_summary` to roughly 200-350 words, dense and quote-rich. Treat the output like a reference card for the test, not a critique of it.
+    inputs:
+      values:
+        test_name:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.test_name }}"
+        source_repo:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.source_repo }}"
+        head_sha:
+          schema: { type: string }
+          value: "${{ inputs.values.?head_sha.orValue('') }}"
+      secrets:
+        gh_token:
+          ref: inputs.secrets.gh_token
+    outputs:
+      values:
+        test_summary:
+          required: true
+          schema:
+            type: string
+            description: Dense markdown summary of the test's assertions, thresholds, and termination behavior.
+        recent_test_changes:
+          required: true
+          schema:
+            type: string
+            description: Short factual list of recent commit subjects touching the test file, or empty.
+outputs:
+  values:
+    test_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.inspect.outputs.values.test_summary }}"
+    recent_test_changes:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.inspect.outputs.values.recent_test_changes }}"

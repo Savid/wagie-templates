@@ -1,0 +1,144 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/research-plan
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a research topic needs structured decomposition before investigation; discovers diverse perspectives and produces a prioritized plan of sub-questions.
+tags: ["research", "planning", "decomposition"]
+inputs:
+  values:
+    topic:
+      required: true
+      description: The topic to plan research for
+      schema: { type: string }
+    depth:
+      description: >-
+        Desired research depth. shallow: 3-5 sub-questions. moderate: 5-10. deep: 10-15.
+      schema: { type: string, default: moderate, enum: [shallow, moderate, deep] }
+    context:
+      description: Optional context or constraints to guide planning
+      schema: { type: string }
+tasks:
+  plan:
+    quality-gate: "${{ has(outputs.values.perspectives) && size(outputs.values.perspectives) > 1 && has(outputs.values.questions) && size(outputs.values.questions) > 2 }}"
+    instructions: |
+      Decompose the topic into a structured research plan.
+
+      Step 1 — Perspective discovery:
+      Identify 3-5 distinct perspectives, roles, or stakeholder viewpoints
+      that would each approach this topic differently. A scientific topic
+      might have perspectives like: researcher, practitioner, critic,
+      historian, regulator. A technical topic might have: architect,
+      operator, end-user, security auditor.
+
+      Always include a "baseline" perspective that covers fundamental
+      facts and definitions.
+
+      Step 2 — Sub-question generation:
+      For each perspective, generate questions that perspective would
+      naturally ask. Prioritize questions that:
+      - Cover ground no other perspective covers
+      - Target the most important unknowns
+      - Are specific enough to be answerable with evidence
+
+      Step 3 — Prioritization:
+      Rank questions by expected research value. Questions that unlock
+      understanding of other questions should rank higher. Assign
+      difficulty estimates to help downstream investigation allocate
+      effort.
+
+      Depth calibration:
+      - shallow: 3-5 total sub-questions across 2-3 perspectives
+      - moderate: 5-10 total sub-questions across 3-4 perspectives
+      - deep: 10-15 total sub-questions across 4-5 perspectives
+
+      Do NOT generate generic questions like "What are the pros and
+      cons?" — every question should be specific to this topic and
+      perspective.
+    inputs:
+      values:
+        topic:
+          schema: { type: string }
+          value: "${{ inputs.values.topic }}"
+        depth:
+          schema: { type: string }
+          value: "${{ inputs.values.?depth.orValue('moderate') }}"
+        context:
+          schema: { type: string }
+          value: "${{ inputs.values.?context.orValue('') }}"
+    outputs:
+      values:
+        perspectives:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Short label for this perspective
+                rationale:
+                  type: string
+                  description: Why this perspective matters for the topic
+              required: [name, rationale]
+            description: Discovered perspectives for the topic
+        questions:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                question:
+                  type: string
+                perspective:
+                  type: string
+                  description: Which perspective this question comes from
+                priority:
+                  type: string
+                  enum: [high, medium, low]
+                difficulty:
+                  type: string
+                  enum: [easy, moderate, hard]
+                rationale:
+                  type: string
+                  description: Why this question matters
+              required: [question, perspective, priority, difficulty]
+            description: Prioritized research sub-questions
+outputs:
+  values:
+    perspectives:
+      required: true
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            name:
+              type: string
+            rationale:
+              type: string
+          required: [name, rationale]
+      value: "${{ tasks.plan.outputs.values.perspectives }}"
+    questions:
+      required: true
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            question:
+              type: string
+            perspective:
+              type: string
+            priority:
+              type: string
+            difficulty:
+              type: string
+          required: [question, perspective, priority, difficulty]
+      value: "${{ tasks.plan.outputs.values.questions }}"

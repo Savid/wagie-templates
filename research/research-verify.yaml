@@ -1,0 +1,187 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/research-verify
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when accumulated research findings need adversarial verification; probes for missing perspectives, checks evidence-claim alignment, and calibrates confidence.
+tags: ["research", "verification", "adversarial"]
+inputs:
+  values:
+    topic:
+      required: true
+      description: Topic that was researched
+      schema: { type: string }
+    findings:
+      required: true
+      description: Accumulated findings to verify
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            claim:
+              type: string
+            evidence:
+              type: string
+            confidence:
+              type: number
+            source_type:
+              type: string
+            evidence_strength:
+              type: string
+            corroboration:
+              type: number
+            contradictions:
+              type: string
+          required: [claim, evidence, confidence]
+    perspectives:
+      description: Perspectives used during research planning
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            name:
+              type: string
+            rationale:
+              type: string
+          required: [name]
+tasks:
+  verify:
+    quality-gate: "${{ has(outputs.values.verified_findings) && size(outputs.values.verified_findings) > 0 && has(outputs.values.issues) && has(outputs.values.open_questions) && has(outputs.values.verification_summary) && size(outputs.values.verification_summary) > 0 }}"
+    instructions: |
+      You are a rigorous research auditor. Your job is to stress-test
+      these findings, not to validate them. Assume every claim might be
+      wrong until the evidence convinces you otherwise.
+
+      Step 1 — Evidence-claim alignment:
+      For each finding, assess whether the stated evidence actually
+      supports the claim at the stated confidence level. Flag:
+      - Claims where confidence exceeds what the evidence warrants
+      - Claims where evidence is vague, circular, or unverifiable
+      - Claims that rely on a single source for a strong assertion
+
+      Step 2 — Adversarial probing:
+      Actively challenge the research by asking:
+      - What evidence would contradict the strongest conclusions?
+      - Which perspectives or stakeholders are not represented?
+      - What assumptions are unstated but load-bearing?
+      - Are there temporal, geographic, or methodological blind spots?
+
+      Step 3 — Contradiction audit:
+      Identify findings that conflict with each other. For each
+      conflict, determine whether it reflects genuine disagreement
+      in the evidence or a flaw in the research.
+
+      Step 4 — Confidence calibration:
+      Adjust confidence scores based on your audit:
+      - Increase confidence where evidence is strong but was
+        conservatively scored
+      - Decrease confidence where evidence is weak but was
+        aggressively scored
+      - Flag findings where confidence should be "unknown" rather
+        than a number
+
+      Step 5 — Open questions:
+      List substantive questions that the research did not answer
+      and could not reasonably be expected to answer with available
+      sources. Distinguish these from gaps that further research
+      could fill.
+
+      Do NOT soften your assessment. If findings are well-supported,
+      say so directly. If they are weak, say that directly too.
+    inputs:
+      values:
+        topic:
+          schema: { type: string }
+          value: "${{ inputs.values.topic }}"
+        findings:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.findings }}"
+        perspectives:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?perspectives.orValue([]) }}"
+    outputs:
+      values:
+        verified_findings:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                claim:
+                  type: string
+                evidence:
+                  type: string
+                original_confidence:
+                  type: number
+                adjusted_confidence:
+                  type: number
+                confidence_rationale:
+                  type: string
+                source_type:
+                  type: string
+                evidence_strength:
+                  type: string
+                corroboration:
+                  type: number
+                contradictions:
+                  type: string
+              required: [claim, evidence, original_confidence, adjusted_confidence, confidence_rationale]
+            description: Findings with calibrated confidence scores
+        issues:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                type:
+                  type: string
+                  enum: [over-confident, under-supported, contradiction, missing-perspective, unstated-assumption]
+                description:
+                  type: string
+                affected_claims:
+                  type: array
+                  items:
+                    type: string
+                severity:
+                  type: string
+                  enum: [high, medium, low]
+              required: [type, description, severity]
+            description: Problems found during verification
+        open_questions:
+          required: true
+          schema:
+            type: array
+            items:
+              type: string
+            description: Substantive questions the research could not answer
+        verification_summary:
+          required: true
+          schema:
+            type: string
+            description: Overall assessment of research quality and reliability
+outputs:
+  values:
+    verified_findings:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.verify.outputs.values.verified_findings }}"
+    issues:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.verify.outputs.values.issues }}"
+    open_questions:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.verify.outputs.values.open_questions }}"
+    verification_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.verify.outputs.values.verification_summary }}"

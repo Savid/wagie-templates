@@ -1,0 +1,224 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/kurtosis-ethereum-devnet-config
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Internal building block for `kurtosis-ethereum-config` when `config_mode` is `devnet-profile`. Derives a minimal Kurtosis ethereum-package config from an existing devnet or devnet-group profile. Call directly only when you need the full derivation surface (notes, topology, reference) without the facade.
+tags: ["kurtosis", "ethereum", "ethpandaops", "devnet", "configuration"]
+inputs:
+  values:
+    devnet_name:
+      required: true
+      description: Existing devnet or devnet-group name to model
+      schema: { type: string }
+    goal:
+      description: Optional goal for how the derived config will be used
+      schema: { type: string }
+    client_type:
+      description: Optional client type to preserve explicitly in the derived config
+      schema: { type: string }
+    image_hint:
+      description: Optional image or build hint to preserve explicitly in the derived config
+      schema: { type: string }
+    client_pairs:
+      description: Optional explicit client-pair and image combinations to preserve or prefer in the derived config
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            el_type: { type: string }
+            cl_type: { type: string }
+            vc_type: { type: string }
+            el_image: { type: string }
+            cl_image: { type: string }
+            vc_image: { type: string }
+            el_extra_params: { type: array, items: { type: string } }
+            cl_extra_params: { type: array, items: { type: string } }
+            vc_extra_params: { type: array, items: { type: string } }
+            count: { type: number }
+          required: [el_type, cl_type]
+    constraints:
+      description: Optional implementation constraints
+      schema: { type: string }
+    package_ref:
+      description: Kurtosis package reference to target
+      schema: { type: string, default: github.com/ethpandaops/ethereum-package }
+tasks:
+  devnet_notes:
+    uses: dev.wagie/devnet-notes@1.0.0
+    inputs:
+      values:
+        network:
+          value: "${{ inputs.values.devnet_name }}"
+  topology_profile:
+    needs: [devnet_notes]
+    uses: dev.wagie/devnet-topology-profile@1.0.0
+    inputs:
+      values:
+        devnet_name:
+          value: "${{ inputs.values.devnet_name }}"
+        goal:
+          value: "${{ inputs.values.?goal.orValue('') }}"
+        client_type:
+          value: "${{ inputs.values.?client_type.orValue('') }}"
+        image_hint:
+          value: "${{ inputs.values.?image_hint.orValue('') }}"
+        client_pairs:
+          value: "${{ inputs.values.?client_pairs.orValue([]) }}"
+        constraints:
+          value: "${{ inputs.values.?constraints.orValue('') }}"
+        notes_summary:
+          value: "${{ tasks.devnet_notes.outputs.values.notes_summary }}"
+        notes_highlights:
+          value: "${{ tasks.devnet_notes.outputs.values.highlights }}"
+        notes_assumptions:
+          value: "${{ tasks.devnet_notes.outputs.values.assumptions }}"
+  package_reference:
+    needs: [topology_profile]
+    uses: dev.wagie/kurtosis-ethereum-reference@1.0.0
+    inputs:
+      values:
+        section:
+          value: "${{ 'participants' }}"
+        package_ref:
+          value: "${{ inputs.values.?package_ref.orValue('github.com/ethpandaops/ethereum-package') }}"
+  derive_config:
+    needs: [devnet_notes, topology_profile, package_reference]
+    quality-gate: "${{ has(outputs.values.config_summary) && size(outputs.values.config_summary) > 0 }}"
+    instructions: |-
+      Derive a minimal ethereum-package configuration from the resolved devnet context.
+      A worker with reasoning is required.
+
+      Rules:
+      - Treat the resolved devnet notes and topology profile as the source profile, not an exact guarantee of package parity.
+      - Preserve only the parameters and flags that matter for reproducing or approximating the devnet's behavior.
+      - Separate inferred facts from assumptions.
+      - Only include config fields that differ from ethereum-package defaults.
+      - Use the provided participants reference as the authoritative field/value guide.
+      - Preserve the minimal representative topology supplied in effective_client_pairs.
+      - Do not perform additional package or devnet discovery inside this step.
+      - Write the generated configuration as the `config` output.
+    inputs:
+      values:
+        devnet_name:
+          schema: { type: string }
+          value: "${{ inputs.values.devnet_name }}"
+        goal:
+          schema: { type: string }
+          value: "${{ inputs.values.?goal.orValue('') }}"
+        client_type:
+          schema: { type: string }
+          value: "${{ inputs.values.?client_type.orValue('') }}"
+        image_hint:
+          schema: { type: string }
+          value: "${{ inputs.values.?image_hint.orValue('') }}"
+        client_pairs:
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?client_pairs.orValue([]) }}"
+        constraints:
+          schema: { type: string }
+          value: "${{ inputs.values.?constraints.orValue('') }}"
+        package_ref:
+          schema: { type: string }
+          value: "${{ inputs.values.?package_ref.orValue('github.com/ethpandaops/ethereum-package') }}"
+        resolved_network_name:
+          schema: { type: string }
+          value: "${{ inputs.values.devnet_name }}"
+        resolved_network_group:
+          schema: { type: string }
+          value: "${{ '' }}"
+        devnet_summary:
+          schema: { type: string }
+          value: "${{ tasks.topology_profile.outputs.values.profile_summary }}"
+        notes_url:
+          schema: { type: string }
+          value: "${{ tasks.devnet_notes.outputs.values.notes_url }}"
+        notes_summary:
+          schema: { type: string }
+          value: "${{ tasks.devnet_notes.outputs.values.notes_summary }}"
+        notes_highlights:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.devnet_notes.outputs.values.highlights }}"
+        notes_assumptions:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.topology_profile.outputs.values.assumptions }}"
+        participants_reference:
+          schema: { type: string }
+          value: "${{ tasks.package_reference.outputs.values.reference }}"
+        participants_reference_summary:
+          schema: { type: string }
+          value: "${{ tasks.package_reference.outputs.values.reference_summary }}"
+        effective_client_pairs_input:
+          schema: { type: array, items: { type: object } }
+          value: "${{ tasks.topology_profile.outputs.values.effective_client_pairs }}"
+    outputs:
+      values:
+        config:
+          required: true
+          schema: { type: string, description: Minimal Kurtosis ethereum-package config derived from the devnet }
+        config_summary:
+          required: true
+          schema: { type: string, description: Summary of how the config maps to the source devnet }
+        assumptions:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Assumptions made where exact mapping was not possible
+        effective_client_pairs:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                el_type: { type: string }
+                cl_type: { type: string }
+                vc_type: { type: string }
+                el_image: { type: string }
+                cl_image: { type: string }
+                vc_image: { type: string }
+                el_extra_params: { type: array, items: { type: string } }
+                cl_extra_params: { type: array, items: { type: string } }
+                vc_extra_params: { type: array, items: { type: string } }
+                count: { type: number }
+              required: [el_type, cl_type]
+            description: Effective participant pairs used in the derived config
+        fallback_pair_added:
+          required: true
+          schema: { type: boolean, description: Whether a fallback client pair was added because no viable participant pair could be inferred }
+outputs:
+  values:
+    resolved_network_name:
+      required: true
+      schema: { type: string }
+      value: "${{ inputs.values.devnet_name }}"
+    resolved_network_group:
+      required: true
+      schema: { type: string }
+      value: "${{ '' }}"
+    config:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.derive_config.outputs.values.config }}"
+    config_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.derive_config.outputs.values.config_summary }}"
+    assumptions:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ size(tasks.derive_config.outputs.values.assumptions) > 0 ? tasks.derive_config.outputs.values.assumptions : tasks.topology_profile.outputs.values.assumptions }}"
+    effective_client_pairs:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ size(tasks.derive_config.outputs.values.effective_client_pairs) > 0 ? tasks.derive_config.outputs.values.effective_client_pairs : tasks.topology_profile.outputs.values.effective_client_pairs }}"
+    fallback_pair_added:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.derive_config.outputs.values.fallback_pair_added ? true : tasks.topology_profile.outputs.values.fallback_pair_added }}"

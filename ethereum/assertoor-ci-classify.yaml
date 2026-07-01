@@ -1,0 +1,277 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/assertoor-ci-classify
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when an assertoor CI failure cluster has artifact, reproduction, comparison, or bug-hunt evidence and needs an evidence-grounded root-cause classification for source and issue work.
+tags: ["assertoor", "ci", "ethereum", "classification", "triage"]
+inputs:
+  values:
+    cluster_label:
+      required: true
+      description: Early cluster label from fingerprinting
+      schema: { type: string }
+    representative:
+      required: true
+      description: NormalizedFailure for the cluster representative
+      schema:
+        type: object
+        properties:
+          test_name:
+            type: string
+          failed_step:
+            type: string
+          root_failed_step:
+            type: string
+          category:
+            type: string
+          error_signature:
+            type: string
+          evidence_brief:
+            type: object
+            properties:
+              headline:
+                type: string
+              failure_shape:
+                type: string
+              client_scope:
+                type: string
+              task_scope:
+                type: string
+              artifact_signal:
+                type: string
+              component_hints:
+                type: string
+              routing_notes:
+                type: string
+          package_runtime_identity:
+            type: object
+            properties:
+              package_ref:
+                type: string
+              package_started_at:
+                type: string
+              source_repo:
+                type: string
+              source_revision:
+                type: string
+              evidence:
+                type: string
+        required: [test_name, failed_step, category, error_signature]
+    reproduction_launched:
+      description: Whether local reproduction launched an enclave
+      schema: { type: boolean, default: false }
+    reproduction_reproduced:
+      description: Whether local reproduction observed the same failing test outcome
+      schema: { type: boolean, default: false }
+    reproduction_test_result:
+      description: Terminal reproduction result
+      schema: { type: string, default: not-run }
+    reproduction_matches_prior:
+      description: Whether reproduction matched the original CI failure shape
+      schema: { type: boolean, default: false }
+    reproduction_summary:
+      description: Short reproduction summary
+      schema: { type: string, default: "" }
+    reproduction_fidelity_summary:
+      description: Replay fidelity summary covering original CI image digest pins, package ref pinning, and remaining gaps
+      schema: { type: string, default: "" }
+    regression_summary:
+      description: Previous-success/change-window summary
+      schema: { type: string, default: "" }
+    regression_window:
+      description: Structured previous-success/change-window facts
+      schema:
+        type: object
+        default: {}
+        properties:
+          baseline_found:
+            type: boolean
+          previous_success_run_id:
+            type: string
+          previous_success_run_url:
+            type: string
+          previous_success_head_sha:
+            type: string
+          current_head_sha:
+            type: string
+          same_source_sha:
+            type: boolean
+          same_test_sha:
+            type: boolean
+          changed_components:
+            type: array
+            items:
+              type: object
+              properties:
+                component:
+                  type: string
+                service_name:
+                  type: string
+                role:
+                  type: string
+                previous_image_ref:
+                  type: string
+                current_image_ref:
+                  type: string
+                previous_digest:
+                  type: string
+                current_digest:
+                  type: string
+                previous_revision:
+                  type: string
+                current_revision:
+                  type: string
+                previous_version:
+                  type: string
+                current_version:
+                  type: string
+                changed:
+                  type: boolean
+                evidence:
+                  type: string
+          unchanged_components:
+            type: array
+            items:
+              type: object
+              properties:
+                component:
+                  type: string
+                service_name:
+                  type: string
+                role:
+                  type: string
+                previous_digest:
+                  type: string
+                current_digest:
+                  type: string
+                previous_revision:
+                  type: string
+                current_revision:
+                  type: string
+                previous_version:
+                  type: string
+                current_version:
+                  type: string
+                evidence:
+                  type: string
+          unresolved_components:
+            type: array
+            items:
+              type: object
+              properties:
+                component:
+                  type: string
+                service_name:
+                  type: string
+                role:
+                  type: string
+                previous_image_ref:
+                  type: string
+                current_image_ref:
+                  type: string
+                reason:
+                  type: string
+                evidence:
+                  type: string
+          target_ranking:
+            type: array
+            items:
+              type: object
+              properties:
+                component:
+                  type: string
+                reason:
+                  type: string
+                confidence:
+                  type: number
+          commit_ranges:
+            type: array
+            items:
+              type: object
+              properties:
+                component:
+                  type: string
+                repo_url:
+                  type: string
+                previous_revision:
+                  type: string
+                current_revision:
+                  type: string
+    bug_hunt_findings:
+      description: Findings from local reproduction bug-hunt, when available
+      schema:
+        type: array
+        default: []
+        items:
+          type: object
+          properties:
+            title:
+              type: string
+            summary:
+              type: string
+            evidence:
+              type: array
+              items:
+                type: string
+            suspected_owner:
+              type: string
+            confidence:
+              type: number
+    bug_hunt_summary:
+      description: Short local reproduction bug-hunt summary
+      schema: { type: string, default: "" }
+tasks:
+  classify:
+    uses: dev.wagie/decide@1.0.0
+    inputs:
+      values:
+        question:
+          value: "${{ 'What is the root-cause classification for this assertoor failure?' }}"
+        options:
+          value: "${{ ['framework-bug', 'framework-dependency', 'single-client', 'multi-client', 'devnet-network', 'config-issue', 'test-design', 'infra-flake', 'mixed', 'unknown'] }}"
+        context:
+          value: |-
+            ${{
+              "Cluster: " + inputs.values.cluster_label + "\n" +
+              "Test: " + inputs.values.representative.test_name + " / step " + inputs.values.representative.failed_step + "\n" +
+              "Root failed step: " + inputs.values.representative.?root_failed_step.orValue(inputs.values.representative.failed_step) + "\n" +
+              "Original failure category: " + inputs.values.representative.category + "\n" +
+              "Evidence brief:\n- Headline: " + inputs.values.representative.?evidence_brief.?headline.orValue("") +
+              "\n- Failure shape: " + inputs.values.representative.?evidence_brief.?failure_shape.orValue("") +
+              "\n- Client scope: " + inputs.values.representative.?evidence_brief.?client_scope.orValue("") +
+              "\n- Task scope: " + inputs.values.representative.?evidence_brief.?task_scope.orValue("") +
+              "\n- Original artifact signal: " + inputs.values.representative.?evidence_brief.?artifact_signal.orValue("") +
+              "\n- Component hints: " + inputs.values.representative.?evidence_brief.?component_hints.orValue("") +
+              "\n- Routing notes: " + inputs.values.representative.?evidence_brief.?routing_notes.orValue("") + "\n" +
+              "Reproduction outcome: launched=" + string(inputs.values.?reproduction_launched.orValue(false)) + ", reproduced=" + string(inputs.values.?reproduction_reproduced.orValue(false)) + ", test_result=" + inputs.values.?reproduction_test_result.orValue("not-run") + ", matches_prior=" + string(inputs.values.?reproduction_matches_prior.orValue(false)) + "\n" +
+              "Reproduction summary: " + inputs.values.?reproduction_summary.orValue("") + "\n" +
+              "Reproduction fidelity: " + inputs.values.?reproduction_fidelity_summary.orValue("") + "\n" +
+              "Regression window summary: " + inputs.values.?regression_summary.orValue("") + "\n" +
+              "Regression flags: baseline_found=" + string(inputs.values.?regression_window.?baseline_found.orValue(false)) + ", same_source_sha=" + string(inputs.values.?regression_window.?same_source_sha.orValue(false)) + ", same_test_sha=" + string(inputs.values.?regression_window.?same_test_sha.orValue(false)) + "\n" +
+              "Bug-hunt findings count (may be 0 when not reproduced): " + string(size(inputs.values.?bug_hunt_findings.orValue([]))) + "\n" +
+              "Bug-hunt summary (may be empty when not reproduced): " + inputs.values.?bug_hunt_summary.orValue("") + "\n\n" +
+              "Classification rules. Start from the evidence, not a single default owner. The null hypothesis is \"client or devnet behavior until proven otherwise,\" but framework/dependency/config decisions are valid when the original artifacts or bug-hunt identify a concrete non-client mechanism. Do not classify by symptom name alone; choose the owner whose code, runtime, config, or documented behavior best explains the observed mechanism.\n\n" +
+              "Owner-first and regression rules:\n- When a named client/service emits a concrete RPC/API/log error, classify toward that emitting component first. The caller/tool that submitted the request is not the owner unless evidence shows it generated invalid input or wrong configuration.\n- When previous-success baseline shows a changed image digest/build/source revision for the emitting component, treat that as strong regression evidence and prefer the matching client/source target.\n- When local reproduction is non-faithful (matches_prior=false, test_result=blocked, test_result=scope-mismatch, reproduction_fidelity_summary says image digests or package source were not pinned, bug-hunt shows changed timeout/config/images/workload, or the reproduced failed client pairs/tasks materially differ from the original failed pairs/tasks), do not downgrade the original CI artifact signal. Classify based on original artifacts plus any faithful repro evidence; separately record the repro mismatch.\n- Framework/dependency fallback requires either exhausted/inconclusive client evidence or affirmative caller-side evidence. Absence of a complete client explanation is not by itself a framework/dependency finding.\n\n" +
+              "Option meanings:\n- single-client: one specific EL or CL client is misbehaving. Evidence: errors localized to one client type across the matrix, or bug-hunt cites concrete misbehavior in one client with the others healthy.\n- multi-client: spec-level or shared-protocol issue affecting multiple client types. Use this when client behavior is wrong but the cause is not isolated to one implementation.\n- framework-bug: assertoor itself, such as scheduling, assertions, orchestration, account/workload setup, or API usage, is misbehaving. Requires affirmative assertoor-side evidence.\n- framework-dependency: a dependency used by assertoor is the likely source, such as workload generation, transaction management, account state management, or another helper library. Requires affirmative dependency-side evidence.\n- devnet-network: the environment's p2p/discovery/topology or generated network wiring is broken. Use this when the problem is the generated devnet network, not a single client implementation.\n- config-issue: kurtosis, assertoor-test config, or ethereum-package launch configuration produced a broken environment. Requires a concrete config mismatch, missing/incorrect flag, wrong test parameter, or launcher behavior.\n- test-design: the assertoor test encodes a genuinely-wrong expectation. Requires evidence that the assertion contradicts the Ethereum spec, canonical client docs, or the intended test contract.\n- infra-flake: transient and non-deterministic. Use when reproduction passed, timed out, was queue-blocked before the target, hit a narrowed-mode scope mismatch, or differs from prior and original artifacts are thin or contradictory.\n- mixed: two separable mechanisms appear in the same cluster and should not be routed to one owner.\n- unknown: insufficient evidence to choose any of the above.\n\n" +
+              "When bug-hunt did not run, do not stop at \"unknown\" by default. Classify from original CI artifacts, failed task tree, runtime identities, and previous-success delta when those are concrete enough. Prefer infra-flake only when reproduction passed/timed out/was queue-blocked/hit scope-mismatch and the original artifacts are thin or contradictory; prefer config-issue only if launch itself failed with concrete kurtosis/config errors.\n\n" +
+              "Confidence calibration: 80+ requires affirmative evidence for the selected owner. Do not blame a symptom-exposing component solely because it surfaces the failure; tie ownership to the component whose behavior, code history, runtime logs, or input generation actually produced the mechanism."
+            }}
+outputs:
+  values:
+    decision:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.classify.outputs.values.decision }}"
+    confidence:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.classify.outputs.values.confidence }}"
+    reasoning:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.classify.outputs.values.reasoning }}"

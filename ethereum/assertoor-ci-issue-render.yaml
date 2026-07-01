@@ -1,0 +1,820 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/assertoor-ci-issue-render
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when assertoor CI triage needs rendered GitHub issue bodies for completed per-cluster investigations.
+tags: ["assertoor", "ci", "github-issues", "triage", "render"]
+inputs:
+  values:
+    raw_findings:
+      description: Nested per-cluster investigation findings from assertoor-ci-investigate.
+      schema:
+        type: array
+        default: []
+        items:
+          type: object
+          properties:
+            cluster_idx:
+              type: number
+            cheap_fingerprint:
+              type: string
+            cluster_label:
+              type: string
+            cluster:
+              type: object
+              properties:
+                member_shard_ids:
+                  type: array
+                  items:
+                    type: string
+                representative_index:
+                  type: number
+                member_count:
+                  type: number
+                member_indices:
+                  type: array
+                  items:
+                    type: number
+                rationale:
+                  type: string
+            status:
+              type: object
+              properties:
+                status:
+                  type: string
+                issue_number:
+                  type: number
+                issue_url:
+                  type: string
+                schema_version:
+                  type: number
+                classification:
+                  type: string
+            representative:
+              type: object
+              properties:
+                test_name:
+                  type: string
+                failed_step:
+                  type: string
+                root_failed_step:
+                  type: string
+                category:
+                  type: string
+                error_signature:
+                  type: string
+                shard_id:
+                  type: string
+                head_sha:
+                  type: string
+                run_started_at:
+                  type: string
+                prior_ai_summary:
+                  type: string
+                assertoor_image:
+                  type: string
+                artifact_coverage:
+                  type: object
+                  properties:
+                    has_summary:
+                      type: boolean
+                    has_enclave_dump:
+                      type: boolean
+                    has_ai_summary_artifact:
+                      type: boolean
+                    has_kurtosis_params:
+                      type: boolean
+                    missing:
+                      type: array
+                      items:
+                        type: string
+                    notes:
+                      type: string
+                affected_client_pairs:
+                  type: array
+                  items:
+                    type: string
+                passing_client_pairs:
+                  type: array
+                  items:
+                    type: string
+                failed_task_leaves:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      task_name:
+                        type: string
+                      title:
+                        type: string
+                      role:
+                        type: string
+                      client_pair:
+                        type: string
+                client_pairs:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      pair_id:
+                        type: string
+                      el_type:
+                        type: string
+                      cl_type:
+                        type: string
+                      vc_type:
+                        type: string
+                      el_image:
+                        type: string
+                      cl_image:
+                        type: string
+                      vc_image:
+                        type: string
+                runtime_components:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      service_name:
+                        type: string
+                      role:
+                        type: string
+                      client:
+                        type: string
+                      image_ref:
+                        type: string
+                      image_id:
+                        type: string
+                      manifest_digest:
+                        type: string
+                      source_repo:
+                        type: string
+                      source_revision:
+                        type: string
+                      version:
+                        type: string
+                      build_info:
+                        type: string
+                      source:
+                        type: string
+                package_runtime_identity:
+                  type: object
+                  properties:
+                    package_ref:
+                      type: string
+                    package_started_at:
+                      type: string
+                    source_repo:
+                      type: string
+                    source_revision:
+                      type: string
+                    source:
+                      type: string
+                    evidence:
+                      type: string
+                original_artifact_evidence:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      source:
+                        type: string
+                      category:
+                        type: string
+                      summary:
+                        type: string
+                      excerpt:
+                        type: string
+                component_hints:
+                  type: array
+                  items:
+                    type: string
+                evidence_brief:
+                  type: object
+                  properties:
+                    headline:
+                      type: string
+                    failure_shape:
+                      type: string
+                    client_scope:
+                      type: string
+                    task_scope:
+                      type: string
+                    artifact_signal:
+                      type: string
+                    component_hints:
+                      type: string
+                    routing_notes:
+                      type: string
+            test_inspection:
+              type: object
+              properties:
+                attempted:
+                  type: boolean
+                summary:
+                  type: string
+                recent_changes:
+                  type: string
+            reproduction:
+              type: object
+              properties:
+                attempted:
+                  type: boolean
+                launched:
+                  type: boolean
+                reproduced:
+                  type: boolean
+                test_result:
+                  type: string
+                summary:
+                  type: string
+                launch_summary:
+                  type: string
+                runtime_fidelity_summary:
+                  type: string
+                package_ref_used:
+                  type: string
+                pinned_images:
+                  type: array
+                  items:
+                    type: string
+                unpinned_images:
+                  type: array
+                  items:
+                    type: string
+                evidence:
+                  type: array
+                  items:
+                    type: string
+                matches_prior:
+                  type: boolean
+                attempts_made:
+                  type: number
+                attempts_converged:
+                  type: boolean
+            regression:
+              type: object
+              properties:
+                attempted:
+                  type: boolean
+                found:
+                  type: boolean
+                summary:
+                  type: string
+                window:
+                  type: object
+                  properties:
+                    baseline_found:
+                      type: boolean
+                    previous_success_run_id:
+                      type: string
+                    previous_success_run_url:
+                      type: string
+                    previous_success_head_sha:
+                      type: string
+                    current_head_sha:
+                      type: string
+                component_changes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      component:
+                        type: string
+                      service_name:
+                        type: string
+                      role:
+                        type: string
+                      previous_image_ref:
+                        type: string
+                      current_image_ref:
+                        type: string
+                      previous_digest:
+                        type: string
+                      current_digest:
+                        type: string
+                      previous_revision:
+                        type: string
+                      current_revision:
+                        type: string
+                      previous_version:
+                        type: string
+                      current_version:
+                        type: string
+                      changed:
+                        type: boolean
+                      evidence:
+                        type: string
+                changed_components:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      component:
+                        type: string
+                      service_name:
+                        type: string
+                      role:
+                        type: string
+                      previous_image_ref:
+                        type: string
+                      current_image_ref:
+                        type: string
+                      previous_digest:
+                        type: string
+                      current_digest:
+                        type: string
+                      previous_revision:
+                        type: string
+                      current_revision:
+                        type: string
+                      previous_version:
+                        type: string
+                      current_version:
+                        type: string
+                      changed:
+                        type: boolean
+                      evidence:
+                        type: string
+                unchanged_components:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      component:
+                        type: string
+                      service_name:
+                        type: string
+                      role:
+                        type: string
+                      previous_digest:
+                        type: string
+                      current_digest:
+                        type: string
+                      previous_revision:
+                        type: string
+                      current_revision:
+                        type: string
+                      previous_version:
+                        type: string
+                      current_version:
+                        type: string
+                      evidence:
+                        type: string
+                unresolved_components:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      component:
+                        type: string
+                      service_name:
+                        type: string
+                      role:
+                        type: string
+                      previous_image_ref:
+                        type: string
+                      current_image_ref:
+                        type: string
+                      reason:
+                        type: string
+                      evidence:
+                        type: string
+                target_ranking:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      component:
+                        type: string
+                      service_name:
+                        type: string
+                      target_kind:
+                        type: string
+                      rank:
+                        type: number
+                      reason:
+                        type: string
+                      confidence:
+                        type: number
+                commit_ranges:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      component:
+                        type: string
+                      repo_url:
+                        type: string
+                      previous_revision:
+                        type: string
+                      current_revision:
+                        type: string
+                      range:
+                        type: string
+            bug_hunt:
+              type: object
+              properties:
+                attempted:
+                  type: boolean
+                findings:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      title:
+                        type: string
+                      severity:
+                        type: string
+                      summary:
+                        type: string
+                      affected_scope:
+                        type: string
+                      evidence:
+                        type: array
+                        items:
+                          type: string
+                summary:
+                  type: string
+                recommended_actions:
+                  type: array
+                  items:
+                    type: string
+                completeness:
+                  type: string
+                iterations_used:
+                  type: number
+                converged:
+                  type: boolean
+            classification:
+              type: object
+              properties:
+                attempted:
+                  type: boolean
+                decision:
+                  type: string
+                confidence:
+                  type: number
+                reasoning:
+                  type: string
+            source_dive:
+              type: object
+              properties:
+                attempted:
+                  type: boolean
+                target_kind:
+                  type: string
+                skip_reason:
+                  type: string
+                repo_url:
+                  type: string
+                commit_sha:
+                  type: string
+                component:
+                  type: string
+                client_name:
+                  type: string
+                resolution_method:
+                  type: string
+                commit_exact:
+                  type: boolean
+                resolution_caveat:
+                  type: string
+                cloned:
+                  type: boolean
+                alternate_targets:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      target_kind:
+                        type: string
+                      component:
+                        type: string
+                      repo_url:
+                        type: string
+                      service_name:
+                        type: string
+                      commit_sha:
+                        type: string
+                      image_ref:
+                        type: string
+                      reason:
+                        type: string
+                root_cause_description:
+                  type: string
+                suggested_change_md:
+                  type: string
+                top_candidates:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      path:
+                        type: string
+                      line_range:
+                        type: string
+                      start_line:
+                        type: number
+                      end_line:
+                        type: number
+                      permalink:
+                        type: string
+                      stable:
+                        type: boolean
+                      relevance_assessment:
+                        type: string
+                      suggested_change:
+                        type: string
+                      verified:
+                        type: string
+                      verification_notes:
+                        type: string
+                code_refs:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      label:
+                        type: string
+                      repo_url:
+                        type: string
+                      commit_sha:
+                        type: string
+                      path:
+                        type: string
+                      start_line:
+                        type: number
+                      end_line:
+                        type: number
+                      permalink:
+                        type: string
+                      stable:
+                        type: boolean
+                      reason:
+                        type: string
+                alternate_probe_summary:
+                  type: string
+                alternate_probe_target:
+                  type: object
+                  properties:
+                    target_kind:
+                      type: string
+                    component:
+                      type: string
+                    repo_url:
+                      type: string
+                    service_name:
+                      type: string
+                    commit_sha:
+                      type: string
+                    image_ref:
+                      type: string
+                    reason:
+                      type: string
+                alternate_code_refs:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      label:
+                        type: string
+                      repo_url:
+                        type: string
+                      commit_sha:
+                        type: string
+                      path:
+                        type: string
+                      start_line:
+                        type: number
+                      end_line:
+                        type: number
+                      permalink:
+                        type: string
+                      stable:
+                        type: boolean
+                      reason:
+                        type: string
+                alternate_probe_confidence:
+                  type: number
+                confidence:
+                  type: number
+                source_surface_confidence:
+                  type: number
+                regression_pin_confidence:
+                  type: number
+                fix_target_confidence:
+                  type: number
+                confidence_note:
+                  type: string
+                search_summary:
+                  type: string
+                regression_context:
+                  type: string
+                literal_search_signal:
+                  type: number
+                recent_change_signal:
+                  type: number
+                recent_change_signal_notes:
+                  type: string
+            launcher_audit:
+              type: object
+              properties:
+                attempted:
+                  type: boolean
+                summary:
+                  type: string
+                verdict:
+                  type: string
+    target_repo:
+      description: GitHub repository where issues are written, used only for prose/link context.
+      schema: { type: string, default: "" }
+    run_id:
+      required: true
+      description: Current failing GitHub Actions run id.
+      schema: { type: string }
+    run_url:
+      description: Current failing GitHub Actions run URL.
+      schema: { type: string, default: "" }
+    run_started_at:
+      description: Current failing run start timestamp.
+      schema: { type: string, default: "" }
+    schema_version:
+      description: ci-investigate marker schema version to render.
+      schema: { type: number, default: 1 }
+tasks:
+  render:
+    quality-gate: "${{ has(outputs.values.cluster_reports) }}"
+    instructions: |-
+      Render `cluster_reports` as complete GitHub issue drafts. Include all content needed for issue creation in each rendered body. A reasoning-capable worker is preferred.
+
+      General rules:
+      - Output zero or more `cluster_reports`. If `raw_findings` is empty, return `cluster_reports=[]` and a short summary such as `No new investigated clusters to publish.`
+      - Each body must be self-contained. Do not rely on companion comments.
+      - Every body must include all ci-investigate HTML markers.
+      - Prefer concrete original CI evidence, previous-success diffs, source-code links, and named client/runtime identity over model prose.
+      - For client classifications, primary ownership and primary actions must stay on the implicated client/protocol/devnet component. Framework, dependency, launcher, and test-harness components are fallback or mitigation unless classification says framework/dependency/config.
+
+      - Render one cluster_report per entry in `raw_findings`, sorted by numeric `cluster_idx`. Do not depend on matrix append order.
+      - Use nested stage objects: `r.test_inspection`, `r.reproduction`, `r.regression`, `r.bug_hunt`, `r.classification`, `r.source_dive`, and `r.launcher_audit`.
+      - Use `r.representative` for original CI scope: affected pairs, passing pairs, failed leaves, runtime components, artifact evidence, component hints, prior summary, head SHA, and assertoor image.
+      - Render durable issue content, not worker execution telemetry. Do not include generated/local-only identifiers such as `ci-investigate-*` enclave names, local assertoor URLs/ports, worker IDs, assignment IDs, provider session IDs, local workspace paths, temporary filenames, attempt-log internals, or "workdir" values. These are deleted or inaccessible after the run and do not help a maintainer fix the issue.
+      - If local reproduction or bug-hunt evidence is useful, phrase it as "local reproduction confirmed/refuted..." or "reproduction evidence showed..."; do not write "live enclave", "this enclave", or name the local enclave. Use service/client names, logs, RPC observations, and durable artifact paths instead.
+      - Markdown must be clean and skimmable. Use one blank line after headings, short paragraphs, and bullets that fit on one screen line when practical. Prefer a compact table only when comparing similar fields; otherwise use bullets. Use fenced `text` blocks only for exact high-value log excerpts, each with a short source label. Avoid nested lists, raw JSON dumps, repeated long code blocks, malformed links, and bare URLs when a labeled markdown link is possible.
+
+      Final publish eligibility:
+      - Emit a cluster_report only when the rendered body contains a real non-unknown verdict.
+      - A verdict comes from this run's classification (`r.classification.attempted == true` and `r.classification.decision != "unknown"`).
+      - If no classification ran, classification is unknown, or the evidence does not support a real verdict, emit no cluster_report for that raw finding. The run report/artifacts are the place for incomplete investigations; do not create a partial GitHub issue.
+      - Skipped reproduction, missing kurtosis params, or a launch failure do not by themselves block publication if original CI artifacts, regression window, and source-dive still support a real non-unknown verdict.
+      - Preserve `cheap_fingerprint` exactly as the pre-investigation dedupe key. It intentionally reflects the early failure surface and is used to skip future reruns before expensive investigation.
+      - Preserve `cluster_label` as the early cluster label. Separately generate `issue_title` from the final investigation result; this is the GitHub issue title and should name the final owner/component plus mechanism, even when it differs from the fingerprint label.
+
+      Final labels:
+      - Always include `ci-investigate`, `nightly`, and `assertoor`.
+      - `framework-bug`: `area:framework`, severity by category (crash => `severity:critical`, timeout => `severity:high`, else `severity:medium`).
+      - `framework-dependency`: `area:framework`, `component:dependency`, `severity:high`; add `component:spamoor` when hints name spamoor.
+      - `single-client`: `area:client`, `severity:high`; add `client:<name>` when source-dive or findings name a specific client.
+      - `multi-client`: `area:protocol`, `severity:high`.
+      - `devnet-network`: `area:devnet-network`, `severity:high`; add `component:bootnodoor` or `component:ethereum-package` when evidence names them.
+      - `config-issue`: `area:config`, `severity:medium`.
+      - `test-design`: `area:test-design`, `severity:medium`.
+      - `infra-flake`: `severity:low`.
+      - `mixed`: `area:mixed`, `severity:high`.
+
+      Final body:
+      1. Start with markers:
+         - `<!-- ci-investigate:schema-version=<schema_version> -->`
+         - `<!-- ci-investigate:cheap-fingerprint=<r.cheap_fingerprint> -->`
+         - `<!-- ci-investigate:classification=<classification> -->`
+      1a. Generate `issue_title` as a concise post-investigation title:
+         - 6-14 words, no run id, shard id, confidence score, or internal task/process language.
+         - Prefer `<owner/component> <mechanism> <impact>` wording, e.g. `spamoor dropped funding nonce stalls EOA transaction generation`.
+         - Use the final Diagnosis/Evidence, not the early `cluster_label`, when discovery refined the root cause.
+         - Do not mention non-causal side findings in the title, even when they were useful during discovery.
+         - Keep it stable enough for humans to scan, but do not change `cheap_fingerprint` to match it.
+      2. Use this section order, omitting optional sections when they have no useful signal:
+         Mandatory:
+         - `## Summary`
+         - `## Diagnosis`
+         - `## CI Failure`
+         - `## Evidence`
+         - `## Actions`
+         Optional, in this order when present:
+         - `## Regression Window` only when a previous success, changed/unchanged/unresolved components, or compare links are available.
+         - `## Source Links` only when source-dive cloned, resolved a target, found candidate paths/code refs, or has a meaningful source-identity caveat.
+         - `## Reproduction Check` only when reproduction was attempted, skipped for a material reason, launched but did not match, or replay fidelity affects interpretation.
+         - `## Details` only when collapsed details add real value beyond the visible sections.
+      3. Do not include a table of contents. The body is already short and sectioned; a TOC adds noise.
+      4. Summary should fit the first screen:
+         - First line is the bold linked run line (`**Run:** ...`).
+         - Second line is a compact result line: `**Result:** <classification> · **Owner:** <owner/component> · **Confidence:** <High|Medium|Low|Unknown>`.
+         - Then one direct paragraph plus at most three bullets. The paragraph must be at most two sentences and roughly 90 words. Do not start with filler like "Investigation completed." First sentence after the result line should name the failing test, owner/component, and mechanism. Include original shard(s) and previous success when known.
+         - Do not show the internal confidence-score breakdown in Summary. Do not mention `notification_confidence` in the visible body outside `Confidence Details`; that score is for automation gating, not maintainer triage.
+         - Do not put line-range implementation analysis in Summary; move that to Source Links. Keep all Summary bullets single-level and concise.
+         - Do not include non-causal side findings in Summary. If a side finding matters, put it in Details or a clearly separate Follow-up bullet.
+      5. Diagnosis should be 2-4 precise sentences, max ~150 words. State what failed, why the named component is implicated, and the durable caveat if one materially weakens certainty. Keep secondary mechanics in Evidence, Regression Window, Source Links, or Details. Do not use blame language; phrase ownership as evidence-based responsibility for the mechanism.
+         - Do not include non-causal side findings in Diagnosis unless the point is explicitly that they were refuted as causal.
+      6. CI Failure must separate original failed shard IDs, failed client pairs, failed task leaves, and artifact coverage gaps. Keep this factual and concise; do not mix in local reproduction-only observations here.
+      7. Evidence should be the main triage section: 4-7 bullets or a compact table tying original CI artifacts, runtime identity, previous-success diffs, reproduction observations, and source facts to the diagnosis. Put original CI artifact evidence first. Include only short excerpts when they carry exact error text or metrics; otherwise summarize and link/reference the artifact path. If using a table, keep columns to `Source`, `Signal`, and `Why it matters` unless a different three-column shape is clearly better.
+      8. Regression Window, when included, should show previous success run/link/SHA, changed/unchanged/unresolved components, and GitHub compare links when `commit_ranges` has `repo_url`, `previous_revision`, and `current_revision`. Put "not pinned" caveats here rather than repeating them throughout the issue.
+      9. Source Links, when included, should show target kind, component, repo, commit, source identity exactness, literal-search signal, and recent-change signal. Do not show numeric source-dive confidence here; put confidence numbers in `Confidence Details`. Render links from `r.source_dive.code_refs` first. Code links must be stable commit permalinks; if a link uses `HEAD`, a branch, or a commit different from the source-dive commit being reported, label it `unstable` and explain that the line numbers may drift. If `r.source_dive.commit_exact == false` or `r.source_dive.resolution_method` is `default-head-fallback` or `direct-repo-head-fallback`, explicitly say the linked code is repository HEAD used for investigation and is not proven to be the tested image/source commit. If code_refs are absent, construct up to three candidate links from repo URL, commit SHA, path, and line range. If `r.source_dive.alternate_probe_summary` is non-empty, include a short "Alternate source probe" note and any stable `alternate_code_refs`; if only `alternate_targets` are present, include a short "Next source targets if this is exhausted" note.
+      10. Reproduction Check, when included, should be short: whether local reproduction was attempted, whether the target failure reproduced, whether it matched the original CI shape, how many attempts ran, and whether replay pinned the original CI image digests/package ref. Never include enclave names, local URLs, ports, or workspace paths. If `runtime_fidelity_summary` names unpinned images/package source, say the replay was non-faithful and do not let a passing replay override original CI artifacts. If `test_result="blocked"`, say the faithful full queue failed before the target test started and treat that as non-reproduction of the target. If `test_result="scope-mismatch"`, say the narrowed local run did not faithfully target/watch the selected assertoor test and keep original CI evidence primary. If reproduced failed pairs/tasks differ materially from original, call that out once.
+      11. Actions must split into `Primary` and `Follow-up`, with no more than five visible bullets total. Primary actions should follow from Diagnosis, Evidence, and any included Regression Window or Source Links, not introduce a new unproven mechanism. Put non-causal side findings only in Follow-up, and label them as separate/off-causal-path.
+      12. Details should be compact and omitted entirely unless useful. Use at most four `<details>` blocks, chosen by usefulness: confidence details, runtime identity, full client matrix/test contract, extra bug-hunt/source-dive details, launcher audit, or extra evidence. Put non-causal side findings in Details only when they add actionable context, and clearly label them as not on the causal path. Each `<summary>` should be short and title-case. Do not duplicate Actions with a separate "source-dive suggested changes" block. Omit CI-side prior analysis unless it materially changed the final diagnosis. Use `Launcher audit (ethereum-package)` as the summary text, not `Framework audit`.
+      13. Confidence presentation:
+         - The visible Summary uses only the classification, owner/component, and a diagnosis-confidence bucket.
+         - Bucket mapping: `High` when `diagnosis_confidence >= 80`; `Medium` when `diagnosis_confidence >= 60`; `Low` when `diagnosis_confidence > 0`; `Unknown` when classification is `unknown`, no final diagnosis exists, or confidence is 0.
+         - Put the numeric confidence breakdown only in a collapsed `<details>` block near the bottom of `## Details` with `<summary>Confidence Details</summary>`. No confidence percentages should appear above `## Details`.
+         - In that block, use a compact table with rows for classification, owner, mechanism, source surface, source identity, regression pin, diagnosis, and notification. Include one short note column when useful. This block is for auditability; it must not be repeated in Summary, Diagnosis, or Actions.
+
+      Keep normal bodies around 10k-18k chars and hard cap near 35k chars. If the body is too long, drop from the bottom in this order: extra excerpts, CI-side prior analysis, full runtime identity, long bug-hunt finding bodies, long source-dive prose. Append `_Body truncated; see CI artifacts for full raw logs._`
+
+      Confidence calculation:
+      - Internally calculate a compact audit breakdown for the optional `Confidence Details` block: classifier signal, owner fit, mechanism fit, source identity, regression pinning, diagnosis, and notification readiness.
+      - Classification signal comes from `raw_findings[].classification.confidence`.
+      - Owner fit means the issue names the right responsible owner/component for the observed mechanism, not that the exact patch or passing-to-failing trigger is pinned. Lower it only for contradictory original CI evidence, uncertain runtime identity, or a source/reproduction finding that points to another owner. If regression pinning is weak but owner/source-surface evidence is solid, the note should say `exact trigger is unpinned; <component> remains the bug/fix surface`, not imply the owner may be elsewhere.
+      - Mechanism fit means the observed symptoms are explained by the described failure mechanism. Ground it in original CI artifacts first, then reproduction, regression-window evidence, bug-hunt observations, and source-dive facts. Do not reduce this solely because the exact regression-introducing commit is unknown; reduce it when the mechanism itself is speculative, contradicted, or not tied to the failed test behavior.
+      - Source surface confidence means the source dive found the code path, validation rule, state machine, emitted error, or reviewed file surface that explains the observed failure. Prefer `r.source_dive.source_surface_confidence` when present; otherwise use `r.source_dive.confidence`. This can be high even when the exact regression edit is unpinned.
+      - Source identity confidence should be high only when image digest/version/runtime metadata or previous-success/current-run revisions prove the tested commit. Cap at 75 for mutable/head fallback (`commit_exact=false`, `resolution_method=default-head-fallback`, or `resolution_method=direct-repo-head-fallback`) unless exact tested identity is proven elsewhere; cap at 60 when source_dive was expected but could not clone.
+      - Regression pinning confidence should be high only for a concrete previous-success/current-failure diff, commit, PR, or line-level change that explains the failure. Prefer `r.source_dive.regression_pin_confidence` when present. Use medium values when the regression window isolates a component/repo but not the exact edit, especially when `recent_change_signal` is strong. Use low values when only the current bug/source surface is localized, history is missing, or the behavior may be longstanding and newly exposed. Low regression pinning is a caveat, not by itself a reason to label the issue Low confidence.
+      - `diagnosis_confidence` is the conservative confidence that the rendered issue identifies the actual owner and mechanism/source surface. For final mode, start from the lower of `owner_confidence` and `mechanism_confidence`, then adjust with source and reproduction evidence: if source_dive attempted and cloned, use source surface confidence as grounding, not regression-pinning confidence. If source surface confidence is high (>=75) and original CI artifacts or faithful reproduction independently support the mechanism, diagnosis may be Medium/High even when regression pinning is low. If source_dive attempted/cloned but source surface confidence is zero, all verified source candidates are `false`, or the source dive contradicts the mechanism/owner, cap at 45. If source_dive was expected but failed to clone, cap at 60. If source identity is mutable/head-fallback (`commit_exact=false`, `resolution_method=default-head-fallback`, or `resolution_method=direct-repo-head-fallback`), cap at `source_identity_confidence` unless exact runtime identity is proven elsewhere. If reproduction did not match the original shape, cap at 75 unless original CI artifacts plus regression/source evidence independently isolate the owner/mechanism. Do not let high owner confidence override failed or contradictory source grounding, but also do not let low regression-pinning confidence suppress an otherwise well-supported client/tool diagnosis.
+      - `notification_confidence` is the confidence that this created issue is safe and useful to alert humans about. Base it on owner confidence, mechanism confidence, original CI evidence strength, source identity, and severity. Do not cap it solely because `regression_pin_confidence` is medium/low; instead include the pinning caveat in the issue. It can be 85+ when owner confidence is high, the mechanism is well supported, and source identity is adequate, even if the exact regression edit is not pinned. Cap at 60 for `classification="unknown"` or owner confidence below 70. Cap at 75 for mutable/head-fallback source identity unless runtime identity is proven elsewhere. Cap at 80 for reproduction shape mismatch unless original CI artifacts plus regression/source evidence independently isolate the owner/mechanism.
+      - `confidence_bucket` is the human-facing bucket derived from `diagnosis_confidence`: `High` >= 80, `Medium` >= 60, `Low` > 0, `Unknown` otherwise.
+
+      Return `cluster_reports` with: `cheap_fingerprint`, `cluster_label`, `issue_title`, `classification`, `diagnosis_confidence`, `notification_confidence`, `confidence_bucket`, `issue_body_md`, and `labels`.
+    inputs:
+      values:
+        raw_findings:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.?raw_findings.orValue([]) }}"
+        target_repo:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?target_repo.orValue('') }}"
+        run_id:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.run_id }}"
+        run_url:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?run_url.orValue('') }}"
+        run_started_at:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?run_started_at.orValue('') }}"
+        schema_version:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?schema_version.orValue(1.0) }}"
+    outputs:
+      values:
+        cluster_reports:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                cheap_fingerprint:
+                  type: string
+                cluster_label:
+                  type: string
+                issue_title:
+                  type: string
+                classification:
+                  type: string
+                diagnosis_confidence:
+                  type: number
+                notification_confidence:
+                  type: number
+                confidence_bucket:
+                  type: string
+                issue_body_md:
+                  type: string
+                labels:
+                  type: array
+                  items:
+                    type: string
+              required: [cheap_fingerprint, cluster_label, issue_title, classification, diagnosis_confidence, notification_confidence, confidence_bucket, issue_body_md, labels]
+        summary:
+          required: true
+          schema:
+            type: string
+outputs:
+  values:
+    cluster_reports:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.render.outputs.values.cluster_reports }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.render.outputs.values.summary }}"

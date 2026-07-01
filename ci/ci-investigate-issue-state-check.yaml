@@ -1,0 +1,193 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/ci-investigate-issue-state-check
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a ci-investigate triage run needs to classify fingerprints against supplied GitHub issue context, regardless of whether the issue is open or closed. Produces both per-fingerprint state and investigation items from `ci-investigate` HTML markers.
+tags: ["ci", "ci-investigate", "github-issues", "state", "lookup", "idempotency"]
+inputs:
+  values:
+    issues:
+      required: true
+      description: GitHub issue records with parsed ci-investigate markers and normalized labels.
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            number:
+              type: number
+            url:
+              type: string
+            title:
+              type: string
+            created_at:
+              type: string
+            updated_at:
+              type: string
+            labels:
+              type: array
+              items:
+                type: string
+            cheap_fingerprint:
+              type: string
+            schema_version:
+              type: number
+            classification:
+              type: string
+            body_excerpt:
+              type: string
+          required: [number, url, title, cheap_fingerprint]
+    fingerprints:
+      required: true
+      description: Cheap-fingerprint strings to look up
+      schema:
+        type: array
+        items:
+          type: string
+tasks:
+  check:
+    quality-gate: "${{ has(outputs.values.statuses) && size(outputs.values.statuses) == size(inputs.values.fingerprints) && has(outputs.values.items) && has(outputs.values.skipped_items) }}"
+    instructions: |-
+      Classify each requested fingerprint against the supplied `issues` array and produce investigation items.
+
+      Scope:
+      - Treat `issues` as the complete issue context for this decision.
+      - Do not call GitHub or any other remote service.
+      - Do not parse issue bodies beyond the structured marker fields already present on each issue object.
+
+      Policy:
+      - GitHub open/closed state is irrelevant. Any non-ignored matching issue covers the fingerprint and should stop new investigation.
+      - `ci-investigate:ignore` is an explicit operator suppression. It suppresses investigation only when all matching issues are ignored.
+      - If both ignored and non-ignored issues match the same fingerprint, return `covered-existing` using the oldest non-ignored issue.
+      - If multiple matching issues have the same status, pick the oldest `created_at`; if timestamps are missing or tied, pick the lowest issue number.
+
+      Procedure:
+      1. Normalize every issue:
+         - Use `cheap_fingerprint` as the exact key. Ignore issues with an empty/missing fingerprint.
+         - Normalize labels to strings. If a label is an object, use its `name`; if it is already a string, use it directly.
+         - Treat `ci-investigate:ignore` as the only ignore marker.
+         - Preserve `schema_version` and `classification`, defaulting to `0` and `""`.
+      2. For each input `fingerprints[index]`, emit one `statuses[index]`:
+         - no matches: `status="new"`, `issue_number=0`, `issue_url=""`, `schema_version=0`, `classification=""`.
+         - only ignored matches: `status="ignored"`, with the selected ignored issue fields.
+         - any non-ignored match: `status="covered-existing"`, with the selected non-ignored issue fields.
+      3. Build `items` and `skipped_items` directly from `statuses` using the input array index as `cluster_index`:
+         - `new` -> `items[]` with `action="investigate"` and reason `new fingerprint`.
+         - `ignored` -> `skipped_items[]` with `action="skipped"` and reason `fingerprint suppressed by ci-investigate:ignore`.
+         - `covered-existing` -> `skipped_items[]` with `action="skipped"` and reason `existing issue already covers this fingerprint`.
+         - any unexpected status -> `skipped_items[]` with reason `unknown state-check status`.
+
+      Return `statuses`, `items`, and `skipped_items` in stable input order, plus a one-sentence summary with counts for new, ignored, and covered-existing.
+    inputs:
+      values:
+        issues:
+          required: true
+          schema: { type: array, items: { type: object } }
+          value: "${{ inputs.values.issues }}"
+        fingerprints:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.fingerprints }}"
+    outputs:
+      values:
+        statuses:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                fingerprint:
+                  type: string
+                status:
+                  type: string
+                  enum: [new, ignored, covered-existing]
+                issue_number:
+                  type: number
+                  description: 0 when no covering issue exists
+                issue_url:
+                  type: string
+                schema_version:
+                  type: number
+                  description: Version parsed from the issue marker, 0 when missing
+                classification:
+                  type: string
+                  description: Parsed classification marker, empty or unknown when absent
+              required: [fingerprint, status, issue_number]
+            description: Per-fingerprint state classification aligned with input order
+        items:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                cluster_index:
+                  type: number
+                fingerprint:
+                  type: string
+                action:
+                  type: string
+                  enum: [investigate]
+                state_check_status:
+                  type: string
+                issue_number:
+                  type: number
+                issue_url:
+                  type: string
+                reason:
+                  type: string
+              required: [cluster_index, fingerprint, action, state_check_status, reason]
+            description: New fingerprints to investigate, aligned by original cluster index.
+        skipped_items:
+          required: true
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                cluster_index:
+                  type: number
+                fingerprint:
+                  type: string
+                action:
+                  type: string
+                  enum: [skipped]
+                state_check_status:
+                  type: string
+                issue_number:
+                  type: number
+                issue_url:
+                  type: string
+                reason:
+                  type: string
+              required: [cluster_index, fingerprint, action, state_check_status, reason]
+            description: Fingerprints skipped because an existing or ignored issue already covers them.
+        summary:
+          required: true
+          schema:
+            type: string
+            description: Short summary of classification outcome
+outputs:
+  values:
+    statuses:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.check.outputs.values.statuses }}"
+    items:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.check.outputs.values.items }}"
+    skipped_items:
+      required: true
+      schema: { type: array, items: { type: object } }
+      value: "${{ tasks.check.outputs.values.skipped_items }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.check.outputs.values.summary }}"
