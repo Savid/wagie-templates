@@ -1,0 +1,85 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-config
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when you have an ethpandaops devnet name and want one ready-to-run Kurtosis ethereum-package args-file that reproduces it locally. Discovers the live devnet profile through the panda CLI (not static notes), honors optional steering, and dry-run-validates the result when kurtosis is available.
+tags: ["kurtosis", "ethereum", "ethpandaops", "ethereum-package", "devnet", "config", "args-file", "panda"]
+inputs:
+  values:
+    devnet:
+      required: true
+      description: Devnet or devnet-group name to model, e.g. glamsterdam-devnet-6
+      schema: { type: string }
+    steering:
+      description: Optional free-form preferences, e.g. "only lighthouse + geth", "minimal 2-node", "include buildoor", "pull gloas forward"
+      schema: { type: string }
+    package_ref:
+      description: Kurtosis package reference to target
+      schema: { type: string, default: github.com/ethpandaops/ethereum-package }
+tasks:
+  assemble_config:
+    quality-gate: "${{ has(outputs.values.summary) && size(outputs.values.summary) > 0 }}"
+    instructions: |-
+      Produce ONE runnable ethereum-package Kurtosis args-file that models the
+      named devnet, and write it as the `config` artifact.
+
+      Resolve the runbooks by meaning: `panda search runbooks "<need>"` finds
+      them by task or symptom.
+      Ground the devnet first with the runbook that owns hosted devnet context
+      intake, then synthesize the args-file per the runbook that owns building a
+      Kurtosis config from a hosted devnet.
+      Those runbooks own the procedure: discover the profile from live panda
+      resources, inventory, and CL config rather than notes; prefer deployed
+      inventory over aspirational notes and flag inconsistencies; honor `steering`
+      (client subset, node count, fork epochs, added tooling), defaulting to a
+      faithful minimal replica; and dry-run-validate with kurtosis when available,
+      remembering a passing dry run proves parsing, not live health.
+
+      Emit the config artifact, a short summary of the key choices, and the
+      assumptions or unresolved gaps you had to make.
+    inputs:
+      values:
+        devnet:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.devnet }}"
+        steering:
+          schema: { type: string }
+          value: "${{ inputs.values.?steering.orValue('') }}"
+        package_ref:
+          schema: { type: string }
+          value: "${{ inputs.values.?package_ref.orValue('github.com/ethpandaops/ethereum-package') }}"
+    outputs:
+      values:
+        summary:
+          required: true
+          schema: { type: string, description: Short summary of topology, forks, tooling, and key choices }
+        assumptions:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Assumptions or unresolved gaps, including any source inconsistencies found
+      artifacts:
+        config:
+          required: true
+          contentType: text/yaml
+          description: Single runnable ethereum-package args-file for the devnet
+outputs:
+  values:
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.assemble_config.outputs.values.summary }}"
+    assumptions:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.assemble_config.outputs.values.assumptions }}"
+  artifacts:
+    config:
+      ref: tasks.assemble_config.outputs.artifacts.config

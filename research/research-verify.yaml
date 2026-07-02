@@ -18,7 +18,7 @@ inputs:
     findings:
       required: true
       description: Accumulated findings to verify
-      schema:
+      schema: &research_findings_schema
         type: array
         items:
           type: object
@@ -40,7 +40,7 @@ inputs:
           required: [claim, evidence, confidence]
     perspectives:
       description: Perspectives used during research planning
-      schema:
+      schema: &perspectives_schema
         type: array
         items:
           type: object
@@ -100,16 +100,16 @@ tasks:
           schema: { type: string }
           value: "${{ inputs.values.topic }}"
         findings:
-          schema: { type: array, items: { type: object } }
+          schema: *research_findings_schema
           value: "${{ inputs.values.findings }}"
         perspectives:
-          schema: { type: array, items: { type: object } }
+          schema: *perspectives_schema
           value: "${{ inputs.values.?perspectives.orValue([]) }}"
     outputs:
       values:
         verified_findings:
           required: true
-          schema:
+          schema: &verified_findings_schema
             type: array
             items:
               type: object
@@ -136,7 +136,7 @@ tasks:
             description: Findings with calibrated confidence scores
         issues:
           required: true
-          schema:
+          schema: &verification_issues_schema
             type: array
             items:
               type: object
@@ -171,11 +171,11 @@ outputs:
   values:
     verified_findings:
       required: true
-      schema: { type: array, items: { type: object } }
+      schema: *verified_findings_schema
       value: "${{ tasks.verify.outputs.values.verified_findings }}"
     issues:
       required: true
-      schema: { type: array, items: { type: object } }
+      schema: *verification_issues_schema
       value: "${{ tasks.verify.outputs.values.issues }}"
     open_questions:
       required: true

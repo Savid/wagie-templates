@@ -2,13 +2,8 @@
 
 Specialized Wagie template families live here.
 
-Current layout:
-
-- `ethereum`: devnet and Kurtosis Ethereum workflows
-- `code`: code-review and code-quality workflows
-- `ci`: CI failure triage and GitHub issue state workflows
-- `research`: auto-research workflows
-- `experiments`: metric-driven experiment loops over git-tracked artifacts
+Families are shallow root-level directories, one per domain (`ethereum`, `code`,
+`research`, `experiments`, …) — see each family's templates for what it covers.
 
 Validation is run as a combined library with Wagie core templates, through
 Wagie's executable preflight (parse + compile), against the pinned

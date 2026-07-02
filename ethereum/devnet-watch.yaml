@@ -1,0 +1,382 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-watch
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when any Ethereum devnet — a live hosted network, a local Kurtosis enclave, or a restored compute snapshot — must be watched live over a bounded window going forward and its problems surfaced. Establishes a shared watch window, fans out neutral per-service and network observation, then collates the observations into a deduped issue list. Live and forward — for a window that is already in the past, this is not the tool.
+tags: ["ethereum", "devnet", "watch", "observability", "issues", "hosted", "live", "kurtosis"]
+inputs:
+  values:
+    devnet:
+      description: Hosted devnet id or context, when watching a hosted network
+      schema: { type: string }
+    snapshot_id:
+      description: A panda-compute snapshot to restore and watch
+      schema: { type: string }
+    network_target:
+      description: An already-running local or live network to attach to
+      schema: &network_target_schema
+        type: object
+        properties:
+          kind: { type: string, description: local-enclave | compute-enclave | hosted }
+          enclave: { type: string }
+          access: { type: string }
+        required: [kind]
+    watch_epochs:
+      description: How many epochs to watch from the current epoch (default 5)
+      schema: { type: number, default: 5 }
+    sandbox_ttl:
+      description: TTL for a restored compute sandbox, when applicable
+      schema: { type: string }
+tasks:
+  provision:
+    quality-gate: "${{ has(outputs.values.network_target) && size(outputs.values.services) > 0 && has(outputs.values.setup) && outputs.values.end_epoch >= outputs.values.start_epoch }}"
+    instructions: |-
+      Establish the network to watch and the shared watch window. Do not modify
+      the network.
+
+      Route by what you are given, and consult the matching runbook — resolve
+      runbooks by meaning via `panda search runbooks "<need>"`:
+      - attach to a supplied network target as-is;
+      - restore a snapshot per the runbook that owns the panda-compute lifecycle;
+      - run, attach to, reach, and map a local enclave per the runbook that owns
+        running and reaching a Kurtosis devnet.
+      The network_target contract is in the runbook that owns debugging an
+      Ethereum network.
+
+      Read the current epoch and slot timing from a beacon node; end_epoch =
+      current epoch + watch_epochs, and every watcher stops when the network
+      reaches end_epoch. Watchers are isolated and only receive these values, so
+      the network target must carry enough to address the nodes.
+
+      Emit one service entry per node and per tooling service, each with its role
+      and build (client, image, version); the network target and access; the start
+      and end epochs; and a setup summary (load generators, builders, fork
+      schedule, notable params) for the judge.
+    inputs:
+      values:
+        devnet:
+          schema: { type: string }
+          value: "${{ inputs.values.?devnet.orValue('') }}"
+        snapshot_id:
+          schema: { type: string }
+          value: "${{ inputs.values.?snapshot_id.orValue('') }}"
+        provided_target:
+          schema:
+            type: object
+            description: Caller-supplied target if any
+            properties:
+              kind: { type: string }
+              enclave: { type: string }
+              access: { type: string }
+          value: "${{ inputs.values.?network_target.orValue({}) }}"
+        watch_epochs:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?watch_epochs.orValue(5) }}"
+        sandbox_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
+    outputs:
+      values:
+        network_target:
+          required: true
+          schema: *network_target_schema
+        sandbox_id:
+          required: true
+          schema: { type: string, description: Compute sandbox id when applicable, else empty }
+        services:
+          required: true
+          schema:
+            type: array
+            items: &service_schema
+              type: object
+              properties:
+                node: { type: string }
+                role: { type: string, enum: [consensus, execution, validator, builder, relay, load-generator, explorer, metrics, logs, test-runner, tooling, unknown] }
+                client: { type: string }
+                image: { type: string }
+                version: { type: string }
+                paired: { type: string }
+              required: [node, role]
+            description: One entry per node and tooling service to watch, with role and build
+        start_epoch:
+          required: true
+          schema: { type: number }
+        end_epoch:
+          required: true
+          schema: { type: number }
+        setup:
+          required: true
+          schema: { type: string, description: Setup summary (load, builders, fork schedule) for the judge }
+  observe:
+    needs: [provision]
+    inputs:
+      values:
+        network_target:
+          required: true
+          schema: *network_target_schema
+          value: "${{ tasks.provision.outputs.values.network_target }}"
+        end_epoch:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.provision.outputs.values.end_epoch }}"
+    matrix:
+      axes:
+        service:
+          schema:
+            type: array
+            items: *service_schema
+          value: "${{ tasks.provision.outputs.values.services }}"
+    tasks:
+      observe_one:
+        quality-gate: "${{ has(outputs.values.result) }}"
+        instructions: |-
+          Observe one service until the network reaches the end epoch, then report
+          neutral facts only — do not judge whether they are problems; collate
+          does that. Do not modify or snapshot the network.
+
+          Resolve runbooks by meaning via `panda search runbooks "<need>"`.
+          Follow the runbook that owns neutral
+          devnet watching for this service's role (consensus, execution,
+          validator, builder, or tooling): service and port resolution, bounded
+          logs, local datasource, and the neutral-observation contract. Use the
+          runbook that owns the fork model for fork-specific artifacts (payloads,
+          bids, payload attestations, data columns) and the runbook that owns
+          evidence discipline to tag each fact with the node, its slot or block,
+          and the timestamp.
+
+          Return this service's observations, empty if nothing notable.
+        inputs:
+          values:
+            service:
+              required: true
+              schema: *service_schema
+              value: "${{ matrix.service }}"
+            network_target:
+              required: true
+              schema: *network_target_schema
+              value: "${{ inputs.values.network_target }}"
+            end_epoch:
+              required: true
+              schema: { type: number }
+              value: "${{ inputs.values.end_epoch }}"
+        outputs:
+          values:
+            result:
+              required: true
+              schema: &observe_result_schema
+                type: object
+                properties:
+                  node: { type: string }
+                  role: { type: string }
+                  observations:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        slot: { type: number }
+                        epoch: { type: number }
+                        block: { type: number }
+                        timestamp: { type: string }
+                        summary: { type: string }
+                      required: [summary]
+                required: [observations]
+    outputs:
+      values:
+        observations:
+          required: true
+          schema:
+            type: array
+            items: *observe_result_schema
+          value: "${{ tasks.observe_one.outputs.values.result }}"
+  observe_network:
+    needs: [provision]
+    quality-gate: "${{ has(outputs.values.network_observations) }}"
+    instructions: |-
+      Observe the network as a whole across the watch window, facts only: is head
+      and finality advancing, do nodes agree on head and finality, participation
+      on completed epochs, missed slots or reorgs or splits, payloads present on
+      ePBS, sidecars or data columns available on PeerDAS.
+
+      Resolve runbooks by meaning via `panda search runbooks "<need>"`.
+      Follow the runbook that owns neutral devnet watching
+      (network lane) and the runbook that owns the fork model and health
+      thresholds for the finality and participation bands. Judge empty blocks
+      against the setup, not in a vacuum (the runbook that owns evidence
+      discipline).
+    inputs:
+      values:
+        network_target:
+          required: true
+          schema: *network_target_schema
+          value: "${{ tasks.provision.outputs.values.network_target }}"
+        end_epoch:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.provision.outputs.values.end_epoch }}"
+        setup:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.provision.outputs.values.setup }}"
+    outputs:
+      values:
+        network_observations:
+          required: true
+          schema: &network_obs_schema
+            type: array
+            items:
+              type: object
+              properties:
+                scope: { type: string }
+                epoch: { type: number }
+                timestamp: { type: string }
+                summary: { type: string }
+              required: [summary]
+  snapshot_final:
+    needs: [provision, observe, observe_network]
+    quality-gate: "${{ has(outputs.values.snapshotted) }}"
+    instructions: |-
+      If the network is on panda-compute, take exactly one final snapshot after
+      the end epoch is reached, per the runbook that owns the panda-compute
+      lifecycle (`panda search runbooks "snapshot a devnet"` to find it) —
+      snapshot is a compute-only capability,
+      so poll the operation and resolve the snapshot id.
+      If the network is local or hosted, skip and set snapshotted=false. Do not
+      snapshot mid-window.
+    inputs:
+      values:
+        network_target:
+          required: true
+          schema: *network_target_schema
+          value: "${{ tasks.provision.outputs.values.network_target }}"
+        sandbox_id:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.provision.outputs.values.sandbox_id }}"
+        end_epoch:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.provision.outputs.values.end_epoch }}"
+    outputs:
+      values:
+        snapshotted:
+          required: true
+          schema: { type: boolean }
+        snapshot_id:
+          required: true
+          schema: { type: string, description: Final snapshot id, empty when not applicable }
+  collate:
+    needs: [provision, observe, observe_network, snapshot_final]
+    quality-gate: "${{ has(outputs.values.issues) }}"
+    instructions: |-
+      Turn the neutral observations into self-contained issues. Judge here — the
+      watchers did not.
+      Outputs are the structured values declared below — never an HTML page,
+      bug board, or other rendered artifact, even if a retrieved runbook
+      offers to build one.
+
+      Resolve runbooks by meaning via `panda search runbooks "<need>"`.
+      Follow the runbook that owns collating watch issues
+      for the judgment rules, the one that owns the issue record shape, the one
+      that owns issue fingerprinting for identity (avoid one issue per node;
+      collapse duplicates that share a cause), the one that owns the fork model
+      and health thresholds for what counts as unhealthy, and the one that owns
+      evidence discipline for citations.
+      Judge against the setup summary: empty blocks with no load generator are
+      expected, and liveness can be healthy while the builder path is degraded.
+
+      Emit the deduped issues, each with a suspected layer, a first-seen marker,
+      a fingerprint (the fingerprinting runbook's recipe — no run-specific ids in
+      it), and handles filled from this run (devnet, the target's enclave, the
+      final snapshot id) so a downstream investigation can restore or reach the
+      broken state.
+    inputs:
+      values:
+        setup:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.provision.outputs.values.setup }}"
+        observations:
+          required: true
+          schema:
+            type: array
+            items: *observe_result_schema
+          value: "${{ tasks.observe.outputs.values.observations }}"
+        network_observations:
+          required: true
+          schema: *network_obs_schema
+          value: "${{ tasks.observe_network.outputs.values.network_observations }}"
+        devnet:
+          schema: { type: string, description: Source devnet id when known }
+          value: "${{ inputs.values.?devnet.orValue('') }}"
+        network_target:
+          required: true
+          schema: *network_target_schema
+          value: "${{ tasks.provision.outputs.values.network_target }}"
+        final_snapshot_id:
+          required: true
+          schema: { type: string, description: Final snapshot id, empty when not applicable }
+          value: "${{ tasks.snapshot_final.outputs.values.snapshot_id }}"
+    outputs:
+      values:
+        issues:
+          required: true
+          schema: &issue_schema
+            type: array
+            items:
+              type: object
+              properties:
+                title: { type: string }
+                summary: { type: string }
+                description: { type: string }
+                suspected_layer: { type: string }
+                first_seen: { type: string }
+                evidence: { type: array, items: { type: string } }
+                fingerprint: { type: string, description: Stable identity key for dedupe across runs and devnets }
+                handles:
+                  type: object
+                  description: What lets an investigation restore or reach the broken state
+                  properties:
+                    devnet: { type: string }
+                    enclave: { type: string }
+                    snapshot_id: { type: string }
+              required: [title, summary]
+outputs:
+  values:
+    issues:
+      required: true
+      schema: *issue_schema
+      value: "${{ tasks.collate.outputs.values.issues }}"
+    network_target:
+      required: true
+      schema: *network_target_schema
+      value: "${{ tasks.provision.outputs.values.network_target }}"
+    watch_window:
+      required: true
+      schema:
+        type: object
+        properties:
+          start_epoch: { type: number }
+          end_epoch: { type: number }
+        required: [start_epoch, end_epoch]
+      value: "${{ {'start_epoch': tasks.provision.outputs.values.start_epoch, 'end_epoch': tasks.provision.outputs.values.end_epoch} }}"
+    observations:
+      required: true
+      schema:
+        type: array
+        items: *observe_result_schema
+      value: "${{ tasks.observe.outputs.values.observations }}"
+    final_snapshot:
+      required: true
+      schema:
+        type: object
+        properties:
+          snapshotted: { type: boolean }
+          snapshot_id: { type: string }
+        required: [snapshotted]
+      value: "${{ {'snapshotted': tasks.snapshot_final.outputs.values.snapshotted, 'snapshot_id': tasks.snapshot_final.outputs.values.snapshot_id} }}"

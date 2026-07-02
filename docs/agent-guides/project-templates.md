@@ -27,7 +27,6 @@ The repo uses shallow root-level families:
 
 - `ethereum/`
 - `code/`
-- `ci/`
 - `research/`
 - `experiments/`
 
@@ -37,7 +36,6 @@ Examples:
 
 - a devnet-to-Kurtosis repro workflow still belongs in `ethereum/`
 - a code-review pipeline belongs in `code/`
-- a GitHub Actions failure-state or issue-state primitive belongs in `ci/`
 - iterative finding accumulation belongs in `research/`
 - metric-driven artifact improvement loops belong in `experiments/`
 
@@ -258,7 +256,7 @@ executable preflight path (parse + compile). Two equivalent entry points:
 make test                          # go test ./... — the full combined-library check
 make validate                      # CLI report, every family
 go run ./cmd/validate code         # report only files whose path contains "code"
-go run ./cmd/validate ethereum/devnet-debug.yaml
+go run ./cmd/validate ethereum/kurtosis-devnet-watch.yaml
 ```
 
 `cmd/validate` always loads the whole library (so `uses:` composition resolves)
@@ -268,6 +266,10 @@ narrows what is reported. Both paths validate against the pinned
 
 The parser is strict: unknown fields are hard errors and it fails fast (one
 error per file at a time), so re-run after each fix until `0 failed`.
+`make validate` also prints non-failing topology warnings for risky optional
+tasks, such as a task with `if:` that another sibling lists in `needs`. That
+pattern is valid for deliberate branch pruning, but optional mainline stages
+should usually run and return empty/default outputs instead.
 
 Check templates in this order:
 

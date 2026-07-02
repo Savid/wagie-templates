@@ -1,0 +1,160 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-pipeline-local
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use to run the full Ethereum devnet reproduce-and-analyze pipeline end to end with NO panda-compute: build a Kurtosis config from a hosted devnet, launch it locally, watch it for a window, then root-cause every issue it surfaces. An all-in-one convenience over the individual devnet stages, for when you don't want remote compute.
+tags: ["ethereum", "devnet", "kurtosis", "pipeline", "local", "no-compute", "watch", "investigate"]
+inputs:
+  values:
+    devnet:
+      required: true
+      description: Hosted devnet name to reproduce locally, e.g. glamsterdam-devnet-6
+      schema: { type: string }
+    steering:
+      description: Optional config steering (client subset, tooling, accelerated forks)
+      schema: { type: string }
+    watch_epochs:
+      description: How many epochs to watch the local network (default 5)
+      schema: { type: number, default: 5 }
+tasks:
+  config:
+    uses: dev.wagie/devnet-config@1.0.0
+    inputs:
+      values:
+        devnet:
+          value: "${{ inputs.values.devnet }}"
+        steering:
+          value: "${{ inputs.values.?steering.orValue('') }}"
+  run_local:
+    needs: [config]
+    uses: dev.wagie/devnet-run-local@1.0.0
+    inputs:
+      artifacts:
+        config:
+          ref: tasks.config.outputs.artifacts.config
+  watch:
+    needs: [run_local]
+    uses: dev.wagie/devnet-watch@1.0.0
+    inputs:
+      values:
+        network_target:
+          value: "${{ tasks.run_local.outputs.values.network_target }}"
+        watch_epochs:
+          value: "${{ inputs.values.?watch_epochs.orValue(5) }}"
+  investigate:
+    needs: [watch]
+    inputs:
+      values:
+        network_target:
+          required: true
+          schema:
+            type: object
+            properties:
+              kind: { type: string }
+              enclave: { type: string }
+              access: { type: string }
+            required: [kind]
+          value: "${{ tasks.watch.outputs.values.network_target }}"
+    matrix:
+      axes:
+        issue:
+          schema:
+            type: array
+            items: &issue_item_schema
+              type: object
+              properties:
+                title: { type: string }
+                summary: { type: string }
+                description: { type: string }
+                suspected_layer: { type: string }
+                first_seen: { type: string }
+                evidence: { type: array, items: { type: string } }
+                fingerprint: { type: string, description: Stable identity key for dedupe across runs and devnets }
+                handles:
+                  type: object
+                  description: What lets an investigation restore or reach the broken state
+                  properties:
+                    devnet: { type: string }
+                    enclave: { type: string }
+                    snapshot_id: { type: string }
+              required: [title, summary]
+          value: "${{ tasks.watch.outputs.values.issues }}"
+    tasks:
+      one:
+        uses: dev.wagie/devnet-issue-investigate@1.0.0
+        inputs:
+          values:
+            issue:
+              value: "${{ matrix.issue }}"
+            network_target:
+              value: "${{ inputs.values.network_target }}"
+    outputs:
+      values:
+        investigations:
+          required: true
+          schema:
+            type: array
+            items: &report_schema
+              type: object
+              properties:
+                issue: { type: string }
+                leading_cause: { type: string }
+                verdict: { type: string }
+                counterargument: { type: string }
+                reachability: { type: string }
+                confidence: { type: string }
+                coverage: { type: string }
+                reproduced: { type: boolean }
+              required: [issue, leading_cause, verdict, confidence]
+          value: "${{ tasks.one.outputs.values.report }}"
+        feedback_tasks:
+          required: true
+          schema: &feedback_matrix_schema
+            type: array
+            description: Follow-up tasks per investigated issue, parallel to investigations
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  kind: { type: string }
+                  description: { type: string }
+                required: [kind, description]
+          value: "${{ tasks.one.outputs.values.feedback_tasks }}"
+outputs:
+  values:
+    config_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.config.outputs.values.summary }}"
+    network_target:
+      required: true
+      schema:
+        type: object
+        properties:
+          kind: { type: string }
+          enclave: { type: string }
+          access: { type: string }
+        required: [kind]
+      value: "${{ tasks.run_local.outputs.values.network_target }}"
+    issues:
+      required: true
+      schema:
+        type: array
+        items: *issue_item_schema
+      value: "${{ tasks.watch.outputs.values.issues }}"
+    investigations:
+      required: true
+      schema:
+        type: array
+        items: *report_schema
+      value: "${{ tasks.investigate.outputs.values.investigations }}"
+    feedback_tasks:
+      required: true
+      schema: *feedback_matrix_schema
+      value: "${{ tasks.investigate.outputs.values.feedback_tasks }}"

@@ -17,7 +17,7 @@ inputs:
       schema: { type: string }
     previous_findings:
       description: Prior findings already established
-      schema:
+      schema: &research_findings_schema
         type: array
         items:
           type: object
@@ -39,7 +39,7 @@ inputs:
           required: [claim, evidence, confidence]
     gaps:
       description: Remaining questions or subtopics to address
-      schema:
+      schema: &research_gaps_schema
         type: array
         items:
           type: object
@@ -53,7 +53,7 @@ inputs:
           required: [question]
     plan_questions:
       description: Sub-questions from the research plan to target
-      schema:
+      schema: &plan_questions_schema
         type: array
         items:
           type: object
@@ -117,19 +117,19 @@ tasks:
           schema: { type: string }
           value: "${{ inputs.values.topic }}"
         previous_findings:
-          schema: { type: array, items: { type: object } }
+          schema: *research_findings_schema
           value: "${{ inputs.values.?previous_findings.orValue([]) }}"
         gaps:
-          schema: { type: array, items: { type: object } }
+          schema: *research_gaps_schema
           value: "${{ inputs.values.?gaps.orValue([]) }}"
         plan_questions:
-          schema: { type: array, items: { type: object } }
+          schema: *plan_questions_schema
           value: "${{ inputs.values.?plan_questions.orValue([]) }}"
     outputs:
       values:
         findings:
           required: true
-          schema:
+          schema: &incremental_findings_schema
             type: array
             items:
               type: object
@@ -163,5 +163,5 @@ outputs:
   values:
     findings:
       required: true
-      schema: { type: array, items: { type: object } }
+      schema: *incremental_findings_schema
       value: "${{ tasks.investigate.outputs.values.findings }}"

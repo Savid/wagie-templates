@@ -104,7 +104,7 @@ tasks:
           value: "${{ inputs.values.?metric_name.orValue('') }}"
         metric_direction:
           required: true
-          schema: { type: string }
+          schema: { type: string, enum: [minimize, maximize] }
           value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
         goal:
           required: true
@@ -313,418 +313,49 @@ tasks:
               schema:
                 type: string
                 description: Human-readable note on any bench or test files that were scaffolded
-      hunt:
+      optimize:
         needs: [setup]
+        uses: dev.wagie/optimize-loop@1.0.0
         inputs:
           values:
-            workspace_path:
-              required: true
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.workspace_path }}"
-            goal:
-              required: true
-              schema: { type: string }
+            objective:
               value: "${{ inputs.values.goal }}"
-            target_files:
-              required: true
-              schema: { type: array, items: { type: string } }
-              value: "${{ tasks.setup.outputs.values.effective_target_files }}"
             metric_name:
-              required: true
-              schema: { type: string }
               value: "${{ tasks.setup.outputs.values.effective_metric_name }}"
             metric_direction:
-              required: true
-              schema: { type: string }
               value: "${{ inputs.values.metric_direction }}"
-            correctness_command:
-              required: true
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.effective_correctness_command }}"
-            experiment_command:
-              required: true
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.effective_experiment_command }}"
-            baseline_metric:
-              required: true
-              schema: { type: number }
-              value: "${{ tasks.setup.outputs.values.baseline_metric }}"
-            baseline_commit:
-              required: true
-              schema: { type: string }
+            initial_state:
               value: "${{ tasks.setup.outputs.values.baseline_commit }}"
-            noise_epsilon:
-              required: true
-              schema: { type: number }
-              value: "${{ inputs.values.noise_epsilon }}"
-            plateau_patience:
-              required: true
-              schema: { type: number }
-              value: "${{ inputs.values.plateau_patience }}"
+            initial_metric:
+              value: "${{ tasks.setup.outputs.values.baseline_metric }}"
+            max_iterations:
+              value: "${{ inputs.values.max_iterations }}"
             patience:
-              required: true
-              schema: { type: number }
               value: "${{ inputs.values.patience }}"
-        loop:
-          max: "${{ inputs.values.max_iterations }}"
-          until: "${{ outputs.values.no_improvement_streak >= inputs.values.patience || outputs.values.plateau_streak >= inputs.values.plateau_patience }}"
-          onMaxExhausted: continue
-        tasks:
-          propose:
-            quality-gate: "${{ has(outputs.values.description) && size(outputs.values.description) > 0 && has(outputs.values.change_plan) && size(outputs.values.change_plan) > 0 }}"
-            instructions: |-
-              Before anything else, `cd` into `workspace_path`. All repo reads in this task are relative to that directory.
-
-              Propose one change that is likely to improve `metric_name` in the direction of `metric_direction`, given the `goal`.
-
-              Scope rules:
-              - Only propose edits to files listed in `target_files`. If you believe a change outside that scope is needed, record the observation in `rationale` and propose the best in-scope alternative instead.
-              - Do not edit any benchmark, test, or correctness-verification file, even if it appears in `target_files`.
-
-              Use `experiment_log` to inform the proposal:
-              - Avoid repeating changes that were already tried and reverted (they failed — don't re-propose unless combined with a new idea).
-              - Build on kept changes (the repo HEAD reflects the accumulated accepted state).
-              - If `no_improvement_streak` is high, try a different direction — exhaust one idea's neighborhood before resetting.
-
-              Plateau handling: if `plateau_streak` is non-zero, the metric has stopped responding to recent changes — every recent measurement is within `noise_epsilon` of the current best. This usually means one of three things:
-              1. You've genuinely found a near-optimum and should propose more *radical* structural changes (different algorithm, different data structure, different approach to the goal) rather than micro-tweaks of the current implementation.
-              2. The metric is saturated against a measurement floor or ceiling (e.g. a cache made the bench effectively free, or accuracy hit 100%). Micro-tweaks will not help. State this hypothesis clearly in `rationale` — the loop is configured to terminate on extended plateaus, so this signal is actionable for leadership even when no proposal helps.
-              3. Run-to-run noise dominates real changes. Suggest tightening measurement (e.g. larger N, better isolation) in `rationale`.
-              When `plateau_streak >= 2`, prefer proposals that target a substantially different code path or approach than the kept changes. Do not propose another small variation of the existing fast path.
-
-              Return a short single-line `description` of the change and a concrete `change_plan` describing exactly what edits the apply step should make.
-
-              Prefer a worker with reasoning and tool-use to read the repo.
-            inputs:
-              values:
-                workspace_path:
-                  schema: { type: string }
-                  value: "${{ inputs.values.workspace_path }}"
-                goal:
-                  schema: { type: string }
-                  value: "${{ inputs.values.goal }}"
-                target_files:
-                  schema: { type: array, items: { type: string } }
-                  value: "${{ inputs.values.target_files }}"
-                metric_name:
-                  schema: { type: string }
-                  value: "${{ inputs.values.metric_name }}"
-                metric_direction:
-                  schema: { type: string }
-                  value: "${{ inputs.values.metric_direction }}"
-                baseline_metric:
-                  schema: { type: number }
-                  value: "${{ inputs.values.baseline_metric }}"
-                best_metric:
-                  schema: { type: number }
-                  value: "${{ loop.best_metric.orValue(inputs.values.baseline_metric) }}"
-                experiment_log:
-                  schema: { type: string }
-                  value: "${{ loop.experiment_log.orValue('') }}"
-                no_improvement_streak:
-                  schema: { type: number }
-                  value: "${{ loop.no_improvement_streak.orValue(0.0) }}"
-                plateau_streak:
-                  schema: { type: number }
-                  value: "${{ loop.plateau_streak.orValue(0.0) }}"
-                noise_epsilon:
-                  schema: { type: number }
-                  value: "${{ inputs.values.noise_epsilon }}"
-            outputs:
-              values:
-                description:
-                  required: true
-                  schema:
-                    type: string
-                    description: Short one-line summary, used as the try commit message
-                change_plan:
-                  required: true
-                  schema:
-                    type: string
-                    description: Concrete plan the apply step will execute
-                rationale:
-                  schema:
-                    type: string
-                    description: Why this change is likely to improve the metric
-          apply:
-            needs: [propose]
-            quality-gate: "${{ has(outputs.values.commit_sha) && size(outputs.values.commit_sha) > 0 }}"
-            instructions: |-
-              Before anything else, `cd` into `workspace_path`. All edits and git commands in this task run relative to that directory.
-
-              Execute the `change_plan`. Edit only files listed in `target_files`.
-
-              After editing, stage and commit with a message shaped as `try: {description}`.
-              Return the commit sha.
-
-              Requires a worker with tool-use.
-            inputs:
-              values:
-                workspace_path:
-                  schema: { type: string }
-                  value: "${{ inputs.values.workspace_path }}"
-                target_files:
-                  schema: { type: array, items: { type: string } }
-                  value: "${{ inputs.values.target_files }}"
-                description:
-                  schema: { type: string }
-                  value: "${{ tasks.propose.outputs.values.description }}"
-                change_plan:
-                  schema: { type: string }
-                  value: "${{ tasks.propose.outputs.values.change_plan }}"
-            outputs:
-              values:
-                commit_sha:
-                  required: true
-                  schema:
-                    type: string
-                    description: Sha of the try commit
-                files_touched:
-                  schema:
-                    type: array
-                    items: { type: string }
-                    description: Files the apply step actually modified
-          correctness:
-            needs: [apply]
-            quality-gate: "${{ has(outputs.values.passed) && has(outputs.values.summary) }}"
-            instructions: |-
-              Before anything else, `cd` into `workspace_path`. Run `correctness_command` from there.
-
-              Determine whether the current commit is correct enough to score.
-
-              If `correctness_command` is empty, return `passed: true` immediately with a summary noting the gate was skipped.
-              Otherwise, run `correctness_command` and set `passed` based on its exit code. Summarize failures concisely; don't dump the full log.
-
-              Requires a worker with tool-use.
-            inputs:
-              values:
-                workspace_path:
-                  schema: { type: string }
-                  value: "${{ inputs.values.workspace_path }}"
-                correctness_command:
-                  schema: { type: string }
-                  value: "${{ inputs.values.correctness_command }}"
-            outputs:
-              values:
-                passed:
-                  required: true
-                  schema:
-                    type: boolean
-                    description: True if correctness passed or the gate was skipped
-                summary:
-                  required: true
-                  schema:
-                    type: string
-                    description: Short note on what happened
-          execute:
-            if: "${{ tasks.correctness.outputs.values.passed }}"
-            needs: [apply, correctness]
-            quality-gate: "${{ has(outputs.values.metric) }}"
-            instructions: |-
-              Before anything else, `cd` into `workspace_path`. Run `experiment_command` from there.
-
-              Extract the scalar value labelled `metric_name` from the command's output.
-
-              Parsing strategy:
-              - If the output includes a `name=value` or `name: value` line, use that.
-              - If the output is JSON, parse it and look up the key.
-              - If a results file path is emitted, read it.
-              - If extraction is ambiguous, prefer the last occurrence and include a note in `stdout_tail`.
-
-              Return `metric` as a number. Quality-gate will reject non-numeric output and trigger a retry.
-
-              Requires a worker with tool-use.
-            inputs:
-              values:
-                workspace_path:
-                  schema: { type: string }
-                  value: "${{ inputs.values.workspace_path }}"
-                experiment_command:
-                  schema: { type: string }
-                  value: "${{ inputs.values.experiment_command }}"
-                metric_name:
-                  schema: { type: string }
-                  value: "${{ inputs.values.metric_name }}"
-            outputs:
-              values:
-                metric:
-                  required: true
-                  schema:
-                    type: number
-                    description: Extracted scalar value for metric_name
-                duration_seconds:
-                  schema:
-                    type: number
-                    description: Wall-clock seconds the experiment_command took
-                stdout_tail:
-                  schema:
-                    type: string
-                    description: Last few lines of the command output for diagnostic context
-          decide:
-            needs: [propose, apply, correctness, execute]
-            uses: dev.wagie/decide@1.0.0
-            inputs:
-              values:
-                question:
-                  value: "${{ 'Should this experiment change be kept or reverted?' }}"
-                context:
-                  value: |-
-                    ${{
-                      "Goal: " + inputs.values.goal + "\n" +
-                      "Metric: " + inputs.values.metric_name + " (direction: " + inputs.values.metric_direction + ")\n" +
-                      "Baseline: " + string(inputs.values.baseline_metric) + "\n" +
-                      "Best so far: " + string(loop.best_metric.orValue(inputs.values.baseline_metric)) + "\n" +
-                      "Noise epsilon (relative): " + string(inputs.values.noise_epsilon) + "\n" +
-                      "Proposed change: " + tasks.propose.outputs.values.description + "\n" +
-                      "Files touched: " + string(size(tasks.apply.outputs.values.?files_touched.orValue([]))) + " file(s)\n" +
-                      "Correctness passed: " + string(tasks.correctness.outputs.values.passed) + "\n" +
-                      "Correctness summary: " + tasks.correctness.outputs.values.summary + "\n" +
-                      "New metric (if measured): " + (tasks.correctness.outputs.values.passed ? string(tasks.execute.outputs.values.metric) : "n/a - correctness failed") + "\n\n" +
-                      "Acceptance rule:\n" +
-                      "- If correctness failed, revert.\n" +
-                      "- Else compute the noise band: band = noise_epsilon * max(|baseline|, 1). Treat the new metric as a real improvement only if the move outside the band is in the goal direction:\n" +
-                      "  - minimize: keep iff (best_metric - new_metric) > band.\n" +
-                      "  - maximize: keep iff (new_metric - best_metric) > band.\n" +
-                      "- Tie-and-near-tie tiebreaker (Karpathy-style simplicity preference): if the new metric is within the noise band of best (neither clearly better nor clearly worse) AND the proposed change is meaningfully simpler than what it replaces (smaller diff, fewer lines, removes complexity, deletes dead code, drops a layer of abstraction), keep — simplicity at no metric cost is a real win and worth advancing the branch for. Otherwise revert. When in doubt, revert: the earlier commit wins ties.\n" +
-                      "- If noise_epsilon == 0, the band is zero and exact ties revert (the strict accept rule)."
-                    }}
-                options:
-                  value: "${{ ['keep', 'revert'] }}"
-          apply_and_log:
-            needs: [decide, propose, correctness, execute]
-            quality-gate: "${{ has(outputs.values.applied) && has(outputs.values.tsv_row) && size(outputs.values.tsv_row) > 0 && has(outputs.values.plateau_streak_next) }}"
-            instructions: |-
-              Before anything else, `cd` into `workspace_path`. Any git command in this task runs relative to that directory.
-
-              Apply the decision, produce a TSV log row, and update the plateau streak.
-
-              Apply:
-              - If `decision` is `revert`, run `git reset --hard HEAD~1` to discard the try commit.
-              - If `decision` is `keep`, leave HEAD alone.
-              - Return `applied` as the decision string.
-
-              Log:
-              - Produce a single TSV line ending with `\n`.
-              - Columns (tab-separated): timestamp_iso, decision, correctness_passed, metric_value_or_na, best_metric_so_far, plateau_streak_next, description.
-              - When correctness was not measured, write `na` in the metric column.
-
-              Plateau streak update:
-              - The plateau streak counts consecutive rounds where the metric did not move outside the noise band of the current best (the loop terminates when this streak hits `plateau_patience`).
-              - Compute `band = noise_epsilon * max(|baseline_metric|, 1)`.
-              - If correctness failed (`metric_measured == false`), leave the streak unchanged: an unmeasurable round is neither movement nor non-movement.
-              - Else if `|metric - best_metric| <= band`, increment the streak (the metric is within noise of best — no real movement).
-              - Else reset the streak to 0 (the metric moved outside the noise band, regardless of direction; the plateau is broken whether or not the move was an improvement).
-              - Return the new value as `plateau_streak_next` (number) and a boolean `at_plateau` set to true iff `plateau_streak_next >= plateau_patience - 1` (so that the *next* propose round can see a strong escalation signal one step early).
-
-              Prefer a worker with tool-use and reasoning.
-            inputs:
-              values:
-                workspace_path:
-                  schema: { type: string }
-                  value: "${{ inputs.values.workspace_path }}"
-                decision:
-                  schema: { type: string }
-                  value: "${{ tasks.decide.outputs.values.decision }}"
-                description:
-                  schema: { type: string }
-                  value: "${{ tasks.propose.outputs.values.description }}"
-                correctness_passed:
-                  schema: { type: boolean }
-                  value: "${{ tasks.correctness.outputs.values.passed }}"
-                metric:
-                  schema: { type: number }
-                  value: "${{ tasks.correctness.outputs.values.passed ? tasks.execute.outputs.values.metric : 0.0 }}"
-                metric_measured:
-                  schema: { type: boolean }
-                  value: "${{ tasks.correctness.outputs.values.passed }}"
-                best_metric:
-                  schema: { type: number }
-                  value: "${{ loop.best_metric.orValue(inputs.values.baseline_metric) }}"
-                baseline_metric:
-                  schema: { type: number }
-                  value: "${{ inputs.values.baseline_metric }}"
-                noise_epsilon:
-                  schema: { type: number }
-                  value: "${{ inputs.values.noise_epsilon }}"
-                plateau_streak:
-                  schema: { type: number }
-                  value: "${{ loop.plateau_streak.orValue(0.0) }}"
-                plateau_patience:
-                  schema: { type: number }
-                  value: "${{ inputs.values.plateau_patience }}"
-            outputs:
-              values:
-                applied:
-                  required: true
-                  schema:
-                    type: string
-                    description: Decision that was applied (keep or revert)
-                tsv_row:
-                  required: true
-                  schema:
-                    type: string
-                    description: One TSV line summarising this iteration (trailing newline included)
-                plateau_streak_next:
-                  required: true
-                  schema:
-                    type: number
-                    description: Updated plateau streak count after this iteration
-                at_plateau:
-                  schema:
-                    type: boolean
-                    description: True when the streak is one step from triggering the plateau exit
-        outputs:
-          values:
-            best_metric:
-              required: true
-              schema:
-                type: number
-                description: Best metric seen so far after this iteration
-              value: "${{ tasks.decide.outputs.values.decision == 'keep' ? tasks.execute.outputs.values.metric : loop.best_metric.orValue(inputs.values.baseline_metric) }}"
-            best_commit:
-              required: true
-              schema:
-                type: string
-                description: Commit sha that produced best_metric
-              value: "${{ tasks.decide.outputs.values.decision == 'keep' ? tasks.apply.outputs.values.commit_sha : loop.best_commit.orValue(inputs.values.baseline_commit) }}"
-            no_improvement_streak:
-              required: true
-              schema:
-                type: number
-                description: Consecutive rounds without an accepted improvement
-              value: "${{ tasks.decide.outputs.values.decision == 'keep' ? 0.0 : loop.no_improvement_streak.orValue(0.0) + 1.0 }}"
-            plateau_streak:
-              required: true
-              schema:
-                type: number
-                description: Consecutive rounds whose measured metric was within the noise band of best
-              value: "${{ tasks.apply_and_log.outputs.values.plateau_streak_next }}"
-            experiment_log:
-              required: true
-              schema:
-                type: string
-                description: Accumulated TSV of all iterations
-              value: "${{ loop.experiment_log.orValue('') + tasks.apply_and_log.outputs.values.tsv_row }}"
-            accepted_count:
-              required: true
-              schema:
-                type: number
-                description: Number of rounds whose change was kept
-              value: "${{ tasks.decide.outputs.values.decision == 'keep' ? loop.accepted_count.orValue(0.0) + 1.0 : loop.accepted_count.orValue(0.0) }}"
-            reverted_count:
-              required: true
-              schema:
-                type: number
-                description: Number of rounds whose change was reverted
-              value: "${{ tasks.decide.outputs.values.decision == 'revert' ? loop.reverted_count.orValue(0.0) + 1.0 : loop.reverted_count.orValue(0.0) }}"
-            converged:
-              required: true
-              schema:
-                type: boolean
-                description: Whether the experiment loop exited because its until condition was satisfied
-              value: "${{ (tasks.decide.outputs.values.decision == 'keep' ? 0.0 : loop.no_improvement_streak.orValue(0.0) + 1.0) >= inputs.values.patience || tasks.apply_and_log.outputs.values.plateau_streak_next >= inputs.values.plateau_patience }}"
+            plateau_patience:
+              value: "${{ inputs.values.plateau_patience }}"
+            noise_epsilon:
+              value: "${{ inputs.values.noise_epsilon }}"
+            method:
+              value: |-
+                ${{
+                  "Every git and shell command in this loop runs inside the cloned repo at " + tasks.setup.outputs.values.workspace_path + " — cd there before doing anything.\n\n" +
+                  "PROPOSE + APPLY (in the step):\n" +
+                  "- Edit ONLY these files: " + tasks.setup.outputs.values.effective_target_files.join(", ") + ". Never edit a benchmark, test, or correctness file, even if it appears in that list.\n" +
+                  "- Stage and commit the change with a message shaped 'try: <one-line change>'. The candidate_state you return is the sha of this try commit.\n\n" +
+                  "VALIDITY (in the step):\n" +
+                  (size(tasks.setup.outputs.values.effective_correctness_command) > 0
+                    ? "- Run the correctness gate: `" + tasks.setup.outputs.values.effective_correctness_command + "`. If it exits non-zero, set valid=false, report the current best_metric as candidate_metric, and do NOT run the measurement.\n"
+                    : "- There is no correctness gate; treat every applied candidate as valid.\n") +
+                  "\nMEASURE (in the step, only when valid):\n" +
+                  "- Run: `" + tasks.setup.outputs.values.effective_experiment_command + "`.\n" +
+                  "- Extract the scalar labelled '" + tasks.setup.outputs.values.effective_metric_name + "' from its output — prefer a `name: value` or `name=value` line, else a JSON key, else the last numeric occurrence. Report it as candidate_metric (a number).\n\n" +
+                  "KEEP / REVERT (in the enact):\n" +
+                  "- To keep, leave HEAD as it is — the try commit stays.\n" +
+                  "- To revert, discard the try commit and return the repo to the best state with `git reset --hard <best_state>`, where best_state is the best commit sha you are given."
+                }}
       finalize:
-        needs: [hunt, setup]
+        needs: [optimize, setup]
         quality-gate: "${{ has(outputs.values.result_branch_url) && size(outputs.values.result_branch_url) > 0 && has(outputs.values.exit_reason) && size(outputs.values.exit_reason) > 0 }}"
         instructions: |-
           Before anything else, `cd` into `workspace_path`. The git push and any commands in this task run relative to that directory.
@@ -803,22 +434,22 @@ tasks:
               value: "${{ tasks.setup.outputs.values.baseline_metric }}"
             best_metric:
               schema: { type: number }
-              value: "${{ tasks.hunt.outputs.values.best_metric }}"
+              value: "${{ tasks.optimize.outputs.values.best_metric }}"
             best_commit:
               schema: { type: string }
-              value: "${{ tasks.hunt.outputs.values.best_commit }}"
+              value: "${{ tasks.optimize.outputs.values.best_state }}"
             accepted_count:
               schema: { type: number }
-              value: "${{ tasks.hunt.outputs.values.accepted_count }}"
+              value: "${{ tasks.optimize.outputs.values.accepted_count }}"
             reverted_count:
               schema: { type: number }
-              value: "${{ tasks.hunt.outputs.values.reverted_count }}"
+              value: "${{ tasks.optimize.outputs.values.reverted_count }}"
             experiment_log:
               schema: { type: string }
-              value: "${{ tasks.hunt.outputs.values.experiment_log }}"
+              value: "${{ tasks.optimize.outputs.values.log }}"
             converged:
               schema: { type: boolean }
-              value: "${{ tasks.hunt.outputs.values.converged }}"
+              value: "${{ tasks.optimize.outputs.values.converged }}"
             patience:
               schema: { type: number }
               value: "${{ inputs.values.patience }}"
@@ -884,23 +515,23 @@ tasks:
         best_metric:
           required: true
           schema: { type: number }
-          value: "${{ tasks.hunt.outputs.values.best_metric }}"
+          value: "${{ tasks.optimize.outputs.values.best_metric }}"
         best_commit:
           required: true
           schema: { type: string }
-          value: "${{ tasks.hunt.outputs.values.best_commit }}"
+          value: "${{ tasks.optimize.outputs.values.best_state }}"
         rounds_completed:
           required: true
           schema: { type: number }
-          value: "${{ tasks.hunt.outputs.values.accepted_count + tasks.hunt.outputs.values.reverted_count }}"
+          value: "${{ tasks.optimize.outputs.values.accepted_count + tasks.optimize.outputs.values.reverted_count }}"
         accepted_count:
           required: true
           schema: { type: number }
-          value: "${{ tasks.hunt.outputs.values.accepted_count }}"
+          value: "${{ tasks.optimize.outputs.values.accepted_count }}"
         reverted_count:
           required: true
           schema: { type: number }
-          value: "${{ tasks.hunt.outputs.values.reverted_count }}"
+          value: "${{ tasks.optimize.outputs.values.reverted_count }}"
         result_branch_url:
           required: true
           schema: { type: string }
@@ -924,7 +555,7 @@ tasks:
         converged:
           required: true
           schema: { type: boolean }
-          value: "${{ tasks.hunt.outputs.values.converged }}"
+          value: "${{ tasks.optimize.outputs.values.converged }}"
         effective_target_files:
           required: true
           schema: { type: array, items: { type: string } }

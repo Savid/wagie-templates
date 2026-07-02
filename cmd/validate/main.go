@@ -21,10 +21,11 @@ import (
 	"strings"
 
 	"github.com/savid/wagie"
+	"github.com/savid/wagie-templates/internal/templatecheck"
 )
 
 // families are the template directories owned by this repo.
-var families = []string{"ethereum", "code", "ci", "research", "experiments"}
+var families = []string{"ethereum", "code", "research", "experiments"}
 
 func main() {
 	filters := os.Args[1:]
@@ -60,7 +61,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	reported, failed := report(results, filters)
+	warnings := collectWarnings(files)
+	reported, failed := report(results, warnings, filters)
 	fmt.Printf("\n%d reported, %d failed\n", reported, failed)
 	if failed > 0 {
 		os.Exit(1)
@@ -69,7 +71,7 @@ func main() {
 
 // report prints one line per reported family file and returns the reported and
 // failed counts.
-func report(results []wagie.TemplateValidationResult, filters []string) (int, int) {
+func report(results []wagie.TemplateValidationResult, warnings map[string][]templateWarning, filters []string) (int, int) {
 	reported, failed := 0, 0
 	for _, result := range results {
 		if isCore(result.Path) || !matchesFilter(result.Path, filters) {
@@ -84,12 +86,14 @@ func report(results []wagie.TemplateValidationResult, filters []string) (int, in
 
 		if result.Valid {
 			fmt.Printf("ok    %s\n", header)
+			printWarnings(warnings[result.Path])
 			continue
 		}
 
 		failed++
 		fmt.Printf("FAIL  %s\n", header)
 		printErrors(result.Errors)
+		printWarnings(warnings[result.Path])
 	}
 	return reported, failed
 }
@@ -101,6 +105,44 @@ func printErrors(errs []wagie.TemplateValidationError) {
 			continue
 		}
 		fmt.Printf("        - [%s] %s\n", e.Type, e.Message)
+	}
+}
+
+type templateWarning struct {
+	Line    int
+	Message string
+}
+
+func collectWarnings(files []wagie.TemplateFile) map[string][]templateWarning {
+	out := map[string][]templateWarning{}
+	for _, file := range files {
+		if isCore(file.Path) {
+			continue
+		}
+		issues, err := templatecheck.ConditionalNeeds(file.Data)
+		if err != nil {
+			out[file.Path] = append(out[file.Path], templateWarning{
+				Message: fmt.Sprintf("topology warning skipped: %v", err),
+			})
+			continue
+		}
+		for _, issue := range issues {
+			out[file.Path] = append(out[file.Path], templateWarning{
+				Line:    issue.Line,
+				Message: issue.Error(),
+			})
+		}
+	}
+	return out
+}
+
+func printWarnings(warnings []templateWarning) {
+	for _, warning := range warnings {
+		if warning.Line > 0 {
+			fmt.Printf("        - [warning] line %d: %s\n", warning.Line, warning.Message)
+			continue
+		}
+		fmt.Printf("        - [warning] %s\n", warning.Message)
 	}
 }
 

@@ -1,0 +1,204 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-scan
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use to check what went wrong on a hosted Ethereum devnet over a past time window — for example "any issues on devnet X in the last 24 hours?". Queries the devnet's retained data across the window and returns a deduped issue list with suspected layers and first-seen markers. Retrospective: it scans history, so reach for it when the window is in the past rather than watching a running network forward.
+tags: ["ethereum", "devnet", "scan", "retrospective", "issues", "clickhouse", "history"]
+inputs:
+  values:
+    devnet:
+      required: true
+      description: Hosted devnet name or network id whose retained data to scan, e.g. glamsterdam-devnet-6
+      schema: { type: string }
+    lookback:
+      description: How far back to scan from now, as a duration, e.g. 24h or 6h
+      schema: { type: string, default: 24h }
+    start_time:
+      description: Explicit window start (ISO or slot/epoch); overrides lookback when set
+      schema: { type: string }
+    end_time:
+      description: Explicit window end; defaults to now
+      schema: { type: string }
+    focus:
+      description: Optional steering, e.g. "finality", "prysm nodes", "blobs on slot 823"
+      schema: { type: string }
+    max_scan_rounds:
+      description: Gap-filling rounds for the scan hunt
+      schema: { type: number, default: 2 }
+tasks:
+  frame:
+    quality-gate: "${{ has(outputs.values.scan_target) && size(outputs.values.scan_target) > 0 && has(outputs.values.objective) && size(outputs.values.objective) > 0 }}"
+    instructions: |-
+      Resolve the retained-data access and the concrete time window for the scan.
+      Do not query for issues yet — just frame the target.
+
+      Resolve runbooks by meaning via `panda search runbooks "<need>"`.
+      Resolve the devnet's network id and its retained
+      datasource with the runbook that owns hosted devnet context intake. Turn
+      the requested window (explicit start/end, else `lookback` back from now)
+      into a concrete time range and its block/slot range with the runbook that
+      owns ClickHouse querying (block-number bridge procedure), noting which
+      tables carry raw vs canonical data (same runbook).
+
+      Emit a self-contained `scan_target` string (devnet, resolved window, and how
+      to reach its retained data) and an `objective` string of the form "Find all
+      issues in <devnet> during <window>", folding in any `focus`.
+    inputs:
+      values:
+        devnet:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.devnet }}"
+        lookback:
+          schema: { type: string }
+          value: "${{ inputs.values.?lookback.orValue('24h') }}"
+        start_time:
+          schema: { type: string }
+          value: "${{ inputs.values.?start_time.orValue('') }}"
+        end_time:
+          schema: { type: string }
+          value: "${{ inputs.values.?end_time.orValue('') }}"
+        focus:
+          schema: { type: string }
+          value: "${{ inputs.values.?focus.orValue('') }}"
+    outputs:
+      values:
+        scan_target:
+          required: true
+          schema: { type: string, description: Devnet, resolved window, and retained-data access }
+        objective:
+          required: true
+          schema: { type: string, description: One-line scan objective }
+        window:
+          required: true
+          schema:
+            type: object
+            properties:
+              start: { type: string }
+              end: { type: string }
+              resolved: { type: boolean }
+            required: [resolved]
+  scan:
+    needs: [frame]
+    uses: dev.wagie/scoped-discovery@1.0.0
+    inputs:
+      values:
+        target:
+          value: "${{ tasks.frame.outputs.values.scan_target }}"
+        objective:
+          value: "${{ tasks.frame.outputs.values.objective }}"
+        max_gapfill_rounds:
+          value: "${{ inputs.values.?max_scan_rounds.orValue(2) }}"
+  collate:
+    needs: [frame, scan]
+    quality-gate: "${{ has(outputs.values.issues) && has(outputs.values.scan_summary) && size(outputs.values.scan_summary) > 0 }}"
+    instructions: |-
+      Turn the scan findings into self-contained issues over the window. Judge
+      here — the scan gathered facts.
+      Outputs are the structured values declared below — never an HTML page,
+      bug board, or other rendered artifact, even if a retrieved runbook
+      offers to build one.
+
+      Resolve runbooks by meaning via `panda search runbooks "<need>"`.
+      Follow the runbook that owns collating watch issues
+      for the judgment rules, the one that owns the issue record shape, the one
+      that owns issue fingerprinting for identity (collapse duplicates that share
+      a cause; avoid one issue per node or per slot), the one that owns the fork
+      model and health thresholds for what counts as unhealthy across the window,
+      and the one that owns evidence discipline for re-derivable citations. Each
+      issue must carry a suspected layer, a first-seen marker (the first
+      slot/block/epoch/timestamp in the window where it appears), a fingerprint
+      (the fingerprinting runbook's recipe), and handles with the devnet id
+      (there is no enclave or snapshot for a retained-data scan — leave those
+      empty), ready for a downstream root-cause investigation.
+    inputs:
+      values:
+        devnet:
+          schema: { type: string }
+          value: "${{ inputs.values.devnet }}"
+        window:
+          schema:
+            type: object
+            properties:
+              start: { type: string }
+              end: { type: string }
+              resolved: { type: boolean }
+            required: [resolved]
+          value: "${{ tasks.frame.outputs.values.window }}"
+        findings:
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                angle: { type: string }
+                summary: { type: string }
+                evidence: { type: string }
+                severity: { type: string }
+              required: [angle, summary]
+          value: "${{ tasks.scan.outputs.values.findings }}"
+    outputs:
+      values:
+        issues:
+          required: true
+          schema: &issue_schema
+            type: array
+            items:
+              type: object
+              properties:
+                title: { type: string }
+                summary: { type: string }
+                description: { type: string }
+                suspected_layer: { type: string }
+                first_seen: { type: string }
+                evidence: { type: array, items: { type: string } }
+                fingerprint: { type: string, description: Stable identity key for dedupe across runs and devnets }
+                handles:
+                  type: object
+                  description: What lets an investigation restore or reach the broken state
+                  properties:
+                    devnet: { type: string }
+                    enclave: { type: string }
+                    snapshot_id: { type: string }
+              required: [title, summary]
+        scan_summary:
+          required: true
+          schema: { type: string, description: What window and sources were covered, and what remains uncertain }
+outputs:
+  values:
+    issues:
+      required: true
+      schema: *issue_schema
+      value: "${{ tasks.collate.outputs.values.issues }}"
+    scan_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.collate.outputs.values.scan_summary }}"
+    window:
+      required: true
+      schema:
+        type: object
+        properties:
+          start: { type: string }
+          end: { type: string }
+          resolved: { type: boolean }
+        required: [resolved]
+      value: "${{ tasks.frame.outputs.values.window }}"
+    findings:
+      required: true
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            angle: { type: string }
+            summary: { type: string }
+            evidence: { type: string }
+            severity: { type: string }
+          required: [angle, summary]
+      value: "${{ tasks.scan.outputs.values.findings }}"

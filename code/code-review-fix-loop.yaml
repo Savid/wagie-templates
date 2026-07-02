@@ -150,11 +150,15 @@ tasks:
               value: "${{ loop.dismissed_findings.orValue([]) }}"
       fix:
         needs: [review]
-        if: "${{ tasks.review.outputs.values.verdict != 'approve' }}"
         quality-gate: "${{ has(outputs.values.fixes_applied) }}"
         instructions: |
           You are a skilled developer addressing code review findings. You
           need a worker with tool-use to read and revise the code.
+
+          This task always completes because verification and iteration logging
+          depend on it. If the review verdict is already `approve` or there are
+          no findings, return the incoming `diff` unchanged as `revised_code`,
+          with `fixes_applied: []` and `false_positives: []`.
 
           Apply the minimum targeted changes to resolve the flagged issues.
           Do not refactor, restructure, or improve code beyond what the
@@ -185,13 +189,48 @@ tasks:
               schema: { type: string }
               value: "${{ loop.current_code.orValue(inputs.values.diff) }}"
             findings:
-              schema: { type: array, items: { type: object } }
+              schema: &committee_findings_schema
+                type: array
+                description: Committee findings to address
+                items:
+                  type: object
+                  properties:
+                    severity:
+                      type: string
+                      enum: [critical, high, medium, low, info]
+                    location:
+                      type: string
+                    observation:
+                      type: string
+                    impact:
+                      type: string
+                    suggestion:
+                      type: string
+                    source:
+                      type: string
+                    agreed_by:
+                      type: array
+                      items:
+                        type: string
+                    confidence:
+                      type: number
+                  required: [severity, location, observation, impact, suggestion]
               value: "${{ tasks.review.outputs.values.findings }}"
             context:
               schema: { type: string }
               value: "${{ inputs.values.context }}"
             dismissed_findings:
-              schema: { type: array, items: { type: object } }
+              schema: &dismissed_findings_schema
+                type: array
+                description: Findings dismissed as false positives with reasoning
+                items:
+                  type: object
+                  properties:
+                    finding:
+                      type: string
+                    reasoning:
+                      type: string
+                  required: [finding, reasoning]
               value: "${{ loop.dismissed_findings.orValue([]) }}"
             prev_verification_passed:
               schema: { type: boolean }
@@ -233,20 +272,76 @@ tasks:
                   required: [finding, reasoning]
       verify:
         needs: [fix]
-        if: "${{ inputs.values.repo != '' && has(tasks.fix.outputs.values.revised_code) }}"
-        uses: dev.wagie/code-verification@1.0.0
+        quality-gate: "${{ has(outputs.values.passed) && has(outputs.values.summary) && size(outputs.values.summary) > 0 }}"
+        instructions: |
+          Verify the revised code when repository information is available.
+          This task always completes because iteration logging depends on it.
+
+          If `repo` is empty, do not run any external commands. Return
+          `passed: true`, `checks: []`, and a summary saying verification was
+          skipped because no repo was provided.
+
+          Otherwise, clone `repo`, check out `source_ref`, apply `patch`, and
+          run verification checks. Use explicit `checks` when provided; when a
+          check has no command, discover the project command for that category.
+          If no checks are provided, auto-detect tests, lint, typecheck, build,
+          or format checks from the repository. Run all discovered or explicit
+          checks even if one fails. Return `passed: false` when any required
+          check fails; skipped optional checks should not fail the task.
+
+          Requires a worker with tool-use.
         inputs:
           values:
             repo:
+              schema: { type: string }
               value: "${{ inputs.values.repo }}"
             source_ref:
+              schema: { type: string }
               value: "${{ inputs.values.ref }}"
             patch:
+              schema: { type: string }
               value: "${{ tasks.fix.outputs.values.?revised_code.orValue('') }}"
             checks:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    category: { type: string, enum: [test, lint, typecheck, build, format, custom] }
+                    command: { type: string }
+                    name: { type: string }
+                    required: { type: boolean }
+                  required: [category]
               value: "${{ inputs.values.checks }}"
             context:
+              schema: { type: string }
               value: "${{ inputs.values.context }}"
+        outputs:
+          values:
+            passed:
+              required: true
+              schema: { type: boolean }
+            checks:
+              required: true
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    category: { type: string, enum: [test, lint, typecheck, build, format, custom] }
+                    name: { type: string }
+                    command: { type: string }
+                    passed: { type: boolean }
+                    required: { type: boolean }
+                    exit_code: { type: number }
+                    duration_seconds: { type: number }
+                    output: { type: string }
+                    skipped: { type: boolean }
+                    skip_reason: { type: string }
+                  required: [category, name, passed]
+            summary:
+              required: true
+              schema: { type: string }
       log_iteration:
         needs: [review, fix, verify]
         quality-gate: "${{ has(outputs.values.iteration_summary) && size(outputs.values.iteration_summary) > 0 }}"
@@ -311,16 +406,7 @@ tasks:
           value: '${{ loop.iteration_log.orValue('''') + "\n" + tasks.log_iteration.outputs.values.iteration_summary }}'
         dismissed_findings:
           required: true
-          schema:
-            type: array
-            items:
-              type: object
-              properties:
-                finding:
-                  type: string
-                reasoning:
-                  type: string
-              required: [finding, reasoning]
+          schema: *dismissed_findings_schema
           value: "${{ loop.dismissed_findings.orValue([]) + tasks.fix.outputs.values.?false_positives.orValue([]) }}"
         false_positive_count:
           required: true
@@ -362,16 +448,7 @@ outputs:
       value: "${{ tasks.improve.outputs.values.iteration_log }}"
     dismissed_findings:
       required: true
-      schema:
-        type: array
-        items:
-          type: object
-          properties:
-            finding:
-              type: string
-            reasoning:
-              type: string
-          required: [finding, reasoning]
+      schema: *dismissed_findings_schema
       value: "${{ tasks.improve.outputs.values.dismissed_findings }}"
     false_positive_count:
       required: true

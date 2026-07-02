@@ -1,0 +1,77 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-run-local
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when you want to run a Kurtosis ethereum-package config on the LOCAL machine with no panda-compute, or attach to an already-running local enclave. Launches it and returns a local-enclave network_target ready to observe or investigate. Snapshot and restore are not available locally — that is a panda-compute capability.
+tags: ["ethereum", "devnet", "kurtosis", "local", "run", "no-compute"]
+inputs:
+  values:
+    package_ref:
+      description: Kurtosis package reference to launch
+      schema: { type: string, default: github.com/ethpandaops/ethereum-package }
+    enclave_name:
+      description: Attach to this already-running local enclave instead of launching, if set
+      schema: { type: string }
+  artifacts:
+    config:
+      required: true
+      contentType: text/yaml
+      description: Kurtosis ethereum-package args-file to launch locally
+tasks:
+  launch:
+    quality-gate: "${{ has(outputs.values.network_target) && has(outputs.values.enclave) && size(outputs.values.enclave) > 0 }}"
+    instructions: |-
+      Launch the Kurtosis ethereum devnet on the LOCAL machine (no panda-compute),
+      or attach to the named running enclave, and emit a network_target.
+
+      Follow the runbook that owns running and reaching a Kurtosis devnet (find it
+      via `panda search runbooks "run a devnet locally with kurtosis"`):
+      `kurtosis run --args-file <config> <package_ref>`
+      (or confirm the named enclave is present), then use the same runbook to map
+      services, verify the rendered config, and read logs. Shape the handle per
+      the network_target contract in the runbook that owns debugging an Ethereum
+      network. Snapshot and restore are NOT available locally — that is a
+      compute-only capability.
+
+      Emit the network_target (kind: local-enclave), the enclave name, and a short
+      access summary a watcher or investigator can act on.
+    inputs:
+      values:
+        package_ref:
+          schema: { type: string }
+          value: "${{ inputs.values.?package_ref.orValue('github.com/ethpandaops/ethereum-package') }}"
+        enclave_name:
+          schema: { type: string }
+          value: "${{ inputs.values.?enclave_name.orValue('') }}"
+      artifacts:
+        config:
+          ref: inputs.artifacts.config
+    outputs:
+      values:
+        network_target:
+          required: true
+          schema: &network_target_schema
+            type: object
+            properties:
+              kind: { type: string, description: local-enclave }
+              enclave: { type: string }
+              access: { type: string }
+            required: [kind]
+        enclave:
+          required: true
+          schema: { type: string }
+outputs:
+  values:
+    network_target:
+      required: true
+      schema: *network_target_schema
+      value: "${{ tasks.launch.outputs.values.network_target }}"
+    enclave:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.launch.outputs.values.enclave }}"
