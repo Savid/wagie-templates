@@ -13,6 +13,12 @@ description: >-
   are exhausted. Tracks findings-count decay and verification status for
   convergence.
 tags: ["code-review", "fix-loop", "iterative", "convergence", "verification"]
+examples:
+  - "fix review findings until committee threshold or max iterations"
+  - "rerun project checks after each code review fix"
+  - "track finding count decay across patch iterations"
+  - "report remaining findings when the fix loop stalls"
+  - "dismiss false-positive review comments with reasoning"
 inputs:
   values:
     diff:

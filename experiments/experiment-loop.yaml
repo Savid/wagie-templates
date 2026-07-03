@@ -9,6 +9,12 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use when iteratively tuning any git-tracked artifact in a repo against a scalar metric. Caller only needs to provide `repo_url`, `goal`, and `result_branch`; the setup task clones the repo, discovers or scaffolds the missing pieces (target files, setup command, benchmark, correctness command, metric name) from the goal and repo conventions, then the loop proposes → applies → checks → measures → keeps-or-reverts greedily until a patience window of no-improvement or max iterations. Works for code performance, SQL queries, prompts, configs, ML training loops, Docker image size, or any repo that can emit a scalar from a shell command. Any of the discovered parameters can be overridden by the caller when they are known up front.
 tags: ["experiment", "optimization", "hillclimb", "benchmark", "autonomous", "autoresearch", "metric"]
+examples:
+  - "clone repo tune p95 latency and push result branch"
+  - "discover benchmark and target files from the repo"
+  - "scaffold a frozen eval before tuning code"
+  - "run explicit target files and benchmark command"
+  - "report best-so-far progress and exit reason"
 inputs:
   values:
     repo_url:

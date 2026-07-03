@@ -9,6 +9,12 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use when a topic needs a typed batch of research findings; returns incremental findings with evidence quality metadata, focused on breadth first and then explicit gap closure.
 tags: ["research", "findings", "evidence"]
+examples:
+  - "gather new evidence-backed claims for this topic"
+  - "fill priority research gaps with cited findings"
+  - "label sources as primary secondary tertiary or inference"
+  - "surface contradictions in the next research batch"
+  - "add new findings without repeating prior claims"
 inputs:
   values:
     topic:

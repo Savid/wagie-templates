@@ -9,6 +9,11 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use when you want to run a Kurtosis ethereum-package config on the LOCAL machine with no panda-compute, or attach to an already-running local enclave. Launches it and returns a local-enclave network_target ready to observe or investigate. Snapshot and restore are not available locally — that is a panda-compute capability.
 tags: ["ethereum", "devnet", "kurtosis", "local", "run", "no-compute"]
+examples:
+  - "launch this args file in local Kurtosis"
+  - "attach to an existing local enclave"
+  - "return a local network target for observation"
+  - "start config on my laptop without panda-compute"
 inputs:
   values:
     package_ref:

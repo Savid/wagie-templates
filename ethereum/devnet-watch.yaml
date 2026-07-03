@@ -7,8 +7,14 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when a running enclave-backed Ethereum devnet — a local Kurtosis enclave or a restored panda-compute snapshot — must be watched live over a bounded window going forward and its problems surfaced. Establishes a shared watch window, fans out neutral per-service and network observation, then collates the observations into deduped issue records. Live, forward, and enclave-backed only: hosted networks lack the service/log access this needs — scan their history with devnet-scan instead.
-tags: ["ethereum", "devnet", "watch", "observability", "issues", "kurtosis", "live"]
+  Use when any Ethereum devnet — a live hosted network, a local Kurtosis enclave, or a restored compute snapshot — must be watched live over a bounded window going forward and its problems surfaced. Establishes a shared watch window, fans out neutral per-service and network observation, then collates the observations into a deduped issue list. Live and forward — for a window that is already in the past, this is not the tool.
+tags: ["ethereum", "devnet", "watch", "observability", "issues", "hosted", "live", "kurtosis"]
+examples:
+  - "monitor this live devnet going forward"
+  - "monitor restored snapshot for new live issues"
+  - "return start and end epochs for the watch window"
+  - "include service roles builds and fork setup"
+  - "take final compute snapshot after watching"
 inputs:
   values:
     devnet:

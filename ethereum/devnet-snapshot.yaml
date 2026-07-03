@@ -9,6 +9,12 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use when you have a Kurtosis ethereum-package config and want to launch it on a remote panda-compute sandbox and capture VM snapshots at chosen epochs, returning the sandbox id and per-epoch snapshot ids.
 tags: ["kurtosis", "ethereum", "ethpandaops", "ethereum-package", "devnet", "snapshot", "epoch", "panda-compute", "sandbox", "remote"]
+examples:
+  - "capture epoch snapshots on panda-compute"
+  - "create TTL compute sandbox from named template"
+  - "snapshot epoch zero before the network advances"
+  - "return sandbox id and per-epoch snapshot ids"
+  - "launch config remotely and snapshot chosen epochs"
 inputs:
   values:
     devnet:

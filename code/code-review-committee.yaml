@@ -11,6 +11,12 @@ description: >-
   parallel, then a top-level judge deduplicates, resolves conflicts, and
   produces a unified verdict with confidence scores.
 tags: ["code-review", "committee", "parallel-review", "review-panel"]
+examples:
+  - "run a multi-persona review panel on this diff"
+  - "average reviewer scores into one PR verdict"
+  - "review this diff for security and performance issues"
+  - "dedupe specialist findings into one code verdict"
+  - "run my custom API and security reviewers on this diff"
 inputs:
   values:
     diff:

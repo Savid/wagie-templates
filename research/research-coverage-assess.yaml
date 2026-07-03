@@ -9,6 +9,12 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use when accumulated research needs a structured coverage decision; scores breadth, depth, balance, and conflict resolution, then returns sufficiency state, prioritized gaps, and information gain signal. Research-facing wrapper over the core coverage-assess critic.
 tags: ["research", "evaluation", "coverage"]
+examples:
+  - "check findings against planned research questions"
+  - "rate literature coverage by source diversity"
+  - "score whether contradictory sources are reconciled"
+  - "assess research evidence collection for diminishing returns"
+  - "assess whether deep research findings are complete enough"
 inputs:
   values:
     topic:

@@ -9,6 +9,12 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use when accumulated research findings need adversarial verification; probes for missing perspectives, checks evidence-claim alignment, and calibrates confidence.
 tags: ["research", "verification", "adversarial"]
+examples:
+  - "audit research claims against their evidence"
+  - "calibrate confidence where citations are thin"
+  - "find missing perspectives in accumulated evidence"
+  - "audit temporal geographic and method blind spots"
+  - "flag contradictions and unstated assumptions"
 inputs:
   values:
     topic:

@@ -9,6 +9,11 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use when a research topic needs structured decomposition before investigation; discovers diverse perspectives and produces a prioritized plan of sub-questions. Research-facing wrapper over the core decompose primitive.
 tags: ["research", "planning", "decomposition"]
+examples:
+  - "make a shallow research plan with top questions"
+  - "split this topic into prioritized study questions"
+  - "choose research perspectives before source gathering"
+  - "scope a deep literature dive by evidence angle"
 inputs:
   values:
     topic:

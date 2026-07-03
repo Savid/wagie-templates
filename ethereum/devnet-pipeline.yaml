@@ -9,6 +9,11 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use to run the full Ethereum devnet reproduce-and-analyze pipeline end to end from a hosted devnet name: build a Kurtosis config, launch and snapshot it on panda-compute, watch a restored snapshot for a window, then root-cause every issue it surfaces. An all-in-one convenience over the individual devnet stages.
 tags: ["ethereum", "devnet", "kurtosis", "pipeline", "reproduce", "watch", "investigate"]
+examples:
+  - "run remote panda-compute devnet pipeline end to end"
+  - "launch remote devnet snapshots then root-cause findings"
+  - "from hosted devnet name to remote RCA reports"
+  - "watch restored compute snapshot and investigate surfaced issues"
 inputs:
   values:
     devnet:

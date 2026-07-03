@@ -11,6 +11,11 @@ description: >-
   detailed reviewer persona with focus area and principles to produce scored
   findings.
 tags: ["code-review", "persona", "reviewer"]
+examples:
+  - "review this diff as one security specialist"
+  - "check changed lines only for performance risks"
+  - "call out strengths and issues from one lens"
+  - "respect dismissed false positives on recheck"
 inputs:
   values:
     diff:

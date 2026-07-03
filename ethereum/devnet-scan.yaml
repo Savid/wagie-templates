@@ -9,6 +9,12 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use to check what went wrong on a hosted Ethereum devnet over a past time window — for example "any issues on devnet X in the last 24 hours?". Queries the devnet's retained data across the window and returns a deduped issue list with suspected layers and first-seen markers. Retrospective: it scans history, so reach for it when the window is in the past rather than watching a running network forward.
 tags: ["ethereum", "devnet", "scan", "retrospective", "issues", "clickhouse", "history"]
+examples:
+  - "what went wrong on devnet X in the last five epochs"
+  - "scan devnet X between slots 100 and 200"
+  - "query retained ClickHouse data for past finality stalls"
+  - "dedupe historical failures by fingerprint"
+  - "return first-seen markers across a past window"
 inputs:
   values:
     devnet:

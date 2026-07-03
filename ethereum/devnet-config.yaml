@@ -9,6 +9,12 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use when you have an ethpandaops devnet name and want one ready-to-run Kurtosis ethereum-package args-file that reproduces it locally. Discovers the live devnet profile through the panda CLI (not static notes), honors optional steering, and dry-run-validates the result when kurtosis is available.
 tags: ["kurtosis", "ethereum", "ethpandaops", "ethereum-package", "devnet", "config", "args-file", "panda"]
+examples:
+  - "make a Kurtosis args file for devnet X"
+  - "derive ethereum-package settings from live panda inventory"
+  - "flag inventory versus CL config mismatches"
+  - "dry-run validate the generated args YAML"
+  - "honor selected clients in the args file"
 inputs:
   values:
     devnet:

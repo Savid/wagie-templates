@@ -9,6 +9,12 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use when a topic requires structured, iterative research; decomposes via perspective-driven planning, accumulates typed findings across iterations, assesses coverage with a structured rubric, and verifies results adversarially before output.
 tags: ["research", "iterative", "deep-research"]
+examples:
+  - "produce a verified deep research report"
+  - "gather sourced findings into a verified report"
+  - "synthesize disagreements and open questions in the final report"
+  - "write report with coverage scores and caveats"
+  - "run end-to-end research from topic to report"
 inputs:
   values:
     topic:

@@ -9,6 +9,12 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use when one observed Ethereum devnet issue — a fork or network split, a finality stall, a crashing or misbehaving client, missing payloads or blobs — needs a root-cause investigation, on a live hosted network, a local Kurtosis enclave, or a restored snapshot. Reproduces or attaches to the network, adversarially reviews the hypothesis plan before spending compute, runs a scoped hypothesis hunt, traces reachability before blame, adversarially validates the evidence, and emits a cited report plus a structured follow-up queue. Thin orchestration over Panda runbooks and core patterns.
 tags: ["ethereum", "devnet", "root-cause", "investigation", "adversarial", "hosted", "live", "kurtosis"]
+examples:
+  - "root-cause one observed devnet issue"
+  - "root-cause yesterday's finality stall from retained evidence"
+  - "investigate evidence-only when reproduction fails"
+  - "trace whether suspected cause reaches the failure"
+  - "turn RCA gaps into follow-up tasks"
 inputs:
   values:
     issue:

@@ -9,6 +9,11 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use to run the full Ethereum devnet reproduce-and-analyze pipeline end to end with NO panda-compute: build a Kurtosis config from a hosted devnet, launch it locally, watch it for a window, then root-cause every issue it surfaces. An all-in-one convenience over the individual devnet stages, for when you don't want remote compute.
 tags: ["ethereum", "devnet", "kurtosis", "pipeline", "local", "no-compute", "watch", "investigate"]
+examples:
+  - "copy hosted devnet X locally and watch issues"
+  - "run local no-compute devnet pipeline end to end"
+  - "reproduce hosted devnet in local Kurtosis only"
+  - "from devnet name to local RCA reports"
 inputs:
   values:
     devnet:
