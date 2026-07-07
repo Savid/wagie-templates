@@ -7,7 +7,7 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when one observed Ethereum devnet issue — a fork or network split, a finality stall, a crashing or misbehaving client, missing payloads or blobs — needs a root-cause investigation, on a live hosted network, a local Kurtosis enclave, or a restored snapshot. Reproduces or attaches to the network, runs a scoped hypothesis hunt (recon → parallel test → gapfill → dedupe), adversarially validates the leading cause, traces reachability, and emits a cited report plus follow-up tasks. Thin orchestration over Panda runbooks and core patterns.
+  Use when one observed Ethereum devnet issue — a fork or network split, a finality stall, a crashing or misbehaving client, missing payloads or blobs — needs a root-cause investigation, on a live hosted network, a local Kurtosis enclave, or a restored snapshot. Reproduces or attaches to the network, adversarially reviews the hypothesis plan before spending compute, runs a scoped hypothesis hunt, traces reachability before blame, adversarially validates the evidence, and emits a cited report plus a structured follow-up queue. Thin orchestration over Panda runbooks and core patterns.
 tags: ["ethereum", "devnet", "root-cause", "investigation", "adversarial", "hosted", "live", "kurtosis"]
 inputs:
   values:
@@ -18,29 +18,75 @@ inputs:
         type: object
         properties:
           title: { type: string }
-          summary: { type: string }
-          description: { type: string }
-          first_seen: { type: string, description: First bad slot/block/epoch/timestamp if known }
-          suspected_layer: { type: string, description: consensus | execution | builder | data-availability | network | unknown }
-          evidence: { type: array, items: { type: string } }
-          fingerprint: { type: string, description: Stable identity key for dedupe across runs and devnets }
+          summary: { type: string, description: Free-text reasoning, written first }
+          classification:
+            type: object
+            properties:
+              category: { type: string, description: Failure mode — enum owned by the issue-contract runbook }
+              layer: { type: string, description: consensus | execution | network | tooling | cross-layer }
+              spread: { type: string, description: single-client | subset | all-clients | network-wide | unknown }
+          first_bad:
+            type: object
+            description: Earliest artifact that explains later symptoms
+            properties:
+              kind: { type: string, description: slot | block | epoch | log | rpc | test | service-state }
+              value: { type: string }
+              at: { type: string }
+          affected:
+            type: array
+            items:
+              type: object
+              properties:
+                node: { type: string }
+                role: { type: string }
+                client: { type: string }
+                image: { type: string }
+          evidence:
+            type: array
+            items: &evidence_item_schema
+              type: object
+              properties:
+                source: { type: string, description: Tool or datasource that produced it }
+                ref: { type: string, description: Executable re-derivation — a reader can re-run it }
+                at: { type: string, description: Slot, block, epoch, or timestamp anchoring it }
+                detail: { type: string, description: What was observed, verbatim values preserved }
+              required: [source, ref, detail]
+          co_present:
+            type: array
+            items: { type: string }
+            description: Co-present distractor signals, kept out of the root narrative
+          fingerprint:
+            type: object
+            description: Identity block owned by the fingerprinting runbook — no run-specific ids in the key
+            properties:
+              rationale: { type: string }
+              key: { type: string }
+              decision: { type: string, description: new | duplicate | variant | insufficient-context }
+              matched: { type: string }
+              variant_dimension: { type: string }
+              confidence: { type: string }
           handles:
             type: object
-            description: What lets an investigation restore or reach the broken state
+            description: What lets an investigation restore or reach the broken state — fill only the id kinds that exist
             properties:
-              devnet: { type: string }
-              enclave: { type: string }
               snapshot_id: { type: string }
+              sandbox_id: { type: string }
+              enclave: { type: string }
+              network: { type: string, description: Source or hosted network id }
+              setup_summary:
+                type: object
+                description: Fork/blob schedule, load, builders — reproduction and reachability judge against it
+          confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
         required: [title, summary]
     network_target:
       description: An already-reproduced or live network to investigate; if absent, one is reproduced
-      schema:
+      schema: &network_target_schema
         type: object
         properties:
           kind: { type: string, description: local-enclave | compute-enclave | hosted }
           enclave: { type: string }
-          source_network_id: { type: string }
-          access: { type: string, description: How to reach it (endpoints, sandbox id, datasource) }
+          sandbox_id: { type: string }
+          network: { type: string, description: Hosted network id, when kind is hosted }
         required: [kind]
     snapshot_id:
       description: Broken-state snapshot to restore when no live target is supplied
@@ -54,16 +100,16 @@ tasks:
     instructions: |-
       Normalize the input into a single canonical issue to investigate.
 
-      Resolve runbooks by meaning via `panda search runbooks "<need>"`.
-      Follow the runbook that owns the issue record shape
-      and the one that owns issue fingerprinting for identity. Split a
-      multi-symptom report into the one first-cause issue; state the suspected
-      layer and the first bad slot/block/epoch when known. Preserve the incoming
-      fingerprint and handles verbatim; fill the fingerprint from the
-      fingerprinting runbook's recipe when absent.
+      Follow the intake rules of the runbook that owns root-causing a devnet
+      issue (via `panda search runbooks "root-cause a devnet issue"`): one
+      first-cause issue. The issue-contract runbook owns the record shape; the
+      fingerprinting runbook owns identity. Preserve the incoming fingerprint
+      and handles verbatim; fill the fingerprint block when absent, and record
+      its dedupe decision — a duplicate gets occurrence-attachment, not
+      re-investigation, and the report must say so.
 
-      Emit the canonical issue and a one-line objective of the form "Identify the
-      first-cause of: <issue>".
+      Emit the canonical issue and a one-line objective of the form "Identify
+      the first-cause of: <issue>".
     inputs:
       values:
         issue:
@@ -80,28 +126,26 @@ tasks:
           schema: { type: string, description: One-line root-cause objective }
   reproduce:
     needs: [intake]
-    quality-gate: "${{ has(outputs.values.network_target) && has(outputs.values.access_summary) && size(outputs.values.access_summary) > 0 }}"
+    quality-gate: "${{ has(outputs.values.network_target) && has(outputs.values.access_summary) && size(outputs.values.access_summary) > 0 && has(outputs.values.reproduction) }}"
     instructions: |-
       Establish an investigable network, preferring the strongest handle you
-      were given: a supplied network target (confirm and use it), else a
-      broken-state snapshot to restore (the snapshot_id input, or the issue's
-      handles), else reproduce from the issue's devnet handle.
-      Resolve each path's runbook via `panda search runbooks "<need>"`:
-      - compute + snapshot/restore: the runbook that owns the panda-compute
-        devnet lifecycle
-      - local, no compute: the runbook that owns running and reaching a
-        Kurtosis devnet
-      - faithful local config from a hosted devnet: the runbooks that own
-        Kurtosis config synthesis and hosted devnet context intake
-      Reach and verify it per the runbook that owns running and reaching a
-      Kurtosis devnet; the network_target contract is in the runbook that owns
-      debugging an Ethereum network.
+      were given: a supplied network target, else a broken-state snapshot (the
+      snapshot_id input, or the issue's handles), else reproduce from the
+      issue's network handle.
+      Resolve each path's runbook via `panda search runbooks "<need>"`: the
+      panda-compute lifecycle for snapshot/restore; running and reaching a
+      Kurtosis devnet for local; Kurtosis config synthesis plus hosted devnet
+      context intake for a faithful local config; debugging an Ethereum network
+      for hosted-live — it also owns the network_target contract.
 
-      If the state cannot be reproduced, set evidence_only=true and proceed on
-      historical evidence — do not fabricate a reproduction.
+      Label the mode honestly with the reproduction status enum of the runbook
+      that owns root-causing a devnet issue, and record the recipe that reaches
+      the state. If the state cannot be reproduced, set status historical-only
+      and proceed on the named historical evidence — do not fabricate a
+      reproduction.
 
-      Emit the network target and a short access_summary a worker can act on
-      (kind, enclave, endpoints/sandbox/datasource).
+      Emit the network target, the reproduction record, and a short
+      access_summary a worker can act on.
     inputs:
       values:
         canonical_issue:
@@ -115,8 +159,8 @@ tasks:
             properties:
               kind: { type: string }
               enclave: { type: string }
-              source_network_id: { type: string }
-              access: { type: string }
+              sandbox_id: { type: string }
+              network: { type: string }
           value: "${{ inputs.values.?network_target.orValue({}) }}"
         snapshot_id:
           schema: { type: string, description: Broken-state snapshot to restore, when available }
@@ -125,29 +169,66 @@ tasks:
       values:
         network_target:
           required: true
-          schema:
-            type: object
-            properties:
-              kind: { type: string }
-              enclave: { type: string }
-              access: { type: string }
-            required: [kind]
+          schema: *network_target_schema
         access_summary:
           required: true
           schema: { type: string }
-        reproduced:
+        reproduction:
           required: true
-          schema: { type: boolean }
-        evidence_only:
-          required: true
-          schema: { type: boolean }
-  investigate:
+          schema: &reproduction_schema
+            type: object
+            properties:
+              status: { type: string, description: reproduced | partial | not-reproduced | local-live | hosted-live | historical-only }
+              recipe: { type: array, items: { type: string } }
+            required: [status]
+  plan:
     needs: [intake, reproduce]
+    quality-gate: "${{ has(outputs.values.plan) && size(outputs.values.plan) > 0 }}"
+    instructions: |-
+      Draft the bounded hypothesis plan for the hunt — do not run any tests yet.
+
+      Follow the hypothesis rules of the runbook that owns root-causing a
+      devnet issue (find it via `panda search runbooks "root-cause a devnet
+      issue"`), with the CL-vs-EL matrix from the runbook that owns debugging
+      an Ethereum network.
+
+      Write the plan as one self-contained text: fold in the issue's first_bad
+      anchor and its key evidence refs — the hunt workers receive only this
+      plan and the access summary.
+    inputs:
+      values:
+        canonical_issue:
+          required: true
+          schema: *issue_schema
+          value: "${{ tasks.intake.outputs.values.canonical_issue }}"
+        access_summary:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.reproduce.outputs.values.access_summary }}"
+        reproduction:
+          schema: *reproduction_schema
+          value: "${{ tasks.reproduce.outputs.values.reproduction }}"
+    outputs:
+      values:
+        plan:
+          required: true
+          schema: { type: string, description: Self-contained hypothesis plan with tests, observables, and the issue's anchors }
+  plan_review:
+    needs: [intake, plan]
+    uses: dev.wagie/adversarial-review@1.0.0
+    inputs:
+      values:
+        claim:
+          value: "${{ 'This hypothesis plan is sufficient to find the first cause: ' + tasks.plan.outputs.values.plan }}"
+        context:
+          value: "${{ tasks.intake.outputs.values.objective }}"
+  investigate:
+    needs: [intake, reproduce, plan, plan_review]
     uses: dev.wagie/scoped-discovery@1.0.0
     inputs:
       values:
         target:
-          value: "${{ tasks.intake.outputs.values.canonical_issue.summary + ' || Access: ' + tasks.reproduce.outputs.values.access_summary }}"
+          value: "${{ tasks.intake.outputs.values.canonical_issue.summary + ' || Access: ' + tasks.reproduce.outputs.values.access_summary + ' || Plan: ' + tasks.plan.outputs.values.plan + ' || Plan review (' + tasks.plan_review.outputs.values.verdict + '): ' + tasks.plan_review.outputs.values.strongest_counterargument }}"
         objective:
           value: "${{ tasks.intake.outputs.values.objective }}"
         max_gapfill_rounds:
@@ -159,12 +240,11 @@ tasks:
       From the scoped hunt findings, state the single leading first-cause as one
       clear claim and assemble the evidence for it.
 
-      Follow the runbook that owns root-cause investigation for the claim and
-      the one that owns evidence discipline for citations (resolve both via
-      `panda search runbooks "<need>"`): every
-      cited fact must be re-derivable, and separate facts from inferences. If the
-      findings do not support a confident cause, say so and name the single piece
-      of evidence that would most resolve it.
+      Follow the runbook that owns root-causing a devnet issue for the claim
+      and the one that owns evidence discipline for citations (resolve both via
+      `panda search runbooks "<need>"`). If the findings do not support a
+      confident cause, say so and name the single piece of evidence that would
+      most resolve it.
     inputs:
       values:
         objective:
@@ -185,9 +265,9 @@ tasks:
         coverage_summary:
           schema: { type: string }
           value: "${{ tasks.investigate.outputs.values.coverage_summary }}"
-        evidence_only:
-          schema: { type: boolean }
-          value: "${{ tasks.reproduce.outputs.values.evidence_only }}"
+        reproduction:
+          schema: *reproduction_schema
+          value: "${{ tasks.reproduce.outputs.values.reproduction }}"
     outputs:
       values:
         root_cause_claim:
@@ -199,40 +279,37 @@ tasks:
         confidence:
           required: true
           schema: { type: string, description: high | medium | low }
-  validate:
-    needs: [investigate, synthesize]
-    uses: dev.wagie/adversarial-review@1.0.0
-    inputs:
-      values:
-        claim:
-          value: "${{ tasks.synthesize.outputs.values.root_cause_claim }}"
-        evidence:
-          value: "${{ tasks.synthesize.outputs.values.evidence }}"
-        context:
-          value: "${{ tasks.investigate.outputs.values.coverage_summary }}"
   trace:
-    needs: [synthesize, validate]
+    needs: [intake, reproduce, synthesize]
     quality-gate: "${{ has(outputs.values.reachability) && size(outputs.values.reachability) > 0 }}"
     instructions: |-
-      Tie the validated cause to the observed failure: is it actually reachable
-      from trigger to victim, and does a spec/source drilldown change the picture?
+      Trace before blame: tie the leading cause to the observed failure.
 
       Follow the runbook that owns reachability tracing (via
-      `panda search runbooks "can this component cause the failure"`);
-      escalate to the runbook that owns spec and client
-      source drilldown only when the cause hinges on exact client behavior or
-      spec interpretation. If the adversarial verdict was refuted, record that
-      reachability was not pursued and why.
+      `panda search runbooks "can this component cause the failure"`) — a
+      bounded trace from the candidate cause to the issue's first_bad artifact.
+      Escalate to the runbook that owns spec and client source drilldown only
+      when its escalation gate demands it.
 
       Emit the reachability verdict and any source findings.
     inputs:
       values:
         root_cause_claim:
+          required: true
           schema: { type: string }
           value: "${{ tasks.synthesize.outputs.values.root_cause_claim }}"
-        verdict:
+        evidence:
           schema: { type: string }
-          value: "${{ tasks.validate.outputs.values.verdict }}"
+          value: "${{ tasks.synthesize.outputs.values.evidence }}"
+        canonical_issue:
+          schema: *issue_schema
+          value: "${{ tasks.intake.outputs.values.canonical_issue }}"
+        network_target:
+          schema: *network_target_schema
+          value: "${{ tasks.reproduce.outputs.values.network_target }}"
+        access_summary:
+          schema: { type: string }
+          value: "${{ tasks.reproduce.outputs.values.access_summary }}"
     outputs:
       values:
         reachability:
@@ -241,24 +318,35 @@ tasks:
         source_findings:
           required: true
           schema: { type: string }
+  validate:
+    needs: [investigate, synthesize, trace]
+    uses: dev.wagie/adversarial-review@1.0.0
+    inputs:
+      values:
+        claim:
+          value: "${{ tasks.synthesize.outputs.values.root_cause_claim }}"
+        evidence:
+          value: "${{ tasks.synthesize.outputs.values.evidence }}"
+        context:
+          value: "${{ tasks.investigate.outputs.values.coverage_summary + ' || Reachability: ' + tasks.trace.outputs.values.reachability + ' || Source findings: ' + tasks.trace.outputs.values.source_findings }}"
   report:
-    needs: [intake, reproduce, investigate, synthesize, validate, trace]
-    quality-gate: "${{ has(outputs.values.report) && has(outputs.values.feedback_tasks) }}"
+    needs: [intake, reproduce, investigate, synthesize, trace, validate]
+    quality-gate: "${{ has(outputs.values.report) && has(outputs.values.feedback) }}"
     instructions: |-
       Produce the final root-cause report and the follow-up queue.
       Outputs are the structured values declared below — never an HTML page,
       bug board, or other rendered artifact, even if a retrieved runbook
       offers to build one.
 
-      Resolve runbooks by meaning via `panda search runbooks "<need>"`.
-      Assemble per the runbook that owns root-cause
-      investigation: the canonical issue, the reproduction, the validated leading
-      cause with its adversarial verdict and strongest counterargument,
-      reachability, coverage, and honest confidence. Do not overstate — if
-      validation weakened or refuted the cause, lead with that.
+      Assemble the report in the shape owned by the runbook that owns
+      root-causing a devnet issue (via `panda search runbooks "root-cause a
+      devnet issue"`). Do not overstate — if the review weakened or refuted the
+      cause, lead with that and cap confidence; a duplicate fingerprint
+      decision gets occurrence-attachment, not re-publication.
 
-      Convert every remaining gap into a follow-up task per the runbook that
-      owns shaping investigation follow-up tasks.
+      Convert every remaining gap — including the review's missing evidence —
+      into the feedback queue per the runbook that owns shaping investigation
+      follow-ups.
     inputs:
       values:
         canonical_issue:
@@ -267,9 +355,9 @@ tasks:
         access_summary:
           schema: { type: string }
           value: "${{ tasks.reproduce.outputs.values.access_summary }}"
-        reproduced:
-          schema: { type: boolean }
-          value: "${{ tasks.reproduce.outputs.values.reproduced }}"
+        reproduction:
+          schema: *reproduction_schema
+          value: "${{ tasks.reproduce.outputs.values.reproduction }}"
         root_cause_claim:
           schema: { type: string }
           value: "${{ tasks.synthesize.outputs.values.root_cause_claim }}"
@@ -282,12 +370,18 @@ tasks:
         strongest_counterargument:
           schema: { type: string }
           value: "${{ tasks.validate.outputs.values.strongest_counterargument }}"
+        missing_evidence:
+          schema: { type: string }
+          value: "${{ tasks.validate.outputs.values.missing_evidence }}"
         coverage_summary:
           schema: { type: string }
           value: "${{ tasks.investigate.outputs.values.coverage_summary }}"
         reachability:
           schema: { type: string }
           value: "${{ tasks.trace.outputs.values.reachability }}"
+        source_findings:
+          schema: { type: string }
+          value: "${{ tasks.trace.outputs.values.source_findings }}"
     outputs:
       values:
         report:
@@ -295,25 +389,63 @@ tasks:
           schema: &report_schema
             type: object
             properties:
-              issue: { type: string }
-              leading_cause: { type: string }
-              verdict: { type: string }
-              counterargument: { type: string }
-              reachability: { type: string }
-              confidence: { type: string }
-              coverage: { type: string }
-              reproduced: { type: boolean }
-            required: [issue, leading_cause, verdict, confidence]
-        feedback_tasks:
+              summary: { type: string, description: Reasoning in prose, written first }
+              root_cause:
+                type: object
+                properties:
+                  statement: { type: string }
+                  family: { type: string }
+                  confidence: { type: string, description: high | medium | low, on the evidence-discipline scale }
+                required: [statement, confidence]
+              reproduction: *reproduction_schema
+              timeline:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    ts: { type: string }
+                    kind: { type: string, description: restart | block | timing | log | note }
+                    text: { type: string }
+                    log: { type: string }
+                  required: [text]
+              hypotheses:
+                type: object
+                properties:
+                  supported: { type: array, items: { type: string } }
+                  rejected: { type: array, items: { type: string } }
+                  partial: { type: array, items: { type: string } }
+              trace_verdict: { type: string, description: reachable | partially-reachable | not-reachable | insufficient-evidence }
+              review_verdict: { type: string, description: survives | weakened | refuted }
+              citations:
+                type: array
+                items: *evidence_item_schema
+              next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | rerun with more evidence | no issue reproduced }
+            required: [summary, root_cause, reproduction, trace_verdict, review_verdict, next_action]
+        feedback:
           required: true
           schema: &feedback_schema
-            type: array
-            items:
-              type: object
-              properties:
-                kind: { type: string }
-                description: { type: string }
-              required: [kind, description]
+            type: object
+            description: Follow-up queue — shape owned by the feedback-queue runbook
+            properties:
+              priority_summary: { type: string }
+              terminal: { type: boolean }
+              terminal_reason: { type: string }
+              tasks:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | manual-review | publish | no-op }
+                    reason: { type: string }
+                    priority: { type: string, description: high | medium | low }
+                    inputs: { type: object, description: Handles and query params only }
+                    success_condition: { type: string }
+                    stop_condition: { type: string }
+                    runbook_refs: { type: array, items: { type: string } }
+                    blocked_by: { type: string }
+                  required: [kind, reason, success_condition, stop_condition]
+            required: [tasks]
 outputs:
   values:
     report:
@@ -336,7 +468,7 @@ outputs:
       required: true
       schema: { type: array, items: *finding_schema }
       value: "${{ tasks.investigate.outputs.values.findings }}"
-    feedback_tasks:
+    feedback:
       required: true
       schema: *feedback_schema
-      value: "${{ tasks.report.outputs.values.feedback_tasks }}"
+      value: "${{ tasks.report.outputs.values.feedback }}"

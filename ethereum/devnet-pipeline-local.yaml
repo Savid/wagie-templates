@@ -18,6 +18,9 @@ inputs:
     steering:
       description: Optional config steering (client subset, tooling, accelerated forks)
       schema: { type: string }
+    package_ref:
+      description: Optional override for the Kurtosis package reference, threaded to config synthesis and the local launch
+      schema: { type: string }
     watch_epochs:
       description: How many epochs to watch the local network (default 5)
       schema: { type: number, default: 5 }
@@ -30,10 +33,15 @@ tasks:
           value: "${{ inputs.values.devnet }}"
         steering:
           value: "${{ inputs.values.?steering.orValue('') }}"
+        package_ref:
+          value: "${{ inputs.values.?package_ref.orValue('') }}"
   run_local:
     needs: [config]
     uses: dev.wagie/devnet-run-local@1.0.0
     inputs:
+      values:
+        package_ref:
+          value: "${{ inputs.values.?package_ref.orValue('') }}"
       artifacts:
         config:
           ref: tasks.config.outputs.artifacts.config
@@ -42,6 +50,8 @@ tasks:
     uses: dev.wagie/devnet-watch@1.0.0
     inputs:
       values:
+        devnet:
+          value: "${{ inputs.values.devnet }}"
         network_target:
           value: "${{ tasks.run_local.outputs.values.network_target }}"
         watch_epochs:
@@ -52,12 +62,13 @@ tasks:
       values:
         network_target:
           required: true
-          schema:
+          schema: &network_target_schema
             type: object
             properties:
-              kind: { type: string }
+              kind: { type: string, description: local-enclave | compute-enclave | hosted }
               enclave: { type: string }
-              access: { type: string }
+              sandbox_id: { type: string }
+              network: { type: string, description: Source or hosted network id }
             required: [kind]
           value: "${{ tasks.watch.outputs.values.network_target }}"
     matrix:
@@ -69,19 +80,65 @@ tasks:
               type: object
               properties:
                 title: { type: string }
-                summary: { type: string }
-                description: { type: string }
-                suspected_layer: { type: string }
-                first_seen: { type: string }
-                evidence: { type: array, items: { type: string } }
-                fingerprint: { type: string, description: Stable identity key for dedupe across runs and devnets }
+                summary: { type: string, description: Free-text reasoning, written first }
+                classification:
+                  type: object
+                  properties:
+                    category: { type: string, description: Failure mode — enum owned by the issue-contract runbook }
+                    layer: { type: string, description: consensus | execution | network | tooling | cross-layer }
+                    spread: { type: string, description: single-client | subset | all-clients | network-wide | unknown }
+                first_bad:
+                  type: object
+                  description: Earliest artifact that explains later symptoms
+                  properties:
+                    kind: { type: string, description: slot | block | epoch | log | rpc | test | service-state }
+                    value: { type: string }
+                    at: { type: string }
+                affected:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      node: { type: string }
+                      role: { type: string }
+                      client: { type: string }
+                      image: { type: string }
+                evidence:
+                  type: array
+                  items: &evidence_item_schema
+                    type: object
+                    properties:
+                      source: { type: string, description: Tool or datasource that produced it }
+                      ref: { type: string, description: Executable re-derivation — a reader can re-run it }
+                      at: { type: string, description: Slot, block, epoch, or timestamp anchoring it }
+                      detail: { type: string, description: What was observed, verbatim values preserved }
+                    required: [source, ref, detail]
+                co_present:
+                  type: array
+                  items: { type: string }
+                  description: Co-present distractor signals, kept out of the root narrative
+                fingerprint:
+                  type: object
+                  description: Identity block owned by the fingerprinting runbook — no run-specific ids in the key
+                  properties:
+                    rationale: { type: string }
+                    key: { type: string }
+                    decision: { type: string, description: new | duplicate | variant | insufficient-context }
+                    matched: { type: string }
+                    variant_dimension: { type: string }
+                    confidence: { type: string }
                 handles:
                   type: object
-                  description: What lets an investigation restore or reach the broken state
+                  description: What lets an investigation restore or reach the broken state — fill only the id kinds that exist
                   properties:
-                    devnet: { type: string }
-                    enclave: { type: string }
                     snapshot_id: { type: string }
+                    sandbox_id: { type: string }
+                    enclave: { type: string }
+                    network: { type: string, description: Source or hosted network id }
+                    setup_summary:
+                      type: object
+                      description: Watch setup_summary copied whole — reproduction and reachability judge against it
+                confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
               required: [title, summary]
           value: "${{ tasks.watch.outputs.values.issues }}"
     tasks:
@@ -102,30 +159,72 @@ tasks:
             items: &report_schema
               type: object
               properties:
-                issue: { type: string }
-                leading_cause: { type: string }
-                verdict: { type: string }
-                counterargument: { type: string }
-                reachability: { type: string }
-                confidence: { type: string }
-                coverage: { type: string }
-                reproduced: { type: boolean }
-              required: [issue, leading_cause, verdict, confidence]
+                summary: { type: string, description: Reasoning in prose, written first }
+                root_cause:
+                  type: object
+                  properties:
+                    statement: { type: string }
+                    family: { type: string }
+                    confidence: { type: string, description: high | medium | low, on the evidence-discipline scale }
+                  required: [statement, confidence]
+                reproduction:
+                  type: object
+                  properties:
+                    status: { type: string, description: reproduced | partial | not-reproduced | local-live | hosted-live | historical-only }
+                    recipe: { type: array, items: { type: string } }
+                  required: [status]
+                timeline:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      ts: { type: string }
+                      kind: { type: string, description: restart | block | timing | log | note }
+                      text: { type: string }
+                      log: { type: string }
+                    required: [text]
+                hypotheses:
+                  type: object
+                  properties:
+                    supported: { type: array, items: { type: string } }
+                    rejected: { type: array, items: { type: string } }
+                    partial: { type: array, items: { type: string } }
+                trace_verdict: { type: string, description: reachable | partially-reachable | not-reachable | insufficient-evidence }
+                review_verdict: { type: string, description: survives | weakened | refuted }
+                citations:
+                  type: array
+                  items: *evidence_item_schema
+                next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | rerun with more evidence | no issue reproduced }
+              required: [summary, root_cause, reproduction, trace_verdict, review_verdict, next_action]
           value: "${{ tasks.one.outputs.values.report }}"
-        feedback_tasks:
+        feedback:
           required: true
           schema: &feedback_matrix_schema
             type: array
-            description: Follow-up tasks per investigated issue, parallel to investigations
-            items:
-              type: array
-              items:
-                type: object
-                properties:
-                  kind: { type: string }
-                  description: { type: string }
-                required: [kind, description]
-          value: "${{ tasks.one.outputs.values.feedback_tasks }}"
+            description: Follow-up queue per investigated issue, parallel to investigations — shape owned by the feedback-queue runbook
+            items: &feedback_schema
+              type: object
+              properties:
+                priority_summary: { type: string }
+                terminal: { type: boolean }
+                terminal_reason: { type: string }
+                tasks:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | manual-review | publish | no-op }
+                      reason: { type: string }
+                      priority: { type: string, description: high | medium | low }
+                      inputs: { type: object, description: Handles and query params only }
+                      success_condition: { type: string }
+                      stop_condition: { type: string }
+                      runbook_refs: { type: array, items: { type: string } }
+                      blocked_by: { type: string }
+                    required: [kind, reason, success_condition, stop_condition]
+              required: [tasks]
+          value: "${{ tasks.one.outputs.values.feedback }}"
 outputs:
   values:
     config_summary:
@@ -134,13 +233,7 @@ outputs:
       value: "${{ tasks.config.outputs.values.summary }}"
     network_target:
       required: true
-      schema:
-        type: object
-        properties:
-          kind: { type: string }
-          enclave: { type: string }
-          access: { type: string }
-        required: [kind]
+      schema: *network_target_schema
       value: "${{ tasks.run_local.outputs.values.network_target }}"
     issues:
       required: true
@@ -148,13 +241,21 @@ outputs:
         type: array
         items: *issue_item_schema
       value: "${{ tasks.watch.outputs.values.issues }}"
+    healthy_window_summary:
+      required: true
+      schema: { type: string, description: One paragraph instead of issues when the watch window was healthy, else empty }
+      value: "${{ tasks.watch.outputs.values.healthy_window_summary }}"
+    watch_feedback:
+      required: true
+      schema: *feedback_schema
+      value: "${{ tasks.watch.outputs.values.feedback }}"
     investigations:
       required: true
       schema:
         type: array
         items: *report_schema
       value: "${{ tasks.investigate.outputs.values.investigations }}"
-    feedback_tasks:
+    feedback:
       required: true
       schema: *feedback_matrix_schema
-      value: "${{ tasks.investigate.outputs.values.feedback_tasks }}"
+      value: "${{ tasks.investigate.outputs.values.feedback }}"

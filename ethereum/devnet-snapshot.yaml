@@ -22,7 +22,7 @@ inputs:
       description: Optional override forcing a specific compute template. When unset, the runbook discovers and picks the sandbox template via its templates listing.
       schema: { type: string }
     package_ref:
-      description: Optional override for the Kurtosis package reference. When unset, the runbook's default (ethereum-package) applies.
+      description: Optional override for the Kurtosis package reference. When unset, the ethereum-package default from the Kurtosis runbooks applies.
       schema: { type: string }
     sandbox_ttl:
       description: Optional sandbox TTL (e.g. 2h) to bound the VM lifetime
@@ -39,13 +39,11 @@ tasks:
       Provision a compute sandbox to host the devnet. Do not launch the network
       yet.
 
-      Follow the runbook that owns the panda-compute devnet lifecycle (find it via
-      `panda search runbooks "compute sandbox snapshot lifecycle"`): it owns the
-      capability check, template discovery, sandbox creation, TTL handling,
-      async-operation polling, and metadata. Discover and pick the sandbox
-      template through the runbook unless a `compute_template` override is
-      supplied, pass the `sandbox_ttl` when given, and poll the returned
-      operation until the sandbox is ready.
+      Follow the runbook that owns the panda-compute devnet lifecycle (find it
+      via `panda search runbooks "compute sandbox snapshot lifecycle"`). Pick a
+      sandbox template from its capability-check listing unless a
+      `compute_template` override is supplied, pass the `sandbox_ttl` when
+      given, and poll the operation until the sandbox is ready.
 
       Return the sandbox id.
     inputs:
@@ -65,21 +63,15 @@ tasks:
     needs: [provision]
     quality-gate: "${{ outputs.values.network_ready && size(outputs.values.snapshots) > 0 }}"
     instructions: |-
-      Launch the Kurtosis ethereum devnet on the sandbox and capture VM snapshots
-      at the target epochs. This is one time-sensitive flow — do not split launch
-      from snapshotting.
+      Launch the Kurtosis ethereum devnet on the sandbox and capture VM
+      snapshots at the target epochs. This is one time-sensitive flow — do not
+      split launch from snapshotting, and pre-compute each epoch's snapshot
+      time before launching so early epochs are not missed.
 
       Follow the runbook that owns the panda-compute devnet lifecycle (via
-      `panda search runbooks "epoch aligned snapshot restore"`): it owns copying
-      the `config` artifact onto the sandbox, launching it (honor a `package_ref`
-      override when supplied, else the runbook's default), confirming blocks are
-      produced, epoch-aligned snapshotting, orchestrator-side snapshots, async
-      polling, and metadata. Key points it owns: snapshot at the START of each
-      target epoch (epoch 0 = genesis; epoch N = genesis + N * slots_per_epoch *
-      seconds_per_slot) using slot timing read from the `config`, not mainnet
-      defaults; pre-compute each offset before launch so early epochs are not
-      missed; use the sandbox clock, not local time; and poll each async
-      operation to resolve its snapshot id.
+      `panda search runbooks "epoch aligned snapshot restore"`): it owns the
+      launch from the `config` artifact, epoch alignment and timing, async
+      polling, and metadata. Honor a `package_ref` override when supplied.
 
       Record one `{ epoch, snapshot }` per target, in ascending order.
     inputs:

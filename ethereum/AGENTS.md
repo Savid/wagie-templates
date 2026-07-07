@@ -1,0 +1,67 @@
+# ethereum/ — devnet workflows
+
+Scope: the templates in `ethereum/`. Repo-wide policy lives in the root `AGENTS.md`.
+
+## Division of labor
+
+Templates here are the orchestration layer only: typed handoffs, fan-out, loops, and
+gates. All Ethereum domain knowledge — procedure, vocabulary, judgment thresholds —
+lives in the ethpandaops Panda runbooks and reaches workers at runtime through the
+`panda` CLI. A template instruction never teaches domain procedure; it names which
+runbook owns it and declares the typed output to come back with.
+
+If a template seems to need domain knowledge no runbook owns, the fix is a runbook
+change in panda, not more template prose.
+
+## Runbook contracts are the source of truth
+
+Template schemas mirror runbook output shapes. When they drift, change the template.
+The owned shapes:
+
+| Shape | Owning runbook |
+|---|---|
+| issue record, evidence item | `runbooks://devnet_issue_contract` |
+| fingerprint block | `runbooks://devnet_issue_fingerprint_dedupe` |
+| feedback queue | `runbooks://devnet_issue_feedback_queue` |
+| root-cause report, reproduction status | `runbooks://devnet_issue_root_cause` |
+| network_target | `runbooks://debug_ethereum_network` |
+| watch window, service map, setup_summary | `runbooks://devnet_watch` |
+
+Keep domain vocabulary out of schema `enum:` fields — name the values in the field
+description with the owning runbook, so vocabulary changes don't need template
+releases. Exception: the service `role` enum (`cl|el|vc|builder|tooling|unknown`) is
+enforced because fingerprint component signatures depend on it.
+
+## Runbook references are retrieval-sensitive
+
+Instructions name runbooks by meaning ("the runbook that owns collating watch
+issues"); workers resolve them with `panda search runbooks "<need>"`. Before shipping
+a phrase, verify it ranks the intended runbook first at the default limit:
+
+```bash
+panda search runbooks "root-cause a devnet issue"   # → devnet_issue_root_cause
+panda read runbooks://devnet_issue_contract          # read a result
+```
+
+Nothing validates these references — re-check them when the panda runbooks change.
+
+## Invariants
+
+- `devnet-watch` is enclave-only (`local-enclave` | `compute-enclave`). Hosted
+  history is `devnet-scan`; live hosted debugging belongs to the debug runbook.
+- Snapshot/restore exists only on panda-compute. Local enclaves are observed live.
+- In `devnet-issue-investigate` the order is load-bearing: adversarial plan review
+  before the hunt, reachability trace before adversarial evidence review — "judge
+  twice", "trace before blame".
+- Watchers record neutral facts as evidence items; judgment happens only in collate.
+- Collate and report emit the declared structured values — never an HTML page or bug
+  board, even when a retrieved runbook offers one.
+- Workers are isolated: everything a worker needs must arrive through its typed
+  inputs — a network_target must carry enough to address the nodes, a hunt plan must
+  fold in the issue's first_bad anchor and evidence refs.
+
+## Validation
+
+```bash
+make validate FILTER=ethereum
+```

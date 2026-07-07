@@ -28,20 +28,16 @@ tasks:
       Produce ONE runnable ethereum-package Kurtosis args-file that models the
       named devnet, and write it as the `config` artifact.
 
-      Resolve the runbooks by meaning: `panda search runbooks "<need>"` finds
-      them by task or symptom.
-      Ground the devnet first with the runbook that owns hosted devnet context
-      intake, then synthesize the args-file per the runbook that owns building a
-      Kurtosis config from a hosted devnet.
-      Those runbooks own the procedure: discover the profile from live panda
-      resources, inventory, and CL config rather than notes; prefer deployed
-      inventory over aspirational notes and flag inconsistencies; honor `steering`
-      (client subset, node count, fork epochs, added tooling), defaulting to a
-      faithful minimal replica; and dry-run-validate with kurtosis when available,
-      remembering a passing dry run proves parsing, not live health.
+      Resolve runbooks by meaning via `panda search runbooks "<need>"`. Ground
+      the devnet with the runbook that owns hosted devnet context intake, then
+      synthesize the args-file per the runbook that owns building a Kurtosis
+      config from a hosted devnet — it owns source authority, `steering`,
+      fidelity, and dry-run validation. Honor a `package_ref` override when
+      supplied.
 
-      Emit the config artifact, a short summary of the key choices, and the
-      assumptions or unresolved gaps you had to make.
+      Emit the config artifact, a short summary of the key choices, the
+      assumptions or unresolved gaps, and every steering deviation from the
+      hosted network.
     inputs:
       values:
         devnet:
@@ -65,6 +61,12 @@ tasks:
             type: array
             items: { type: string }
             description: Assumptions or unresolved gaps, including any source inconsistencies found
+        deviations:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Every steering-driven deviation from the hosted network, empty when unsteered
       artifacts:
         config:
           required: true
@@ -80,6 +82,10 @@ outputs:
       required: true
       schema: { type: array, items: { type: string } }
       value: "${{ tasks.assemble_config.outputs.values.assumptions }}"
+    deviations:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.assemble_config.outputs.values.deviations }}"
   artifacts:
     config:
       ref: tasks.assemble_config.outputs.artifacts.config

@@ -37,17 +37,15 @@ tasks:
       Resolve the retained-data access and the concrete time window for the scan.
       Do not query for issues yet — just frame the target.
 
-      Resolve runbooks by meaning via `panda search runbooks "<need>"`.
-      Resolve the devnet's network id and its retained
-      datasource with the runbook that owns hosted devnet context intake. Turn
-      the requested window (explicit start/end, else `lookback` back from now)
-      into a concrete time range and its block/slot range with the runbook that
-      owns ClickHouse querying (block-number bridge procedure), noting which
-      tables carry raw vs canonical data (same runbook).
+      Resolve runbooks by meaning via `panda search runbooks "<need>"`. Resolve
+      the devnet's network id and slot timing with the runbook that owns hosted
+      devnet context intake; resolve dataset placement and turn the requested
+      window (explicit start/end, else `lookback` back from now) into its
+      concrete block/slot range with the runbook that owns ClickHouse querying.
 
-      Emit a self-contained `scan_target` string (devnet, resolved window, and how
-      to reach its retained data) and an `objective` string of the form "Find all
-      issues in <devnet> during <window>", folding in any `focus`.
+      Emit a self-contained `scan_target` string (devnet, resolved window, and
+      how to reach its retained data) and an `objective` string of the form
+      "Find all issues in <devnet> during <window>", folding in any `focus`.
     inputs:
       values:
         devnet:
@@ -96,26 +94,24 @@ tasks:
           value: "${{ inputs.values.?max_scan_rounds.orValue(2) }}"
   collate:
     needs: [frame, scan]
-    quality-gate: "${{ has(outputs.values.issues) && has(outputs.values.scan_summary) && size(outputs.values.scan_summary) > 0 }}"
+    quality-gate: "${{ has(outputs.values.issues) && has(outputs.values.feedback) && has(outputs.values.scan_summary) && size(outputs.values.scan_summary) > 0 }}"
     instructions: |-
-      Turn the scan findings into self-contained issues over the window. Judge
-      here — the scan gathered facts.
-      Outputs are the structured values declared below — never an HTML page,
-      bug board, or other rendered artifact, even if a retrieved runbook
-      offers to build one.
+      Turn the scan findings into self-contained issue records over the window —
+      judge here; the scan gathered facts. Outputs are the structured values
+      declared below, never an HTML page or bug board, even if a retrieved
+      runbook offers to build one.
 
-      Resolve runbooks by meaning via `panda search runbooks "<need>"`.
-      Follow the runbook that owns collating watch issues
-      for the judgment rules, the one that owns the issue record shape, the one
-      that owns issue fingerprinting for identity (collapse duplicates that share
-      a cause; avoid one issue per node or per slot), the one that owns the fork
-      model and health thresholds for what counts as unhealthy across the window,
-      and the one that owns evidence discipline for re-derivable citations. Each
-      issue must carry a suspected layer, a first-seen marker (the first
-      slot/block/epoch/timestamp in the window where it appears), a fingerprint
-      (the fingerprinting runbook's recipe), and handles with the devnet id
-      (there is no enclave or snapshot for a retained-data scan — leave those
-      empty), ready for a downstream root-cause investigation.
+      Resolve runbooks by meaning via `panda search runbooks "<need>"`: the
+      runbook that owns collating watch issues for the judgment rules, the
+      issue-contract runbook for the record and evidence-item shapes, the one
+      that owns issue fingerprinting for identity (one issue per cause, not per
+      node or slot), the one that owns the fork model and health thresholds,
+      and the one that owns evidence discipline. Handles carry the devnet's
+      network id only — a retained-data scan has no enclave, sandbox, or
+      snapshot.
+
+      Emit handoff gaps in the feedback queue (the runbook that owns shaping
+      investigation follow-ups), never embedded in issues.
     inputs:
       values:
         devnet:
@@ -152,23 +148,94 @@ tasks:
               type: object
               properties:
                 title: { type: string }
-                summary: { type: string }
-                description: { type: string }
-                suspected_layer: { type: string }
-                first_seen: { type: string }
-                evidence: { type: array, items: { type: string } }
-                fingerprint: { type: string, description: Stable identity key for dedupe across runs and devnets }
+                summary: { type: string, description: Free-text reasoning, written first }
+                classification:
+                  type: object
+                  properties:
+                    category: { type: string, description: Failure mode — enum owned by the issue-contract runbook }
+                    layer: { type: string, description: consensus | execution | network | tooling | cross-layer }
+                    spread: { type: string, description: single-client | subset | all-clients | network-wide | unknown }
+                first_bad:
+                  type: object
+                  description: Earliest artifact that explains later symptoms
+                  properties:
+                    kind: { type: string, description: slot | block | epoch | log | rpc | test | service-state }
+                    value: { type: string }
+                    at: { type: string }
+                affected:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      node: { type: string }
+                      role: { type: string }
+                      client: { type: string }
+                      image: { type: string }
+                evidence:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      source: { type: string, description: Tool or datasource that produced it }
+                      ref: { type: string, description: Executable re-derivation — a reader can re-run it }
+                      at: { type: string, description: Slot, block, epoch, or timestamp anchoring it }
+                      detail: { type: string, description: What was observed, verbatim values preserved }
+                    required: [source, ref, detail]
+                co_present:
+                  type: array
+                  items: { type: string }
+                  description: Co-present distractor signals, kept out of the root narrative
+                fingerprint:
+                  type: object
+                  description: Identity block owned by the fingerprinting runbook — no run-specific ids in the key
+                  properties:
+                    rationale: { type: string }
+                    key: { type: string }
+                    decision: { type: string, description: new | duplicate | variant | insufficient-context }
+                    matched: { type: string }
+                    variant_dimension: { type: string }
+                    confidence: { type: string }
                 handles:
                   type: object
-                  description: What lets an investigation restore or reach the broken state
+                  description: What lets an investigation restore or reach the broken state — a retained-data scan fills network only
                   properties:
-                    devnet: { type: string }
-                    enclave: { type: string }
                     snapshot_id: { type: string }
+                    sandbox_id: { type: string }
+                    enclave: { type: string }
+                    network: { type: string, description: The scanned devnet's network id }
+                    setup_summary:
+                      type: object
+                      description: Fork/blob schedule, load, builders, when the grounded context establishes them
+                confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
               required: [title, summary]
         scan_summary:
           required: true
           schema: { type: string, description: What window and sources were covered, and what remains uncertain }
+        feedback:
+          required: true
+          schema: &feedback_schema
+            type: object
+            description: Follow-up queue — shape owned by the feedback-queue runbook
+            properties:
+              priority_summary: { type: string }
+              terminal: { type: boolean }
+              terminal_reason: { type: string }
+              tasks:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | manual-review | publish | no-op }
+                    reason: { type: string }
+                    priority: { type: string, description: high | medium | low }
+                    inputs: { type: object, description: Handles and query params only }
+                    success_condition: { type: string }
+                    stop_condition: { type: string }
+                    runbook_refs: { type: array, items: { type: string } }
+                    blocked_by: { type: string }
+                  required: [kind, reason, success_condition, stop_condition]
+            required: [tasks]
 outputs:
   values:
     issues:
@@ -179,6 +246,10 @@ outputs:
       required: true
       schema: { type: string }
       value: "${{ tasks.collate.outputs.values.scan_summary }}"
+    feedback:
+      required: true
+      schema: *feedback_schema
+      value: "${{ tasks.collate.outputs.values.feedback }}"
     window:
       required: true
       schema:
