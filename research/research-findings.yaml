@@ -50,6 +50,8 @@ inputs:
               type: string
             difficulty:
               type: string
+            dimension:
+              type: string
           required: [question]
     plan_questions:
       description: Sub-questions from the research plan to target
@@ -65,6 +67,8 @@ inputs:
             priority:
               type: string
             difficulty:
+              type: string
+            rationale:
               type: string
           required: [question]
 tasks:

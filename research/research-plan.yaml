@@ -57,5 +57,6 @@ outputs:
             perspective: { type: string }
             priority: { type: string }
             difficulty: { type: string }
+            rationale: { type: string }
           required: [question, perspective, priority, difficulty]
       value: "${{ tasks.plan.outputs.values.subquestions }}"

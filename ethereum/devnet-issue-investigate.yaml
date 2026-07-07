@@ -115,6 +115,7 @@ tasks:
             properties:
               kind: { type: string }
               enclave: { type: string }
+              source_network_id: { type: string }
               access: { type: string }
           value: "${{ inputs.values.?network_target.orValue({}) }}"
         snapshot_id:

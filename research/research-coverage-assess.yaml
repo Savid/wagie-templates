@@ -48,6 +48,8 @@ inputs:
             question: { type: string }
             perspective: { type: string }
             priority: { type: string }
+            difficulty: { type: string }
+            rationale: { type: string }
           required: [question]
 tasks:
   assess:

@@ -63,6 +63,8 @@ tasks:
                   type: string
                 difficulty:
                   type: string
+                rationale:
+                  type: string
               required: [question]
           value: "${{ tasks.plan.outputs.values.questions }}"
     loop:

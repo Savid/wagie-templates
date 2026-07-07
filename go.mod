@@ -3,7 +3,7 @@ module github.com/savid/wagie-templates
 go 1.26.4
 
 require (
-	github.com/savid/wagie v0.0.3
+	github.com/savid/wagie v0.0.7
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -60,6 +60,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/coder/acp-go-sdk v0.13.5 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/coreos/go-oidc/v3 v3.18.0 // indirect
@@ -91,8 +92,6 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/ghodss/yaml v1.0.0 // indirect
-	github.com/glebarez/go-sqlite v1.22.0 // indirect
-	github.com/glebarez/sqlite v1.11.0 // indirect
 	github.com/go-errors/errors v1.5.1 // indirect
 	github.com/go-faster/errors v0.7.1 // indirect
 	github.com/go-faster/jx v1.2.0 // indirect
@@ -263,9 +262,11 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
-	github.com/savid/acp-go-claude v0.0.0-20260625045242-afb9e43a9f48 // indirect
-	github.com/savid/acp-go-codex v0.0.0-20260627150305-0a74e4c3c1fd // indirect
-	github.com/savid/acp-go-opencode v0.0.0-20260623124926-c7eaea6165fc // indirect
+	github.com/savid/acp-go-amp v0.0.0-20260706113115-2bfdf2ff7192 // indirect
+	github.com/savid/acp-go-claude v0.0.0-20260706113120-50b2df4de53e // indirect
+	github.com/savid/acp-go-codex v0.0.0-20260706113128-f7bad9ef73c3 // indirect
+	github.com/savid/acp-go-hermes v0.0.0-20260706113133-126dd19e73ef // indirect
+	github.com/savid/acp-go-opencode v0.0.0-20260706113140-16505d9fb2b8 // indirect
 	github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36 // indirect
 	github.com/schollz/progressbar/v2 v2.15.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
@@ -426,10 +427,10 @@ require (
 	k8s.io/klog/v2 v2.140.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
-	modernc.org/libc v1.70.0 // indirect
+	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.48.0 // indirect
+	modernc.org/sqlite v1.52.0 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
