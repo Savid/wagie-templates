@@ -767,8 +767,8 @@ github.com/savid/acp-go-hermes v0.0.0-20260706113133-126dd19e73ef h1:6Hnol2OK9ld
 github.com/savid/acp-go-hermes v0.0.0-20260706113133-126dd19e73ef/go.mod h1:kt43N9T/aiQj+lNa6YQwDCw2ncBNYrzpMOnyjz3YbCw=
 github.com/savid/acp-go-opencode v0.0.0-20260706113140-16505d9fb2b8 h1:lggn4NvM1IQq3uMX319eQuxe8WoGmCunASSxUcutLxw=
 github.com/savid/acp-go-opencode v0.0.0-20260706113140-16505d9fb2b8/go.mod h1:W3pLt9Rut7BYkddaH7bvRam+vT01tDasYUun3qLqhks=
-github.com/savid/wagie v0.0.7 h1:PsAWxEgug2UOG5D/KRuSmzA950bU4l2xYnySMyu8crE=
-github.com/savid/wagie v0.0.7/go.mod h1:dnS21izoNKFPWzGaJHqOQ2ucX1tiipBKgfiK7mEvG3E=
+github.com/savid/wagie v0.0.9 h1:OYrtzFcvbBLNRPPQRM3QyZGPdo8KM3s+gckX7WLXhW0=
+github.com/savid/wagie v0.0.9/go.mod h1:dnS21izoNKFPWzGaJHqOQ2ucX1tiipBKgfiK7mEvG3E=
 github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36 h1:ObX9hZmK+VmijreZO/8x9pQ8/P/ToHD/bdSb4Eg4tUo=
 github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36/go.mod h1:LEsDu4BubxK7/cWhtlQWfuxwL4rf/2UEpxXz1o1EMtM=
 github.com/schollz/progressbar/v2 v2.15.0 h1:dVzHQ8fHRmtPjD3K10jT3Qgn/+H+92jhPrhmxIJfDz8=
