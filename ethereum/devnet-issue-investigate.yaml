@@ -229,6 +229,9 @@ tasks:
         context:
           value: "${{ tasks.intake.outputs.values.objective }}"
   investigate:
+    # Load-bearing order ("judge twice"): plan_review must gate the hunt, so the
+    # adversarial plan review runs before any compute is spent. Do not drop
+    # plan_review from these needs.
     needs: [intake, reproduce, plan, plan_review]
     uses: dev.wagie/scoped-discovery@1.0.0
     inputs:
@@ -325,6 +328,9 @@ tasks:
           required: true
           schema: { type: string }
   validate:
+    # Load-bearing order ("trace before blame"): trace must precede the adversarial
+    # evidence review, so reachability is established before evidence is judged. Keep
+    # trace in these needs.
     needs: [investigate, synthesize, trace]
     uses: dev.wagie/adversarial-review@1.0.0
     inputs:

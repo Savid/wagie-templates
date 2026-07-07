@@ -7,7 +7,7 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when any Ethereum devnet — a live hosted network, a local Kurtosis enclave, or a restored compute snapshot — must be watched live over a bounded window going forward and its problems surfaced. Establishes a shared watch window, fans out neutral per-service and network observation, then collates the observations into a deduped issue list. Live and forward — for a window that is already in the past, this is not the tool.
+  Use when a running Ethereum devnet — a live hosted network, a local Kurtosis enclave, or a restored panda-compute snapshot — must be watched live over a bounded window going forward and its problems surfaced. Establishes a shared watch window, fans out neutral per-service and network observation, then collates the observations into deduped issue records. Live and forward — watchers resolve how to reach each network kind from the panda runbooks; for a window already in the past, scan history with devnet-scan instead.
 tags: ["ethereum", "devnet", "watch", "observability", "issues", "hosted", "live", "kurtosis"]
 examples:
   - "monitor this live devnet going forward"
@@ -24,14 +24,14 @@ inputs:
       description: A panda-compute snapshot to restore and watch
       schema: { type: string }
     network_target:
-      description: An already-running enclave-backed network to attach to
+      description: An already-running network to attach to — hosted, local enclave, or restored snapshot
       schema: &network_target_schema
         type: object
         properties:
-          kind: { type: string, description: local-enclave | compute-enclave }
+          kind: { type: string, description: local-enclave | compute-enclave | hosted }
           enclave: { type: string }
           sandbox_id: { type: string }
-          network: { type: string, description: Source hosted network id, when known }
+          network: { type: string, description: Hosted network id, when kind is hosted }
         required: [kind]
     watch_epochs:
       description: How many epochs to watch from the current epoch (default 5)
@@ -43,17 +43,19 @@ tasks:
   provision:
     quality-gate: "${{ has(outputs.values.network_target) && size(outputs.values.services) > 0 && has(outputs.values.setup_summary) && outputs.values.window.end_epoch >= outputs.values.window.start_epoch }}"
     instructions: |-
-      Establish the enclave-backed network to watch and the shared watch window.
-      Do not modify the network. Hosted networks are out of scope.
+      Establish the network to watch and the shared watch window. Do not modify
+      the network.
 
-      Route by what you are given — resolve runbooks by meaning via
+      Route by the target kind — resolve runbooks by meaning via
       `panda search runbooks "<need>"`: attach to a supplied network target
       as-is; restore a snapshot per the runbook that owns the panda-compute
-      lifecycle; reach and map a local enclave per the runbook that owns
-      running and reaching a Kurtosis devnet. Set the shared window per the
-      runbook that owns neutral devnet watching — every watcher stops at
-      end_epoch. Watchers are isolated and only receive these values, so the
-      network target must carry enough to address the nodes.
+      lifecycle; reach and map a local enclave per the runbook that owns running
+      and reaching a Kurtosis devnet; ground a hosted network's id, endpoints,
+      and node inventory per the runbook that owns hosted devnet context. Set the
+      shared window per the runbook that owns neutral devnet watching — every
+      watcher stops at end_epoch. Watchers are isolated and only receive these
+      values, so the network target must carry enough to address the nodes for
+      its kind.
 
       Emit one service entry per node and tooling service with its role and
       build, the network target, the window with its slot timing, and the
@@ -234,8 +236,9 @@ tasks:
       If the network is on panda-compute, take exactly one final snapshot after
       the end epoch is reached, per the runbook that owns the panda-compute
       lifecycle (`panda search runbooks "snapshot a devnet"`); poll the
-      operation and resolve the snapshot id. If the network is a local enclave,
-      skip and set snapshotted=false. Do not snapshot mid-window.
+      operation and resolve the snapshot id. If the network is a local enclave or
+      hosted, skip and set snapshotted=false — snapshot/restore is panda-compute
+      only. Do not snapshot mid-window.
     inputs:
       values:
         network_target:

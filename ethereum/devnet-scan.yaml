@@ -36,6 +36,9 @@ inputs:
     max_scan_rounds:
       description: Gap-filling rounds for the scan hunt
       schema: { type: number, default: 2 }
+    max_angles:
+      description: Optional soft cap on how many scan angles the hunt opens; unset means no cap
+      schema: { type: number }
 tasks:
   frame:
     quality-gate: "${{ has(outputs.values.scan_target) && size(outputs.values.scan_target) > 0 && has(outputs.values.objective) && size(outputs.values.objective) > 0 }}"
@@ -98,6 +101,8 @@ tasks:
           value: "${{ tasks.frame.outputs.values.objective }}"
         max_gapfill_rounds:
           value: "${{ inputs.values.?max_scan_rounds.orValue(2) }}"
+        max_angles:
+          value: "${{ inputs.values.?max_angles.orValue(0) }}"
   collate:
     needs: [frame, scan]
     quality-gate: "${{ has(outputs.values.issues) && has(outputs.values.feedback) && has(outputs.values.scan_summary) && size(outputs.values.scan_summary) > 0 }}"
@@ -118,11 +123,22 @@ tasks:
 
       Emit handoff gaps in the feedback queue (the runbook that owns shaping
       investigation follow-ups), never embedded in issues.
+
+      Ground the `scan_summary` — what the window and sources covered and what
+      remains uncertain — in the scan's own `coverage` report and `converged`
+      flag rather than re-deriving it; carry forward any angle the scan left
+      unexplored.
     inputs:
       values:
         devnet:
           schema: { type: string }
           value: "${{ inputs.values.devnet }}"
+        coverage:
+          schema: { type: string }
+          value: "${{ tasks.scan.outputs.values.coverage_summary }}"
+        converged:
+          schema: { type: boolean }
+          value: "${{ tasks.scan.outputs.values.converged }}"
         window:
           schema:
             type: object

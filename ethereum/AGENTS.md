@@ -45,21 +45,6 @@ panda read runbooks://devnet_issue_contract          # read a result
 
 Nothing validates these references — re-check them when the panda runbooks change.
 
-## Invariants
-
-- `devnet-watch` is enclave-only (`local-enclave` | `compute-enclave`). Hosted
-  history is `devnet-scan`; live hosted debugging belongs to the debug runbook.
-- Snapshot/restore exists only on panda-compute. Local enclaves are observed live.
-- In `devnet-issue-investigate` the order is load-bearing: adversarial plan review
-  before the hunt, reachability trace before adversarial evidence review — "judge
-  twice", "trace before blame".
-- Watchers record neutral facts as evidence items; judgment happens only in collate.
-- Collate and report emit the declared structured values — never an HTML page or bug
-  board, even when a retrieved runbook offers one.
-- Workers are isolated: everything a worker needs must arrive through its typed
-  inputs — a network_target must carry enough to address the nodes, a hunt plan must
-  fold in the issue's first_bad anchor and evidence refs.
-
 ## Validation
 
 ```bash
