@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: test validate tidy clean help
+.PHONY: test validate check-runbooks tidy clean help
 
 ## test: validate templates against wagie core
 test:
@@ -8,6 +8,10 @@ test:
 ## validate: report per-file validation (optional FILTER=<path substring>)
 validate:
 	go run ./cmd/validate $(FILTER)
+
+## check-runbooks: verify template retrieval phrases rank the intended panda runbook first
+check-runbooks:
+	./scripts/check-runbooks.sh
 
 ## tidy: tidy go modules
 tidy:

@@ -63,10 +63,34 @@ func main() {
 
 	warnings := collectWarnings(files)
 	reported, failed := report(results, warnings, filters)
+	failed += reportSchemaDrift(files)
 	fmt.Printf("\n%d reported, %d failed\n", reported, failed)
 	if failed > 0 {
 		os.Exit(1)
 	}
+}
+
+// reportSchemaDrift compares the shared runbook-owned schema shapes across
+// every family file (filters do not apply — drift is a cross-file property)
+// and returns the number of drifted shapes.
+func reportSchemaDrift(files []wagie.TemplateFile) int {
+	sources := make([]templatecheck.SchemaSource, 0, len(files))
+	for _, file := range files {
+		if isCore(file.Path) {
+			continue
+		}
+		sources = append(sources, templatecheck.SchemaSource{Path: relPath(file.Path), Data: file.Data})
+	}
+
+	issues, err := templatecheck.SchemaDrift(sources)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "schema drift check: %v\n", err)
+		os.Exit(1)
+	}
+	for _, issue := range issues {
+		fmt.Printf("FAIL  schema drift\n        - %s\n", issue.Error())
+	}
+	return len(issues)
 }
 
 // report prints one line per reported family file and returns the reported and

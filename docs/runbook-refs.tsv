@@ -1,0 +1,10 @@
+# Retrieval phrases used in template instructions (panda search runbooks "<phrase>")
+# mapped to the runbook title that must rank first. Checked by `make check-runbooks`.
+# Format: <phrase>\t<expected first-result title>
+can this component cause the failure	Trace Devnet Issue Reachability
+compute sandbox snapshot lifecycle	Run a Devnet on Panda Compute
+epoch aligned snapshot restore	Run a Devnet on Panda Compute
+root-cause a devnet issue	Root-Cause a Devnet Issue
+run a devnet locally with kurtosis	Run and Reach a Kurtosis Devnet
+shaping investigation follow-ups	Queue Devnet Investigation Follow-ups
+snapshot a devnet	Run a Devnet on Panda Compute

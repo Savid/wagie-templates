@@ -43,7 +43,10 @@ panda search runbooks "root-cause a devnet issue"   # → devnet_issue_root_caus
 panda read runbooks://devnet_issue_contract          # read a result
 ```
 
-Nothing validates these references — re-check them when the panda runbooks change.
+`make check-runbooks` verifies every concrete quoted phrase against the manifest in
+`docs/runbook-refs.tsv` — add new phrases there, keep each on one line in template
+instructions, and re-run it when the panda runbooks change. Prose-only references
+("the runbook that owns …") are still unchecked.
 
 ## Validation
 
