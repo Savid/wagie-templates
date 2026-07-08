@@ -85,7 +85,7 @@ tasks:
               type: object
               properties:
                 title: { type: string }
-                summary: { type: string, description: Free-text reasoning, written first }
+                summary: { type: string, description: "Free-text reasoning, written first" }
                 classification:
                   type: object
                   properties:
@@ -115,8 +115,8 @@ tasks:
                     properties:
                       source: { type: string, description: Tool or datasource that produced it }
                       ref: { type: string, description: Executable re-derivation — a reader can re-run it }
-                      at: { type: string, description: Slot, block, epoch, or timestamp anchoring it }
-                      detail: { type: string, description: What was observed, verbatim values preserved }
+                      at: { type: string, description: "Slot, block, epoch, or timestamp anchoring it" }
+                      detail: { type: string, description: "What was observed, verbatim values preserved" }
                     required: [source, ref, detail]
                 co_present:
                   type: array
@@ -164,13 +164,13 @@ tasks:
             items: &report_schema
               type: object
               properties:
-                summary: { type: string, description: Reasoning in prose, written first }
+                summary: { type: string, description: "Reasoning in prose, written first" }
                 root_cause:
                   type: object
                   properties:
                     statement: { type: string }
                     family: { type: string }
-                    confidence: { type: string, description: high | medium | low, on the evidence-discipline scale }
+                    confidence: { type: string, description: "high | medium | low, on the evidence-discipline scale" }
                   required: [statement, confidence]
                 reproduction:
                   type: object
@@ -248,7 +248,7 @@ outputs:
       value: "${{ tasks.watch.outputs.values.issues }}"
     healthy_window_summary:
       required: true
-      schema: { type: string, description: One paragraph instead of issues when the watch window was healthy, else empty }
+      schema: { type: string, description: "One paragraph instead of issues when the watch window was healthy, else empty" }
       value: "${{ tasks.watch.outputs.values.healthy_window_summary }}"
     watch_feedback:
       required: true

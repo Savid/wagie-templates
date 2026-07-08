@@ -61,7 +61,7 @@ tasks:
               kind: { type: string, description: local — owned by the runbook that owns debugging an Ethereum network }
               enclave: { type: string }
               sandbox_id: { type: string }
-              network_id: { type: string, description: Source hosted network id, when known }
+              network_id: { type: string, description: "Source hosted network id, when known" }
             required: [kind]
         enclave:
           required: true

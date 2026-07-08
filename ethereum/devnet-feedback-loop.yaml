@@ -1,0 +1,352 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-feedback-loop
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a devnet watch, scan, or pipeline run left feedback queues or un-investigated issue records and the investigate-kind follow-ups should actually be executed: seeds one queue from the incoming queues and issues, then drains it round by round — triage the actionable investigate tasks, fan each out to its own root-cause investigation (restoring snapshots from the catalog when handles allow), merge the resulting queues — until the queue is terminal, empty of investigate work, or max_rounds is spent. Non-investigate task kinds (watch, config, snapshot, source-trace, manual-review, publish) pass through to the final queue untouched. A continuation stage: feed it the feedback and issues another devnet template produced, not a raw symptom.
+tags: ["ethereum", "devnet", "feedback", "loop", "investigate", "follow-up", "queue", "drain", "root-cause"]
+examples:
+  - "drain the feedback queue from the devnet pipeline"
+  - "investigate every follow-up task the watch queued"
+  - "fan out root-cause investigations from scan issues"
+  - "loop investigations until the feedback queue is terminal"
+  - "execute investigate-kind follow-ups round by round"
+inputs:
+  values:
+    feedback_queues:
+      required: true
+      description: Feedback queues to drain, e.g. a pipeline's watch_feedback plus its per-investigation queues, or a scan's queue
+      schema:
+        type: array
+        items: &feedback_schema
+          type: object
+          description: Follow-up queue — shape owned by the feedback-queue runbook
+          properties:
+            priority_summary: { type: string }
+            terminal: { type: boolean }
+            terminal_reason: { type: string }
+            tasks:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | manual-review | publish | no-op }
+                  reason: { type: string }
+                  priority: { type: string, description: high | medium | low }
+                  inputs: { type: object, description: Handles and query params only }
+                  success_condition: { type: string }
+                  stop_condition: { type: string }
+                  runbook_refs: { type: array, items: { type: string } }
+                  blocked_by: { type: string }
+                required: [kind, reason, success_condition, stop_condition]
+          required: [tasks]
+    issues:
+      description: Issue records not yet investigated, folded into the first round as investigate tasks
+      schema:
+        type: array
+        items: &issue_schema
+          type: object
+          properties:
+            title: { type: string }
+            summary: { type: string, description: "Free-text reasoning, written first" }
+            classification:
+              type: object
+              properties:
+                category: { type: string, description: Failure mode — enum owned by the issue-contract runbook }
+                layer: { type: string, description: consensus | execution | network | tooling | cross-layer }
+                spread: { type: string, description: single-client | subset | all-clients | network-wide | unknown }
+            first_bad:
+              type: object
+              description: Earliest artifact that explains later symptoms
+              properties:
+                kind: { type: string, description: slot | block | epoch | log | rpc | test | service-state }
+                value: { type: string }
+                at: { type: string }
+            affected:
+              type: array
+              items:
+                type: object
+                properties:
+                  node: { type: string }
+                  role: { type: string }
+                  client: { type: string }
+                  image: { type: string }
+            evidence:
+              type: array
+              items: &evidence_item_schema
+                type: object
+                properties:
+                  source: { type: string, description: Tool or datasource that produced it }
+                  ref: { type: string, description: Executable re-derivation — a reader can re-run it }
+                  at: { type: string, description: "Slot, block, epoch, or timestamp anchoring it" }
+                  detail: { type: string, description: "What was observed, verbatim values preserved" }
+                required: [source, ref, detail]
+            co_present:
+              type: array
+              items: { type: string }
+              description: Co-present distractor signals, kept out of the root narrative
+            fingerprint:
+              type: object
+              description: Identity block owned by the fingerprinting runbook — no run-specific ids in the key
+              properties:
+                rationale: { type: string }
+                key: { type: string }
+                decision: { type: string, description: new | duplicate | variant | insufficient-context }
+                matched: { type: string }
+                variant_dimension: { type: string }
+                confidence: { type: string }
+            handles:
+              type: object
+              description: What lets an investigation restore or reach the broken state — fill only the id kinds that exist
+              properties:
+                snapshot_id: { type: string }
+                sandbox_id: { type: string }
+                enclave: { type: string }
+                network: { type: string, description: Source or hosted network id }
+                setup_summary:
+                  type: object
+                  description: Watch setup_summary copied whole — reproduction and reachability judge against it
+            confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
+          required: [title, summary]
+    snapshots:
+      description: Epoch-aligned snapshot catalog of the network, forwarded to every investigation as restore points
+      schema: &snapshot_catalog_schema
+        type: array
+        items:
+          type: object
+          properties:
+            epoch: { type: number }
+            snapshot_id: { type: string }
+          required: [epoch, snapshot_id]
+    max_rounds:
+      description: Maximum drain rounds before returning the remaining queue
+      schema: { type: number, default: 3 }
+tasks:
+  seed:
+    quality-gate: "${{ has(outputs.values.queue) }}"
+    instructions: |-
+      Merge the incoming feedback queues and the un-investigated issues into
+      ONE starting queue for the drain rounds, per the runbook that owns
+      shaping investigation follow-ups (resolve it via
+      `panda search runbooks "shaping investigation follow-ups"`).
+
+      Each issue whose fingerprint decision is not duplicate becomes one
+      investigate-kind task carrying the issue record in its inputs; a
+      duplicate gets no task. Dedupe tasks that close the same named gap,
+      keep every non-investigate task as-is, and set terminal only when the
+      merged queue is terminal by the runbook's own rules.
+    inputs:
+      values:
+        feedback_queues:
+          required: true
+          schema:
+            type: array
+            items: *feedback_schema
+          value: "${{ inputs.values.feedback_queues }}"
+        issues:
+          required: true
+          schema:
+            type: array
+            items: *issue_schema
+          value: "${{ inputs.values.?issues.orValue([]) }}"
+    outputs:
+      values:
+        queue:
+          required: true
+          schema: *feedback_schema
+  drain:
+    needs: [seed]
+    loop:
+      max: "${{ inputs.values.?max_rounds.orValue(3) }}"
+      until: "${{ outputs.values.queue.?terminal.orValue(false) || outputs.values.remaining_investigate == 0.0 }}"
+      onMaxExhausted: continue
+    inputs:
+      values:
+        seed_queue:
+          required: true
+          schema: *feedback_schema
+          value: "${{ tasks.seed.outputs.values.queue }}"
+        snapshots:
+          required: true
+          schema: *snapshot_catalog_schema
+          value: "${{ inputs.values.?snapshots.orValue([]) }}"
+    tasks:
+      triage:
+        quality-gate: "${{ has(outputs.values.investigate_items) }}"
+        instructions: |-
+          Select this round's actionable investigate-kind tasks from the queue
+          — skip blocked_by-gated, satisfied, and non-investigate tasks — and
+          emit each as a self-contained issue record for investigation, per the
+          runbook that owns shaping investigation follow-ups. Preserve handles,
+          evidence, and fingerprint blocks carried in task inputs verbatim;
+          when a task carries only a reason and handles, write the issue title
+          and summary from its named gap. Emit an empty list when no
+          investigate task is actionable.
+        inputs:
+          values:
+            queue:
+              required: true
+              schema: *feedback_schema
+              value: "${{ loop.queue.orValue(inputs.values.seed_queue) }}"
+        outputs:
+          values:
+            investigate_items:
+              required: true
+              schema:
+                type: array
+                items: *issue_schema
+      investigate_round:
+        needs: [triage]
+        inputs:
+          values:
+            snapshots:
+              required: true
+              schema: *snapshot_catalog_schema
+              value: "${{ inputs.values.snapshots }}"
+        matrix:
+          axes:
+            item:
+              schema:
+                type: array
+                items: *issue_schema
+              value: "${{ tasks.triage.outputs.values.investigate_items }}"
+        tasks:
+          one:
+            uses: dev.wagie/devnet-issue-investigate@1.0.0
+            inputs:
+              values:
+                issue:
+                  value: "${{ matrix.item }}"
+                snapshot_id:
+                  value: "${{ matrix.item.?handles.snapshot_id.orValue('') }}"
+                snapshots:
+                  value: "${{ inputs.values.snapshots }}"
+        outputs:
+          values:
+            reports:
+              required: true
+              schema:
+                type: array
+                items: &report_schema
+                  type: object
+                  properties:
+                    summary: { type: string, description: "Reasoning in prose, written first" }
+                    root_cause:
+                      type: object
+                      properties:
+                        statement: { type: string }
+                        family: { type: string }
+                        confidence: { type: string, description: "high | medium | low, on the evidence-discipline scale" }
+                      required: [statement, confidence]
+                    reproduction:
+                      type: object
+                      properties:
+                        status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | historical-only }
+                        recipe: { type: array, items: { type: string } }
+                      required: [status]
+                    timeline:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          ts: { type: string }
+                          kind: { type: string, description: restart | block | timing | log | note }
+                          text: { type: string }
+                          log: { type: string }
+                        required: [text]
+                    hypotheses:
+                      type: object
+                      properties:
+                        supported: { type: array, items: { type: string } }
+                        rejected: { type: array, items: { type: string } }
+                        partial: { type: array, items: { type: string } }
+                    trace_verdict: { type: string, description: reachable | partially-reachable | not-reachable | insufficient-evidence }
+                    review_verdict: { type: string, description: survives | weakened | refuted }
+                    citations:
+                      type: array
+                      items: *evidence_item_schema
+                    next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | rerun with more evidence | no issue reproduced }
+                  required: [summary, root_cause, reproduction, trace_verdict, review_verdict, next_action]
+              value: "${{ tasks.one.outputs.values.report }}"
+            feedbacks:
+              required: true
+              schema:
+                type: array
+                items: *feedback_schema
+              value: "${{ tasks.one.outputs.values.feedback }}"
+      merge:
+        needs: [triage, investigate_round]
+        quality-gate: "${{ has(outputs.values.queue) && outputs.values.remaining_investigate >= 0.0 }}"
+        instructions: |-
+          Build the next round's queue, per the runbook that owns shaping
+          investigation follow-ups: drop the investigated tasks (they are the
+          `investigated` items), fold in every task from the round's feedback
+          queues, keep the incoming queue's untouched tasks, dedupe tasks that
+          close the same named gap, and re-judge terminal — terminal only when
+          no useful bounded follow-up remains. Count the actionable
+          investigate-kind tasks that remain (not blocked, not satisfied) as
+          `remaining_investigate`.
+        inputs:
+          values:
+            incoming:
+              required: true
+              schema: *feedback_schema
+              value: "${{ loop.queue.orValue(inputs.values.seed_queue) }}"
+            investigated:
+              required: true
+              schema:
+                type: array
+                items: *issue_schema
+              value: "${{ tasks.triage.outputs.values.investigate_items }}"
+            round_feedbacks:
+              required: true
+              schema:
+                type: array
+                items: *feedback_schema
+              value: "${{ tasks.investigate_round.outputs.values.feedbacks }}"
+        outputs:
+          values:
+            queue:
+              required: true
+              schema: *feedback_schema
+            remaining_investigate:
+              required: true
+              schema: { type: number, description: Actionable investigate-kind tasks left in the queue }
+    outputs:
+      values:
+        queue:
+          required: true
+          schema: *feedback_schema
+          value: "${{ tasks.merge.outputs.values.queue }}"
+        remaining_investigate:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.merge.outputs.values.remaining_investigate }}"
+        investigations:
+          required: true
+          schema:
+            type: array
+            items: *report_schema
+          value: "${{ loop.investigations.orValue([]) + tasks.investigate_round.outputs.values.reports }}"
+outputs:
+  values:
+    investigations:
+      required: true
+      schema:
+        type: array
+        items: *report_schema
+        description: Root-cause reports from every drain round, in round order
+      value: "${{ tasks.drain.outputs.values.investigations }}"
+    queue:
+      required: true
+      schema: *feedback_schema
+      value: "${{ tasks.drain.outputs.values.queue }}"
+    remaining_investigate:
+      required: true
+      schema: { type: number, description: Actionable investigate-kind tasks still queued when the drain stopped }
+      value: "${{ tasks.drain.outputs.values.remaining_investigate }}"

@@ -25,7 +25,7 @@ inputs:
         type: object
         properties:
           title: { type: string }
-          summary: { type: string, description: Free-text reasoning, written first }
+          summary: { type: string, description: "Free-text reasoning, written first" }
           classification:
             type: object
             properties:
@@ -55,8 +55,8 @@ inputs:
               properties:
                 source: { type: string, description: Tool or datasource that produced it }
                 ref: { type: string, description: Executable re-derivation — a reader can re-run it }
-                at: { type: string, description: Slot, block, epoch, or timestamp anchoring it }
-                detail: { type: string, description: What was observed, verbatim values preserved }
+                at: { type: string, description: "Slot, block, epoch, or timestamp anchoring it" }
+                detail: { type: string, description: "What was observed, verbatim values preserved" }
               required: [source, ref, detail]
           co_present:
             type: array
@@ -93,7 +93,7 @@ inputs:
           kind: { type: string, description: local | compute | public — owned by the runbook that owns debugging an Ethereum network }
           enclave: { type: string }
           sandbox_id: { type: string }
-          network_id: { type: string, description: Public network id, when kind is public }
+          network_id: { type: string, description: "Public network id, when kind is public" }
         required: [kind]
     snapshot_id:
       description: Broken-state snapshot to restore when no live target is supplied
@@ -183,7 +183,7 @@ tasks:
               network_id: { type: string }
           value: "${{ inputs.values.?network_target.orValue({}) }}"
         snapshot_id:
-          schema: { type: string, description: Broken-state snapshot to restore, when available }
+          schema: { type: string, description: "Broken-state snapshot to restore, when available" }
           value: "${{ inputs.values.?snapshot_id.orValue('') }}"
         snapshots:
           schema: *snapshot_catalog_schema
@@ -211,8 +211,9 @@ tasks:
       Draft the bounded hypothesis plan for the hunt — do not run any tests yet.
 
       Follow the hypothesis rules of the runbook that owns root-causing a
-      devnet issue (find it via `panda search runbooks "root-cause a devnet
-      issue"`), with the CL-vs-EL matrix from the runbook that owns debugging
+      devnet issue (find it via
+      `panda search runbooks "root-cause a devnet issue"`), with the
+      CL-vs-EL matrix from the runbook that owns debugging
       an Ethereum network.
 
       Write the plan as one self-contained text: fold in the issue's first_bad
@@ -235,7 +236,7 @@ tasks:
       values:
         plan:
           required: true
-          schema: { type: string, description: Self-contained hypothesis plan with tests, observables, and the issue's anchors }
+          schema: { type: string, description: "Self-contained hypothesis plan with tests, observables, and the issue's anchors" }
   plan_review:
     needs: [intake, plan]
     uses: dev.wagie/adversarial-review@1.0.0
@@ -368,8 +369,9 @@ tasks:
       offers to build one.
 
       Assemble the report in the shape owned by the runbook that owns
-      root-causing a devnet issue (via `panda search runbooks "root-cause a
-      devnet issue"`). Do not overstate — if the review weakened or refuted the
+      root-causing a devnet issue (via
+      `panda search runbooks "root-cause a devnet issue"`). Do not overstate —
+      if the review weakened or refuted the
       cause, lead with that and cap confidence; a duplicate fingerprint
       decision gets occurrence-attachment, not re-publication.
 
@@ -418,13 +420,13 @@ tasks:
           schema: &report_schema
             type: object
             properties:
-              summary: { type: string, description: Reasoning in prose, written first }
+              summary: { type: string, description: "Reasoning in prose, written first" }
               root_cause:
                 type: object
                 properties:
                   statement: { type: string }
                   family: { type: string }
-                  confidence: { type: string, description: high | medium | low, on the evidence-discipline scale }
+                  confidence: { type: string, description: "high | medium | low, on the evidence-discipline scale" }
                 required: [statement, confidence]
               reproduction: *reproduction_schema
               timeline:

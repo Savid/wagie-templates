@@ -7,7 +7,7 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when you already have a runnable Kurtosis ethereum-package args-file and want the remote reproduce-and-analyze pipeline run on it end to end: launch and snapshot it on panda-compute at chosen epochs, watch a restored snapshot forward for a window, then root-cause every issue it surfaces. Each investigation restores its own sandbox from the broken-state snapshot and receives the epoch-snapshot catalog to pick an earlier restore point. Config-first entry point; devnet-pipeline wraps this when only a hosted devnet name exists.
+  Use when you already have a runnable Kurtosis ethereum-package args-file and want the remote reproduce-and-analyze pipeline run on it end to end: launch and snapshot it on panda-compute at chosen epochs, watch a restored snapshot forward for a window, then root-cause every issue it surfaces. The watch restores the earliest epoch snapshot by default — an observed replay of the whole captured window; set watch_from_epoch to a later captured epoch to skip the replay and watch only fresh epochs beyond it. Each investigation restores its own sandbox from the broken-state snapshot and receives the epoch-snapshot catalog to pick an earlier restore point. Config-first entry point; devnet-pipeline wraps this when only a hosted devnet name exists.
 tags: ["ethereum", "devnet", "kurtosis", "pipeline", "config", "args-file", "snapshot", "watch", "investigate", "panda-compute"]
 examples:
   - "run the devnet pipeline on this kurtosis config"
@@ -27,6 +27,9 @@ inputs:
     snapshot_epochs:
       description: Epochs to snapshot the launched network at
       schema: { type: array, items: { type: number }, default: [0] }
+    watch_from_epoch:
+      description: Captured epoch whose snapshot the watch restores and runs forward from; must be one of snapshot_epochs. Unset or negative means the earliest captured epoch (an observed replay of the whole window)
+      schema: { type: number }
     watch_epochs:
       description: How many epochs to watch the restored snapshot (default 5)
       schema: { type: number, default: 5 }
@@ -62,8 +65,9 @@ tasks:
         devnet:
           value: "${{ inputs.values.devnet }}"
         snapshot_id:
-          # earliest captured snapshot — the watch restores it and runs forward
-          value: "${{ tasks.snapshot.outputs.values.snapshots[?0].orValue({'epoch': 0, 'snapshot_id': ''}).snapshot_id }}"
+          # the watch restores the watch_from_epoch snapshot when set, else the
+          # earliest captured snapshot, and runs forward
+          value: "${{ inputs.values.?watch_from_epoch.orValue(-1.0) < 0.0 ? tasks.snapshot.outputs.values.snapshots[?0].orValue({'epoch': 0, 'snapshot_id': ''}).snapshot_id : tasks.snapshot.outputs.values.snapshots.filter(s, s.epoch == inputs.values.watch_from_epoch)[?0].orValue({'epoch': 0, 'snapshot_id': ''}).snapshot_id }}"
         watch_epochs:
           value: "${{ inputs.values.?watch_epochs.orValue(5) }}"
         sandbox_ttl:
@@ -77,7 +81,7 @@ tasks:
       values:
         snapshot_id:
           required: true
-          schema: { type: string, description: Final broken-state snapshot from the watch, empty when none }
+          schema: { type: string, description: "Final broken-state snapshot from the watch, empty when none" }
           value: "${{ tasks.watch.outputs.values.final_snapshot.?snapshot_id.orValue('') }}"
         snapshots:
           required: true
@@ -99,7 +103,7 @@ tasks:
               type: object
               properties:
                 title: { type: string }
-                summary: { type: string, description: Free-text reasoning, written first }
+                summary: { type: string, description: "Free-text reasoning, written first" }
                 classification:
                   type: object
                   properties:
@@ -129,8 +133,8 @@ tasks:
                     properties:
                       source: { type: string, description: Tool or datasource that produced it }
                       ref: { type: string, description: Executable re-derivation — a reader can re-run it }
-                      at: { type: string, description: Slot, block, epoch, or timestamp anchoring it }
-                      detail: { type: string, description: What was observed, verbatim values preserved }
+                      at: { type: string, description: "Slot, block, epoch, or timestamp anchoring it" }
+                      detail: { type: string, description: "What was observed, verbatim values preserved" }
                     required: [source, ref, detail]
                 co_present:
                   type: array
@@ -180,13 +184,13 @@ tasks:
             items: &report_schema
               type: object
               properties:
-                summary: { type: string, description: Reasoning in prose, written first }
+                summary: { type: string, description: "Reasoning in prose, written first" }
                 root_cause:
                   type: object
                   properties:
                     statement: { type: string }
                     family: { type: string }
-                    confidence: { type: string, description: high | medium | low, on the evidence-discipline scale }
+                    confidence: { type: string, description: "high | medium | low, on the evidence-discipline scale" }
                   required: [statement, confidence]
                 reproduction:
                   type: object
@@ -250,7 +254,7 @@ outputs:
   values:
     base_snapshot_id:
       required: true
-      schema: { type: string, description: Snapshot of the freshly launched network, restorable into new sandboxes }
+      schema: { type: string, description: "Snapshot of the freshly launched network, restorable into new sandboxes" }
       value: "${{ tasks.snapshot.outputs.values.base_snapshot_id }}"
     snapshots:
       required: true
@@ -264,7 +268,7 @@ outputs:
       value: "${{ tasks.watch.outputs.values.issues }}"
     healthy_window_summary:
       required: true
-      schema: { type: string, description: One paragraph instead of issues when the watch window was healthy, else empty }
+      schema: { type: string, description: "One paragraph instead of issues when the watch window was healthy, else empty" }
       value: "${{ tasks.watch.outputs.values.healthy_window_summary }}"
     final_snapshot:
       required: true

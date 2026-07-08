@@ -29,6 +29,9 @@ inputs:
     snapshot_epochs:
       description: Epochs to snapshot the launched network at
       schema: { type: array, items: { type: number }, default: [0] }
+    watch_from_epoch:
+      description: Captured epoch whose snapshot the watch restores and runs forward from; must be one of snapshot_epochs. Unset or negative means the earliest captured epoch (an observed replay of the whole window)
+      schema: { type: number }
     watch_epochs:
       description: How many epochs to watch the restored snapshot (default 5)
       schema: { type: number, default: 5 }
@@ -57,6 +60,8 @@ tasks:
           value: "${{ inputs.values.?package_ref.orValue('') }}"
         snapshot_epochs:
           value: "${{ inputs.values.?snapshot_epochs.orValue([0]) }}"
+        watch_from_epoch:
+          value: "${{ inputs.values.?watch_from_epoch.orValue(-1.0) }}"
         watch_epochs:
           value: "${{ inputs.values.?watch_epochs.orValue(5) }}"
         sandbox_ttl:
@@ -72,7 +77,7 @@ outputs:
       value: "${{ tasks.config.outputs.values.summary }}"
     base_snapshot_id:
       required: true
-      schema: { type: string, description: Snapshot of the freshly launched network, restorable into new sandboxes }
+      schema: { type: string, description: "Snapshot of the freshly launched network, restorable into new sandboxes" }
       value: "${{ tasks.run.outputs.values.base_snapshot_id }}"
     snapshots:
       required: true
@@ -93,7 +98,7 @@ outputs:
           type: object
           properties:
             title: { type: string }
-            summary: { type: string, description: Free-text reasoning, written first }
+            summary: { type: string, description: "Free-text reasoning, written first" }
             classification:
               type: object
               properties:
@@ -123,8 +128,8 @@ outputs:
                 properties:
                   source: { type: string, description: Tool or datasource that produced it }
                   ref: { type: string, description: Executable re-derivation — a reader can re-run it }
-                  at: { type: string, description: Slot, block, epoch, or timestamp anchoring it }
-                  detail: { type: string, description: What was observed, verbatim values preserved }
+                  at: { type: string, description: "Slot, block, epoch, or timestamp anchoring it" }
+                  detail: { type: string, description: "What was observed, verbatim values preserved" }
                 required: [source, ref, detail]
             co_present:
               type: array
@@ -156,7 +161,7 @@ outputs:
       value: "${{ tasks.run.outputs.values.issues }}"
     healthy_window_summary:
       required: true
-      schema: { type: string, description: One paragraph instead of issues when the watch window was healthy, else empty }
+      schema: { type: string, description: "One paragraph instead of issues when the watch window was healthy, else empty" }
       value: "${{ tasks.run.outputs.values.healthy_window_summary }}"
     final_snapshot:
       required: true
@@ -200,13 +205,13 @@ outputs:
         items: &report_schema
           type: object
           properties:
-            summary: { type: string, description: Reasoning in prose, written first }
+            summary: { type: string, description: "Reasoning in prose, written first" }
             root_cause:
               type: object
               properties:
                 statement: { type: string }
                 family: { type: string }
-                confidence: { type: string, description: high | medium | low, on the evidence-discipline scale }
+                confidence: { type: string, description: "high | medium | low, on the evidence-discipline scale" }
               required: [statement, confidence]
             reproduction:
               type: object

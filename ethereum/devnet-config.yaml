@@ -60,7 +60,7 @@ tasks:
       values:
         summary:
           required: true
-          schema: { type: string, description: Short summary of topology, forks, tooling, and key choices }
+          schema: { type: string, description: "Short summary of topology, forks, tooling, and key choices" }
         assumptions:
           required: true
           schema:

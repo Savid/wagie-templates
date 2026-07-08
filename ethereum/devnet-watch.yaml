@@ -31,7 +31,7 @@ inputs:
           kind: { type: string, description: local | compute | public — owned by the runbook that owns debugging an Ethereum network }
           enclave: { type: string }
           sandbox_id: { type: string }
-          network_id: { type: string, description: Public network id, when kind is public }
+          network_id: { type: string, description: "Public network id, when kind is public" }
         required: [kind]
     watch_epochs:
       description: How many epochs to watch from the current epoch (default 5)
@@ -89,7 +89,7 @@ tasks:
           schema: *network_target_schema
         sandbox_id:
           required: true
-          schema: { type: string, description: Compute sandbox id when applicable, else empty }
+          schema: { type: string, description: "Compute sandbox id when applicable, else empty" }
         services:
           required: true
           schema:
@@ -183,8 +183,8 @@ tasks:
                       properties:
                         source: { type: string, description: Tool or datasource that produced it }
                         ref: { type: string, description: Executable re-derivation — a reader can re-run it }
-                        at: { type: string, description: Slot, block, epoch, or timestamp anchoring it }
-                        detail: { type: string, description: What was observed, verbatim values preserved }
+                        at: { type: string, description: "Slot, block, epoch, or timestamp anchoring it" }
+                        detail: { type: string, description: "What was observed, verbatim values preserved" }
                       required: [source, ref, detail]
                 required: [observations]
     outputs:
@@ -260,7 +260,7 @@ tasks:
           schema: { type: boolean }
         snapshot_id:
           required: true
-          schema: { type: string, description: Final snapshot id, empty when not applicable }
+          schema: { type: string, description: "Final snapshot id, empty when not applicable" }
   collate:
     needs: [provision, observe, observe_network, snapshot_final]
     quality-gate: "${{ has(outputs.values.issues) && (size(outputs.values.issues) > 0 || size(outputs.values.healthy_window_summary) > 0) }}"
@@ -312,7 +312,7 @@ tasks:
           value: "${{ tasks.provision.outputs.values.network_target }}"
         final_snapshot_id:
           required: true
-          schema: { type: string, description: Final snapshot id, empty when not applicable }
+          schema: { type: string, description: "Final snapshot id, empty when not applicable" }
           value: "${{ tasks.snapshot_final.outputs.values.snapshot_id }}"
     outputs:
       values:
@@ -324,7 +324,7 @@ tasks:
               type: object
               properties:
                 title: { type: string }
-                summary: { type: string, description: Free-text reasoning, written first }
+                summary: { type: string, description: "Free-text reasoning, written first" }
                 classification:
                   type: object
                   properties:
@@ -379,7 +379,7 @@ tasks:
               required: [title, summary]
         healthy_window_summary:
           required: true
-          schema: { type: string, description: One paragraph instead of issues when the window is healthy, else empty }
+          schema: { type: string, description: "One paragraph instead of issues when the window is healthy, else empty" }
         feedback:
           required: true
           schema: &feedback_schema

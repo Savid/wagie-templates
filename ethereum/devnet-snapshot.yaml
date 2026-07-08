@@ -82,9 +82,9 @@ tasks:
           schema: { type: boolean, description: True if the launched network reached genesis and was producing blocks before the base snapshot }
         base_snapshot_id:
           required: true
-          schema: { type: string, description: Snapshot of the freshly launched network, restorable into a new sandbox }
+          schema: { type: string, description: "Snapshot of the freshly launched network, restorable into a new sandbox" }
         genesis_time:
-          schema: { type: string, description: Network genesis time recorded at launch, in the sandbox clock frame (not wall-clock), for epoch-timing provenance }
+          schema: { type: string, description: "Network genesis time recorded at launch, in the sandbox clock frame (not wall-clock), for epoch-timing provenance" }
   restore_and_snapshot:
     needs: [provision_and_base]
     quality-gate: "${{ has(outputs.values.sandbox_id) && size(outputs.values.sandbox_id) > 0 && size(outputs.values.snapshots) > 0 }}"
