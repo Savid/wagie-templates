@@ -52,9 +52,19 @@ tasks:
       window (explicit start/end, else `lookback` back from now) into its
       concrete block/slot range with the runbook that owns ClickHouse querying.
 
-      Emit a self-contained `scan_target` string (devnet, resolved window, and
-      how to reach its retained data) and an `objective` string of the form
-      "Find all issues in <devnet> during <window>", folding in any `focus`.
+      The next stage is a domain-agnostic discovery hunt whose workers see only
+      this target string — they preserve its access recipe verbatim and cannot
+      reconstruct one it omits. So make `scan_target` a self-contained recipe, not
+      a label: the network id, the resolved window as BOTH wall-clock and
+      slot/block range, the concrete data coordinates (query surface, resolved
+      cluster, the network's own database, dataset), and explicit pointers to the
+      runbook that owns ClickHouse query discipline (placement, partition and
+      force_primary_key rules, coverage-before-absence) and the one that owns the
+      fork model and health thresholds. A probe must be able to begin querying
+      from `scan_target` alone.
+
+      Set `objective` to "Find all issues in <devnet> during <window>", folding
+      in any `focus`.
     inputs:
       values:
         devnet:

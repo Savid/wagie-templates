@@ -7,14 +7,14 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when you have a Kurtosis ethereum-package config and want to launch it on a remote panda-compute sandbox and capture VM snapshots at chosen epochs, returning the sandbox id and per-epoch snapshot ids.
-tags: ["kurtosis", "ethereum", "ethpandaops", "ethereum-package", "devnet", "snapshot", "epoch", "panda-compute", "sandbox", "remote"]
+  Use when you have a Kurtosis ethereum-package config and want to launch it on a remote panda-compute sandbox, capture a base snapshot of the freshly launched network, tear that sandbox down fully, then restore the base into a new sandbox and capture VM snapshots at chosen epochs. Returns the base snapshot id, the restored sandbox id, and per-epoch snapshot ids.
+tags: ["kurtosis", "ethereum", "ethpandaops", "ethereum-package", "devnet", "snapshot", "base-snapshot", "restore", "epoch", "panda-compute", "sandbox", "remote"]
 examples:
   - "capture epoch snapshots on panda-compute"
-  - "create TTL compute sandbox from named template"
-  - "snapshot epoch zero before the network advances"
-  - "return sandbox id and per-epoch snapshot ids"
-  - "launch config remotely and snapshot chosen epochs"
+  - "snapshot a launched network then restore it to capture epochs"
+  - "create a reusable base snapshot then tear down compute"
+  - "return base snapshot id, sandbox id, and per-epoch snapshot ids"
+  - "restore a base snapshot into a fresh sandbox and snapshot chosen epochs"
 inputs:
   values:
     devnet:
@@ -22,16 +22,16 @@ inputs:
       description: Devnet name this network represents, used for snapshot notes
       schema: { type: string }
     snapshot_epochs:
-      description: Epochs to snapshot at, ascending, e.g. [0, 5, 10]. Epoch 0 captures the fresh network.
+      description: Epochs to snapshot at, ascending, e.g. [0, 5, 10]. Epoch 0 maps to the base snapshot captured at launch — no second snapshot is taken for it.
       schema: { type: array, items: { type: number }, default: [0] }
     compute_template:
-      description: Optional override forcing a specific compute template. When unset, the runbook discovers and picks the sandbox template via its templates listing.
+      description: Optional override forcing a specific compute template. When unset, the runbook discovers and picks a snapshot/restore-capable sandbox template via its templates listing.
       schema: { type: string }
     package_ref:
       description: Optional override for the Kurtosis package reference. When unset, the ethereum-package default from the Kurtosis runbooks applies.
       schema: { type: string }
     sandbox_ttl:
-      description: Optional sandbox TTL (e.g. 2h) to bound the VM lifetime
+      description: Optional sandbox TTL (e.g. 2h) to bound each VM's lifetime
       schema: { type: string }
   artifacts:
     config:
@@ -39,60 +39,36 @@ inputs:
       contentType: text/yaml
       description: Kurtosis ethereum-package args-file to launch on the sandbox
 tasks:
-  provision:
-    quality-gate: "${{ has(outputs.values.sandbox_id) && size(outputs.values.sandbox_id) > 0 }}"
+  provision_and_base:
+    quality-gate: "${{ outputs.values.network_ready && has(outputs.values.base_snapshot_id) && size(outputs.values.base_snapshot_id) > 0 }}"
     instructions: |-
-      Provision a compute sandbox to host the devnet. Do not launch the network
-      yet.
+      Provision a compute sandbox, launch the Kurtosis ethereum devnet on it from
+      the `config` artifact, capture ONE base snapshot of the freshly launched
+      network once it reaches genesis and is producing blocks, then tear the
+      sandbox down fully so no compute is left running. The base snapshot — not
+      the sandbox — is the handoff to the next task, and it is also the epoch-0
+      capture: the fresh network before it advances.
 
-      Follow the runbook that owns the panda-compute devnet lifecycle (find it
-      via `panda search runbooks "compute sandbox snapshot lifecycle"`). Pick a
-      sandbox template from its capability-check listing unless a
-      `compute_template` override is supplied, pass the `sandbox_ttl` when
-      given, and poll the operation until the sandbox is ready.
+      Follow the runbook that owns the panda-compute devnet lifecycle (find it via
+      `panda search runbooks "compute sandbox snapshot lifecycle"`). It owns the
+      capability check, choosing a snapshot/restore-capable compute template
+      (unless `compute_template` is supplied), launching from the config, async
+      polling, snapshotting, and teardown. Pass `sandbox_ttl` when given and honor
+      a `package_ref` override when supplied. Deleting the source sandbox after the
+      base snapshot is captured is an explicit instruction of this task.
 
-      Return the sandbox id.
+      Return the base snapshot id, and the genesis time for provenance.
     inputs:
       values:
         compute_template:
           schema: { type: string }
           value: "${{ inputs.values.?compute_template.orValue('') }}"
-        sandbox_ttl:
-          schema: { type: string }
-          value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
-    outputs:
-      values:
-        sandbox_id:
-          required: true
-          schema: { type: string, description: panda-compute sandbox id }
-  deploy_and_snapshot:
-    needs: [provision]
-    quality-gate: "${{ outputs.values.network_ready && size(outputs.values.snapshots) > 0 }}"
-    instructions: |-
-      Launch the Kurtosis ethereum devnet on the sandbox and capture VM
-      snapshots at the target epochs. This is one time-sensitive flow — do not
-      split launch from snapshotting, and pre-compute each epoch's snapshot
-      time before launching so early epochs are not missed.
-
-      Follow the runbook that owns the panda-compute devnet lifecycle (via
-      `panda search runbooks "epoch aligned snapshot restore"`): it owns the
-      launch from the `config` artifact, epoch alignment and timing, async
-      polling, and metadata. Honor a `package_ref` override when supplied.
-
-      Record one `{ epoch, snapshot }` per target, in ascending order.
-    inputs:
-      values:
-        sandbox_id:
-          required: true
-          schema: { type: string }
-          value: "${{ tasks.provision.outputs.values.sandbox_id }}"
         package_ref:
           schema: { type: string }
           value: "${{ inputs.values.?package_ref.orValue('') }}"
-        snapshot_epochs:
-          required: true
-          schema: { type: array, items: { type: number } }
-          value: "${{ inputs.values.?snapshot_epochs.orValue([0]) }}"
+        sandbox_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
         devnet:
           schema: { type: string }
           value: "${{ inputs.values.devnet }}"
@@ -103,7 +79,57 @@ tasks:
       values:
         network_ready:
           required: true
-          schema: { type: boolean, description: True if the network reached genesis and is producing blocks }
+          schema: { type: boolean, description: True if the launched network reached genesis and was producing blocks before the base snapshot }
+        base_snapshot_id:
+          required: true
+          schema: { type: string, description: Snapshot of the freshly launched network, restorable into a new sandbox }
+        genesis_time:
+          schema: { type: string, description: Network genesis time recorded at launch, in the sandbox clock frame (not wall-clock), for epoch-timing provenance }
+  restore_and_snapshot:
+    needs: [provision_and_base]
+    quality-gate: "${{ has(outputs.values.sandbox_id) && size(outputs.values.sandbox_id) > 0 && size(outputs.values.snapshots) > 0 }}"
+    instructions: |-
+      Restore the base snapshot into a NEW compute sandbox and capture VM
+      snapshots at the target epochs by letting the restored network run forward.
+      The base snapshot already carries the launched network, so there is no
+      config to launch here.
+
+      Epoch 0 is already captured — it IS the base snapshot. When 0 is a target,
+      record it as the epoch-0 entry using `base_snapshot_id` directly; do NOT
+      take a second snapshot of the freshly restored network — that would be a
+      byte-identical duplicate of the base and waste a capture. For every epoch
+      greater than 0, pre-compute its snapshot time before the network advances so
+      it is not missed, let the network run forward to that target, and snapshot.
+
+      Follow the runbook that owns the panda-compute devnet lifecycle (via
+      `panda search runbooks "epoch aligned snapshot restore"`): it owns restoring
+      the snapshot into a fresh sandbox, boot flavor, re-establishing epoch/slot
+      timing, epoch alignment, async polling, and snapshotting. Pass `sandbox_ttl`
+      when given.
+
+      Record one `{ epoch, snapshot }` per target, in ascending order, and return
+      the restored sandbox id.
+    inputs:
+      values:
+        base_snapshot_id:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.provision_and_base.outputs.values.base_snapshot_id }}"
+        snapshot_epochs:
+          required: true
+          schema: { type: array, items: { type: number } }
+          value: "${{ inputs.values.?snapshot_epochs.orValue([0]) }}"
+        sandbox_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
+        devnet:
+          schema: { type: string }
+          value: "${{ inputs.values.devnet }}"
+    outputs:
+      values:
+        sandbox_id:
+          required: true
+          schema: { type: string, description: panda-compute sandbox id of the restored network }
         snapshots:
           required: true
           schema:
@@ -114,13 +140,17 @@ tasks:
                 epoch: { type: number }
                 snapshot: { type: string }
               required: [epoch, snapshot]
-            description: Snapshot id captured at each target epoch, in order
+            description: Snapshot id at each target epoch, in order; the epoch-0 entry is the base snapshot, later epochs are captured by running forward
 outputs:
   values:
+    base_snapshot_id:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.provision_and_base.outputs.values.base_snapshot_id }}"
     sandbox_id:
       required: true
       schema: { type: string }
-      value: "${{ tasks.provision.outputs.values.sandbox_id }}"
+      value: "${{ tasks.restore_and_snapshot.outputs.values.sandbox_id }}"
     snapshots:
       required: true
       schema:
@@ -131,4 +161,4 @@ outputs:
             epoch: { type: number }
             snapshot: { type: string }
           required: [epoch, snapshot]
-      value: "${{ tasks.deploy_and_snapshot.outputs.values.snapshots }}"
+      value: "${{ tasks.restore_and_snapshot.outputs.values.snapshots }}"

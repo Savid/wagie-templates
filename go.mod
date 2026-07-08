@@ -3,7 +3,7 @@ module github.com/savid/wagie-templates
 go 1.26.4
 
 require (
-	github.com/savid/wagie v0.0.9
+	github.com/savid/wagie v0.0.10
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -262,11 +262,11 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
-	github.com/savid/acp-go-amp v0.0.0-20260706113115-2bfdf2ff7192 // indirect
-	github.com/savid/acp-go-claude v0.0.0-20260706113120-50b2df4de53e // indirect
-	github.com/savid/acp-go-codex v0.0.0-20260706113128-f7bad9ef73c3 // indirect
-	github.com/savid/acp-go-hermes v0.0.0-20260706113133-126dd19e73ef // indirect
-	github.com/savid/acp-go-opencode v0.0.0-20260706113140-16505d9fb2b8 // indirect
+	github.com/savid/acp-go-amp v0.0.0-20260708021836-363bfce449d9 // indirect
+	github.com/savid/acp-go-claude v0.0.0-20260708015720-4800d8e5e83b // indirect
+	github.com/savid/acp-go-codex v0.0.0-20260708021343-5d214d02dc93 // indirect
+	github.com/savid/acp-go-hermes v0.0.0-20260708021124-056b09f467ec // indirect
+	github.com/savid/acp-go-opencode v0.0.0-20260708035006-d1e1adb069c8 // indirect
 	github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36 // indirect
 	github.com/schollz/progressbar/v2 v2.15.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
@@ -436,5 +436,3 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
-
-replace github.com/savid/wagie => ../wagie
