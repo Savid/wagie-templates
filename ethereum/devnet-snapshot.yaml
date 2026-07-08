@@ -107,8 +107,8 @@ tasks:
       timing, epoch alignment, async polling, and snapshotting. Pass `sandbox_ttl`
       when given.
 
-      Record one `{ epoch, snapshot }` per target, in ascending order, and return
-      the restored sandbox id.
+      Record one `{ epoch, snapshot_id }` per target, in ascending order, and
+      return the restored sandbox id.
     inputs:
       values:
         base_snapshot_id:
@@ -138,8 +138,8 @@ tasks:
               type: object
               properties:
                 epoch: { type: number }
-                snapshot: { type: string }
-              required: [epoch, snapshot]
+                snapshot_id: { type: string }
+              required: [epoch, snapshot_id]
             description: Snapshot id at each target epoch, in order; the epoch-0 entry is the base snapshot, later epochs are captured by running forward
 outputs:
   values:
@@ -159,6 +159,6 @@ outputs:
           type: object
           properties:
             epoch: { type: number }
-            snapshot: { type: string }
-          required: [epoch, snapshot]
+            snapshot_id: { type: string }
+          required: [epoch, snapshot_id]
       value: "${{ tasks.restore_and_snapshot.outputs.values.snapshots }}"

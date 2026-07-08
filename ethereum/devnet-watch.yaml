@@ -28,10 +28,10 @@ inputs:
       schema: &network_target_schema
         type: object
         properties:
-          kind: { type: string, description: local-enclave | compute-enclave | hosted }
+          kind: { type: string, description: local | compute | public — owned by the runbook that owns debugging an Ethereum network }
           enclave: { type: string }
           sandbox_id: { type: string }
-          network: { type: string, description: Hosted network id, when kind is hosted }
+          network_id: { type: string, description: Public network id, when kind is public }
         required: [kind]
     watch_epochs:
       description: How many epochs to watch from the current epoch (default 5)
@@ -73,7 +73,7 @@ tasks:
               kind: { type: string }
               enclave: { type: string }
               sandbox_id: { type: string }
-              network: { type: string }
+              network_id: { type: string }
           value: "${{ inputs.values.?network_target.orValue({}) }}"
         watch_epochs:
           required: true

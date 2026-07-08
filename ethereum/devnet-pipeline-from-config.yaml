@@ -1,81 +1,95 @@
 kind: Template
 schemaVersion: wagie/v1
-id: dev.wagie/devnet-pipeline-local
+id: dev.wagie/devnet-pipeline-from-config
 version: "1.0.0"
 license: MIT
 authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use to run the full Ethereum devnet reproduce-and-analyze pipeline end to end with NO panda-compute: build a Kurtosis config from a hosted devnet, launch it locally, watch it for a window, then root-cause every issue it surfaces. An all-in-one convenience over the individual devnet stages, for when you don't want remote compute.
-tags: ["ethereum", "devnet", "kurtosis", "pipeline", "local", "no-compute", "watch", "investigate"]
+  Use when you already have a runnable Kurtosis ethereum-package args-file and want the remote reproduce-and-analyze pipeline run on it end to end: launch and snapshot it on panda-compute at chosen epochs, watch a restored snapshot forward for a window, then root-cause every issue it surfaces. Each investigation restores its own sandbox from the broken-state snapshot and receives the epoch-snapshot catalog to pick an earlier restore point. Config-first entry point; devnet-pipeline wraps this when only a hosted devnet name exists.
+tags: ["ethereum", "devnet", "kurtosis", "pipeline", "config", "args-file", "snapshot", "watch", "investigate", "panda-compute"]
 examples:
-  - "copy hosted devnet X locally and watch issues"
-  - "run local no-compute devnet pipeline end to end"
-  - "reproduce hosted devnet in local Kurtosis only"
-  - "from devnet name to local RCA reports"
+  - "run the devnet pipeline on this kurtosis config"
+  - "launch my args file on panda-compute and hunt bugs"
+  - "snapshot my config at chosen epochs then investigate issues"
+  - "from args-file to per-issue root-cause reports"
+  - "fan out investigations over every issue using the snapshots"
 inputs:
   values:
     devnet:
       required: true
-      description: Hosted devnet name to reproduce locally, e.g. glamsterdam-devnet-6
-      schema: { type: string }
-    steering:
-      description: Optional config steering (client subset, tooling, accelerated forks)
+      description: Devnet name or label this config represents, used for snapshot notes and issue dedupe context
       schema: { type: string }
     package_ref:
-      description: Optional override for the Kurtosis package reference, threaded to config synthesis and the local launch
+      description: Optional override for the Kurtosis package reference, threaded to the compute launch
       schema: { type: string }
+    snapshot_epochs:
+      description: Epochs to snapshot the launched network at
+      schema: { type: array, items: { type: number }, default: [0] }
     watch_epochs:
-      description: How many epochs to watch the local network (default 5)
+      description: How many epochs to watch the restored snapshot (default 5)
       schema: { type: number, default: 5 }
+    sandbox_ttl:
+      description: Optional sandbox TTL (e.g. 2h) to bound each VM's lifetime
+      schema: { type: string }
+  artifacts:
+    config:
+      required: true
+      contentType: text/yaml
+      description: Kurtosis ethereum-package args-file to launch on the sandbox
 tasks:
-  config:
-    uses: dev.wagie/devnet-config@1.0.0
+  snapshot:
+    uses: dev.wagie/devnet-snapshot@1.0.0
     inputs:
       values:
         devnet:
           value: "${{ inputs.values.devnet }}"
-        steering:
-          value: "${{ inputs.values.?steering.orValue('') }}"
         package_ref:
           value: "${{ inputs.values.?package_ref.orValue('') }}"
-  run_local:
-    needs: [config]
-    uses: dev.wagie/devnet-run-local@1.0.0
-    inputs:
-      values:
-        package_ref:
-          value: "${{ inputs.values.?package_ref.orValue('') }}"
+        snapshot_epochs:
+          value: "${{ inputs.values.?snapshot_epochs.orValue([0]) }}"
+        sandbox_ttl:
+          value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
       artifacts:
         config:
-          ref: tasks.config.outputs.artifacts.config
+          ref: inputs.artifacts.config
   watch:
-    needs: [run_local]
+    needs: [snapshot]
     uses: dev.wagie/devnet-watch@1.0.0
     inputs:
       values:
         devnet:
           value: "${{ inputs.values.devnet }}"
-        network_target:
-          value: "${{ tasks.run_local.outputs.values.network_target }}"
+        snapshot_id:
+          # earliest captured snapshot — the watch restores it and runs forward
+          value: "${{ tasks.snapshot.outputs.values.snapshots[?0].orValue({'epoch': 0, 'snapshot_id': ''}).snapshot_id }}"
         watch_epochs:
           value: "${{ inputs.values.?watch_epochs.orValue(5) }}"
+        sandbox_ttl:
+          value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
   investigate:
-    needs: [watch]
+    # Deliberately passes NO network_target: each investigation restores its own
+    # sandbox from the broken-state snapshot instead of sharing the watch sandbox,
+    # so parallel issue hunts stay isolated.
+    needs: [snapshot, watch]
     inputs:
       values:
-        network_target:
+        snapshot_id:
           required: true
-          schema: &network_target_schema
-            type: object
-            properties:
-              kind: { type: string, description: local | compute | public — owned by the runbook that owns debugging an Ethereum network }
-              enclave: { type: string }
-              sandbox_id: { type: string }
-              network_id: { type: string, description: Source or public network id }
-            required: [kind]
-          value: "${{ tasks.watch.outputs.values.network_target }}"
+          schema: { type: string, description: Final broken-state snapshot from the watch, empty when none }
+          value: "${{ tasks.watch.outputs.values.final_snapshot.?snapshot_id.orValue('') }}"
+        snapshots:
+          required: true
+          schema: &snapshot_catalog_schema
+            type: array
+            items:
+              type: object
+              properties:
+                epoch: { type: number }
+                snapshot_id: { type: string }
+              required: [epoch, snapshot_id]
+          value: "${{ tasks.snapshot.outputs.values.snapshots }}"
     matrix:
       axes:
         issue:
@@ -153,8 +167,10 @@ tasks:
           values:
             issue:
               value: "${{ matrix.issue }}"
-            network_target:
-              value: "${{ inputs.values.network_target }}"
+            snapshot_id:
+              value: "${{ inputs.values.snapshot_id }}"
+            snapshots:
+              value: "${{ inputs.values.snapshots }}"
     outputs:
       values:
         investigations:
@@ -232,14 +248,14 @@ tasks:
           value: "${{ tasks.one.outputs.values.feedback }}"
 outputs:
   values:
-    config_summary:
+    base_snapshot_id:
       required: true
-      schema: { type: string }
-      value: "${{ tasks.config.outputs.values.summary }}"
-    network_target:
+      schema: { type: string, description: Snapshot of the freshly launched network, restorable into new sandboxes }
+      value: "${{ tasks.snapshot.outputs.values.base_snapshot_id }}"
+    snapshots:
       required: true
-      schema: *network_target_schema
-      value: "${{ tasks.run_local.outputs.values.network_target }}"
+      schema: *snapshot_catalog_schema
+      value: "${{ tasks.snapshot.outputs.values.snapshots }}"
     issues:
       required: true
       schema:
@@ -250,6 +266,15 @@ outputs:
       required: true
       schema: { type: string, description: One paragraph instead of issues when the watch window was healthy, else empty }
       value: "${{ tasks.watch.outputs.values.healthy_window_summary }}"
+    final_snapshot:
+      required: true
+      schema:
+        type: object
+        properties:
+          snapshotted: { type: boolean }
+          snapshot_id: { type: string }
+        required: [snapshotted]
+      value: "${{ tasks.watch.outputs.values.final_snapshot }}"
     watch_feedback:
       required: true
       schema: *feedback_schema

@@ -7,7 +7,7 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when you want to run a Kurtosis ethereum-package config on the LOCAL machine with no panda-compute, or attach to an already-running local enclave. Launches it and returns a local-enclave network_target ready to observe or investigate. Snapshot and restore are not available locally — that is a panda-compute capability.
+  Use when you want to run a Kurtosis ethereum-package config on the LOCAL machine with no panda-compute, or attach to an already-running local enclave. Launches it and returns a local-kind network_target ready to observe or investigate. Snapshot and restore are not available locally — that is a panda-compute capability.
 tags: ["ethereum", "devnet", "kurtosis", "local", "run", "no-compute"]
 examples:
   - "launch this args file in local Kurtosis"
@@ -39,7 +39,7 @@ tasks:
       network_target contract in the runbook that owns debugging an Ethereum
       network.
 
-      Emit the network_target (kind: local-enclave) and the enclave name.
+      Emit the network_target (kind: local) and the enclave name.
     inputs:
       values:
         package_ref:
@@ -58,10 +58,10 @@ tasks:
           schema: &network_target_schema
             type: object
             properties:
-              kind: { type: string, description: local-enclave }
+              kind: { type: string, description: local — owned by the runbook that owns debugging an Ethereum network }
               enclave: { type: string }
               sandbox_id: { type: string }
-              network: { type: string, description: Source hosted network id, when known }
+              network_id: { type: string, description: Source hosted network id, when known }
             required: [kind]
         enclave:
           required: true

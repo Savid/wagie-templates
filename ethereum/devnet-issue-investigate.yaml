@@ -7,12 +7,13 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when one observed Ethereum devnet issue — a fork or network split, a finality stall, a crashing or misbehaving client, missing payloads or blobs — needs a root-cause investigation, on a live hosted network, a local Kurtosis enclave, or a restored snapshot. Reproduces or attaches to the network, adversarially reviews the hypothesis plan before spending compute, runs a scoped hypothesis hunt, traces reachability before blame, adversarially validates the evidence, and emits a cited report plus a structured follow-up queue. Thin orchestration over Panda runbooks and core patterns.
-tags: ["ethereum", "devnet", "root-cause", "investigation", "adversarial", "hosted", "live", "kurtosis"]
+  Use when one observed Ethereum devnet issue — a fork or network split, a finality stall, a crashing or misbehaving client, missing payloads or blobs — needs a root-cause investigation, on a live public (hosted) devnet, a local Kurtosis enclave, or a restored snapshot; given a catalog of epoch snapshots it picks the most useful restore point relative to the failure. Reproduces or attaches to the network, adversarially reviews the hypothesis plan before spending compute, runs a scoped hypothesis hunt, traces reachability before blame, adversarially validates the evidence, and emits a cited report plus a structured follow-up queue. Thin orchestration over Panda runbooks and core patterns.
+tags: ["ethereum", "devnet", "root-cause", "investigation", "adversarial", "hosted", "live", "kurtosis", "snapshot"]
 examples:
   - "root-cause one observed devnet issue"
   - "root-cause yesterday's finality stall from retained evidence"
   - "investigate evidence-only when reproduction fails"
+  - "restore the snapshot nearest before the failure and watch it develop"
   - "trace whether suspected cause reaches the failure"
   - "turn RCA gaps into follow-up tasks"
 inputs:
@@ -89,14 +90,24 @@ inputs:
       schema: &network_target_schema
         type: object
         properties:
-          kind: { type: string, description: local-enclave | compute-enclave | hosted }
+          kind: { type: string, description: local | compute | public — owned by the runbook that owns debugging an Ethereum network }
           enclave: { type: string }
           sandbox_id: { type: string }
-          network: { type: string, description: Hosted network id, when kind is hosted }
+          network_id: { type: string, description: Public network id, when kind is public }
         required: [kind]
     snapshot_id:
       description: Broken-state snapshot to restore when no live target is supplied
       schema: { type: string }
+    snapshots:
+      description: Optional catalog of epoch-aligned snapshots of the same network, ascending; reproduction picks a restore point relative to the issue's first_bad
+      schema: &snapshot_catalog_schema
+        type: array
+        items:
+          type: object
+          properties:
+            epoch: { type: number }
+            snapshot_id: { type: string }
+          required: [epoch, snapshot_id]
     max_investigation_rounds:
       description: Gap-filling rounds for the scoped hypothesis hunt
       schema: { type: number, default: 2 }
@@ -135,14 +146,17 @@ tasks:
     quality-gate: "${{ has(outputs.values.network_target) && has(outputs.values.access_summary) && size(outputs.values.access_summary) > 0 && has(outputs.values.reproduction) }}"
     instructions: |-
       Establish an investigable network, preferring the strongest handle you
-      were given: a supplied network target, else a broken-state snapshot (the
-      snapshot_id input, or the issue's handles), else reproduce from the
-      issue's network handle.
+      were given: a supplied network target, else a snapshot (the snapshot_id
+      input, the snapshots catalog, or the issue's handles), else reproduce
+      from the issue's network handle. When the snapshots catalog offers
+      several restore points, choose per the reproduction rules of the runbook
+      that owns root-causing a devnet issue — it owns picking between the
+      broken state and the latest snapshot before the issue's first_bad.
       Resolve each path's runbook via `panda search runbooks "<need>"`: the
       panda-compute lifecycle for snapshot/restore; running and reaching a
       Kurtosis devnet for local; Kurtosis config synthesis plus hosted devnet
       context intake for a faithful local config; debugging an Ethereum network
-      for hosted-live — it also owns the network_target contract.
+      for public-live — it also owns the network_target contract.
 
       Label the mode honestly with the reproduction status enum of the runbook
       that owns root-causing a devnet issue, and record the recipe that reaches
@@ -166,11 +180,14 @@ tasks:
               kind: { type: string }
               enclave: { type: string }
               sandbox_id: { type: string }
-              network: { type: string }
+              network_id: { type: string }
           value: "${{ inputs.values.?network_target.orValue({}) }}"
         snapshot_id:
           schema: { type: string, description: Broken-state snapshot to restore, when available }
           value: "${{ inputs.values.?snapshot_id.orValue('') }}"
+        snapshots:
+          schema: *snapshot_catalog_schema
+          value: "${{ inputs.values.?snapshots.orValue([]) }}"
     outputs:
       values:
         network_target:
@@ -184,7 +201,7 @@ tasks:
           schema: &reproduction_schema
             type: object
             properties:
-              status: { type: string, description: reproduced | partial | not-reproduced | local-live | hosted-live | historical-only }
+              status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | historical-only }
               recipe: { type: array, items: { type: string } }
             required: [status]
   plan:
