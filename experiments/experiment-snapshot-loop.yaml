@@ -66,7 +66,7 @@ inputs:
       description: Stop after this many consecutive rounds with no accepted improvement. Must be at least 1. Values at or above max_iterations simply mean this early exit never fires before the round cap (the cap then ends the run), which is allowed.
       schema: { type: number, default: 5 }
     plateau_patience:
-      description: Stop after this many consecutive rounds where the metric does not move outside the noise band of the current best. Catches a saturated metric where every round ties. Must be at least 1 (1 = exit after the first in-band round, an aggressive early stop). Values at or above max_iterations mean the plateau exit never fires before the round cap, which is allowed.
+      description: Stop after this many consecutive rounds whose PAIRED gain (candidate against the incumbent re-measured beside it) stays inside the noise band. Catches a saturated metric where every round ties. Must be at least 1 (1 = exit after the first in-band round, an aggressive early stop). Values at or above max_iterations mean the plateau exit never fires before the round cap, which is allowed.
       schema: { type: number, default: 3 }
     noise_epsilon:
       description: Relative tolerance used as both the acceptance threshold and the plateau detector, anchored to the current best so it stays calibrated after large improvements. A round is "no movement" when |new - best| <= noise_epsilon * max(|best|, 1). Default 0 means setup derives it from observed baseline jitter; set an explicit positive value to override.
@@ -909,28 +909,14 @@ tasks:
                   : loop.no_improvement_streak.orValue(0.0) + 1.0 }}
         plateau_streak:
           required: true
-          schema: { type: number, description: Consecutive rounds whose metric stayed within the noise band of the current best }
+          schema: { type: number, description: Consecutive rounds whose paired gain stayed inside the noise band — the metric has stopped responding }
           value: |-
             ${{
               !(tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid)
                 ? loop.plateau_streak.orValue(0.0)
-                : cel.bind(best, loop.best_metric.orValue(inputs.values.baseline_metric),
-                    cel.bind(best_abs, best >= 0.0 ? best : -best,
-                      cel.bind(delta,
-                        tasks.verify_and_measure.outputs.values.candidate_metric >= best
-                          ? tasks.verify_and_measure.outputs.values.candidate_metric - best
-                          : best - tasks.verify_and_measure.outputs.values.candidate_metric,
-                        cel.bind(epsilon_band,
-                          inputs.values.noise_epsilon * (best_abs > 1.0 ? best_abs : 1.0),
-                          delta <= (epsilon_band > tasks.verify_and_measure.outputs.values.candidate_spread
-                            ? epsilon_band
-                            : tasks.verify_and_measure.outputs.values.candidate_spread)
-                            ? loop.plateau_streak.orValue(0.0) + 1.0
-                            : 0.0
-                        )
-                      )
-                    )
-                  )
+                : (outputs.values.gain <= outputs.values.threshold && outputs.values.gain >= -outputs.values.threshold)
+                    ? loop.plateau_streak.orValue(0.0) + 1.0
+                    : 0.0
             }}
         log:
           required: true
