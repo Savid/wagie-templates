@@ -1,0 +1,686 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/experiment-verify
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a metric-tuned candidate branch (e.g. an experiment-loop winner) must be independently accepted before merge or publication. Re-derives the verdict from scratch in a fresh clone: checks the diff stayed inside the declared mutable surface, replicates baseline and candidate measurements to compare beyond run-to-run noise, optionally spends a one-shot holdout to test transfer, red-teams the narrowest supported claim, then returns accept/reject/suspicious with a decision packet. The search metric only nominates; this template decides.
+tags: ["experiment", "verification", "acceptance", "replication", "holdout", "autoresearch", "red-team", "promotion"]
+examples:
+  - "verify an experiment-loop result branch before merging"
+  - "replicate benchmark wins with fresh measurements"
+  - "check the optimizer diff stayed inside the mutable surface"
+  - "spend the holdout once and check the win transfers"
+  - "red-team a performance claim before promotion"
+inputs:
+  values:
+    repo_url:
+      required: true
+      description: Git URL of the repo containing the candidate branch. Worker must have fetch credentials.
+      schema: { type: string }
+    result_branch:
+      required: true
+      description: Branch holding the accumulated kept changes (the candidate under acceptance)
+      schema: { type: string }
+    baseline_commit:
+      required: true
+      description: Git sha of the incumbent state the candidate is measured against (the experiment run's baseline, after any scaffolding)
+      schema: { type: string }
+    best_commit:
+      description: Candidate commit to verify. Empty means the head of result_branch.
+      schema: { type: string, default: "" }
+    goal:
+      required: true
+      description: What the experiment run was optimizing and why
+      schema: { type: string }
+    target_files:
+      required: true
+      description: The declared mutable surface of the run. Every change between baseline and candidate must fall inside this list.
+      schema:
+        type: array
+        items:
+          type: string
+    frozen_files:
+      description: Declared scoring surface from the run — every path the benchmark or correctness gate reads. Empty means undeclared; legality then derives the surface entirely by tracing the scoring commands.
+      schema:
+        type: array
+        default: []
+        items:
+          type: string
+    experiment_command:
+      required: true
+      description: The frozen scoring command from the run (e.g. `pnpm bench:parser --json`)
+      schema: { type: string }
+    metric_name:
+      required: true
+      description: Metric label to extract from experiment output (e.g. `val_bpb`, `ns_per_op_parseJson`)
+      schema: { type: string }
+    metric_direction:
+      description: Whether lower or higher metric values are better
+      schema:
+        type: string
+        default: minimize
+        enum: [minimize, maximize]
+    correctness_command:
+      description: Correctness gate command from the run. Empty disables the gate.
+      schema: { type: string, default: "" }
+    setup_command:
+      description: One-time setup command run after clone (e.g. `pnpm install && pnpm build`). Empty skips setup.
+      schema: { type: string, default: "" }
+    replication_runs:
+      description: Measurements per side (baseline and candidate). More runs shrink the noise band the improvement must clear. Scale up when the candidate emerged from a wide search (many cells or rounds) — selection inflates the winner's displayed score, and more replication is what deflates it honestly.
+      schema: { type: number, default: 5 }
+    holdout_command:
+      description: >-
+        Optional held-out scoring command the optimizer never saw (a different workload, dataset split, or environment) emitting a scalar in the same direction as the primary metric. An isomorphic perturbation of the primary bench — same task, different seeds or instances — makes a strong holdout, since it kills wins memorized against fixed instances. A holdout is a consumable asset — this template runs it exactly once per side and only on candidates that already cleared replication.
+      schema: { type: string, default: "" }
+    trials:
+      description: Typed trial ledger from the run, for context (suspicious rounds sharpen the audit)
+      schema: &trials_schema
+        type: array
+        items:
+          type: object
+          properties:
+            round: { type: number }
+            hypothesis: { type: string }
+            commit: { type: string }
+            snapshot_id: { type: string }
+            status: { type: string, enum: [pass, fail, invalid, suspicious] }
+            metric: { type: number }
+            spread: { type: number }
+            best_after: { type: number }
+            decision_source: { type: string, enum: [auto, agent] }
+            measurement_note: { type: string }
+            interpretation: { type: string }
+            next_action: { type: string }
+          required: [round, hypothesis, status, interpretation]
+        default: []
+tasks:
+  setup:
+    quality-gate: "${{ has(outputs.values.workspace_path) && size(outputs.values.workspace_path) > 0 && has(outputs.values.candidate_commit) && size(outputs.values.candidate_commit) > 0 && has(outputs.values.lineage_ok) }}"
+    instructions: |-
+      Prepare a fresh verification workspace. This template exists to re-derive the run's verdict independently, so start from nothing the optimizer touched: a clean clone, not a reused workspace.
+
+      Step 1 — Clone and resolve.
+      - Clone `repo_url` into the current directory and fetch `result_branch`.
+      - Resolve the candidate: use `best_commit` when non-empty, else the head of `result_branch`. Return the full sha as `candidate_commit`.
+      - Check lineage: `baseline_commit` must exist and be an ancestor of the candidate (`git merge-base --is-ancestor`). Return the result as `lineage_ok`; when false, say what you found in `notes` — the verdict task will treat broken lineage as disqualifying, so do not fail this task over it.
+
+      Step 2 — Setup.
+      - If `setup_command` is non-empty, run it at the candidate commit. Fail the task if it fails.
+
+      Return the absolute clone root as `workspace_path` and any observations in `notes`. Do not delete the workspace.
+
+      Requires a worker with tool-use.
+    inputs:
+      values:
+        repo_url:
+          schema: { type: string }
+          value: "${{ inputs.values.repo_url }}"
+        result_branch:
+          schema: { type: string }
+          value: "${{ inputs.values.result_branch }}"
+        baseline_commit:
+          schema: { type: string }
+          value: "${{ inputs.values.baseline_commit }}"
+        best_commit:
+          schema: { type: string }
+          value: "${{ inputs.values.?best_commit.orValue('') }}"
+        setup_command:
+          schema: { type: string }
+          value: "${{ inputs.values.?setup_command.orValue('') }}"
+    outputs:
+      values:
+        workspace_path:
+          required: true
+          schema:
+            type: string
+            description: Absolute path to the verification clone
+        candidate_commit:
+          required: true
+          schema:
+            type: string
+            description: Resolved full sha of the candidate under verification
+        lineage_ok:
+          required: true
+          schema:
+            type: boolean
+            description: Whether baseline_commit is an ancestor of the candidate
+        notes:
+          required: true
+          schema:
+            type: string
+            description: Setup observations, including any lineage anomaly
+  legality:
+    needs: [setup]
+    quality-gate: "${{ has(outputs.values.legal) && has(outputs.values.changed_files) && has(outputs.values.violations) && has(outputs.values.diff_stat) }}"
+    instructions: |-
+      Audit the candidate diff against the declared mutable surface and the scoring contract. Enumerate, classify, report — do not weigh whether a violation "probably doesn't matter"; that judgment belongs to the verdict task.
+
+      In `workspace_path`, list every path changed between baseline and candidate: `git diff --name-only <baseline_commit>..<candidate_commit>`. Classify each:
+      - in-scope: the path matches `target_files` (exact path or covered by an entry).
+      - `out-of-scope` violation: the path is outside `target_files`.
+      - `scoring` violation: the path is part of the scoring surface. Check the declared `frozen_files` list first, then trace what `experiment_command` and `correctness_command` actually load — the benchmark itself, fixtures or datasets, eval splits, test files backing the correctness gate — as the backstop for undeclared reads. When tracing catches a scoring file that `frozen_files` omitted, say so in the violation detail: an incomplete declaration is itself a finding. A scoring file is a violation even if it somehow appears in `target_files`.
+
+      Then audit the content of the in-scope changes for contamination — an optimizer can beat the scorer without touching it, by embedding it:
+      - `contamination` violation: an in-scope change hardcodes or special-cases scoring inputs — literal benchmark inputs or expected outputs baked into the artifact, branches keyed to fixture values, memorized eval answers, lookup tables covering exactly the bench's cases. Cite the evidence: the file, the embedded value, and the scoring input it mirrors.
+      - Where the trial ledger is non-empty, cross-check kept trials: diff what each hypothesis claims against what its commit actually changes. A hypothesis that says "optimize X" atop a diff that embeds fixture data or alters how measurement happens is contamination evidence — record it on the offending path with the trial round in the detail.
+
+      An optimizer that edited or memorized its own scorer has not improved anything — classify aggressively on the scoring and contamination axes and cite the evidence.
+
+      Return:
+      - `legal`: true iff there are zero violations.
+      - `changed_files`: every changed path.
+      - `violations`: one record per offending path with its kind.
+      - `diff_stat`: the `git diff --stat` output between baseline and candidate.
+
+      Requires a worker with tool-use.
+    inputs:
+      values:
+        workspace_path:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.workspace_path }}"
+        baseline_commit:
+          schema: { type: string }
+          value: "${{ inputs.values.baseline_commit }}"
+        candidate_commit:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.candidate_commit }}"
+        target_files:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.target_files }}"
+        frozen_files:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?frozen_files.orValue([]) }}"
+        experiment_command:
+          schema: { type: string }
+          value: "${{ inputs.values.experiment_command }}"
+        correctness_command:
+          schema: { type: string }
+          value: "${{ inputs.values.?correctness_command.orValue('') }}"
+        trials:
+          schema: *trials_schema
+          value: "${{ inputs.values.?trials.orValue([]) }}"
+    outputs:
+      values:
+        legal:
+          required: true
+          schema:
+            type: boolean
+            description: True iff every changed path is inside the mutable surface and no scoring input was touched or embedded
+        changed_files:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Every path changed between baseline and candidate
+        violations:
+          required: true
+          schema: &violations_schema
+            type: array
+            description: Paths that break the mutable-surface or scoring contract
+            items:
+              type: object
+              properties:
+                file: { type: string }
+                kind: { type: string, enum: [out-of-scope, scoring, contamination] }
+                detail: { type: string }
+              required: [file, kind]
+        diff_stat:
+          required: true
+          schema:
+            type: string
+            description: git diff --stat between baseline and candidate
+  replicate:
+    needs: [setup, legality]
+    quality-gate: "${{ has(outputs.values.skipped) && has(outputs.values.crashed) && has(outputs.values.significant) && has(outputs.values.baseline_median) && has(outputs.values.candidate_median) && has(outputs.values.baseline_samples) && has(outputs.values.candidate_samples) && has(outputs.values.measured_improvement_pct) }}"
+    instructions: |-
+      Re-measure both sides with enough repetition to separate the claimed improvement from run-to-run noise. Verification spend is gated: if `legal` is false, do not measure — return `skipped` true, `crashed` false, both medians 0, empty samples, `significant` false, and 0 improvement. An illegal diff cannot be accepted no matter what it scores.
+
+      Otherwise, in `workspace_path`:
+
+      Step 1 — Correctness gate.
+      - If `correctness_command` is non-empty, check out `candidate_commit` and run it. On non-zero exit, return `crashed` true (with empty stats as above, `skipped` false) — do not measure a broken candidate.
+
+      Step 2 — Interleaved measurement.
+      - Take `replication_runs` measurements per side, alternating sides (baseline, candidate, baseline, candidate, ...) so thermal drift and background load hit both equally. For each measurement: check out the side's commit (detached is fine), run `experiment_command`, extract the scalar labelled `metric_name` — prefer a `name: value` or `name=value` line, else a JSON key, else the last numeric occurrence. If any run fails or the metric cannot be extracted, return `crashed` true.
+      - If the artifact needs a rebuild after checkout for the measurement to be honest (compiled languages, bundlers), rebuild each time sides switch.
+
+      Step 3 — Statistics and the significance rule.
+      - Per side report every sample, the median, and the spread (max sample - min sample).
+      - Direction-correct delta: `baseline_median - candidate_median` when minimizing, `candidate_median - baseline_median` when maximizing.
+      - `significant` is mechanical: true iff the direction-correct delta is strictly greater than the larger of the two spreads. Do not soften or override this rule; if the delta is real but drowning in noise, the honest answer is `significant` false.
+      - `measured_improvement_pct`: direction-correct delta divided by |baseline_median| (use 1 when baseline_median is 0), times 100.
+
+      Requires a worker with tool-use.
+    inputs:
+      values:
+        legal:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.legality.outputs.values.legal }}"
+        workspace_path:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.workspace_path }}"
+        baseline_commit:
+          schema: { type: string }
+          value: "${{ inputs.values.baseline_commit }}"
+        candidate_commit:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.candidate_commit }}"
+        experiment_command:
+          schema: { type: string }
+          value: "${{ inputs.values.experiment_command }}"
+        metric_name:
+          schema: { type: string }
+          value: "${{ inputs.values.metric_name }}"
+        metric_direction:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        correctness_command:
+          schema: { type: string }
+          value: "${{ inputs.values.?correctness_command.orValue('') }}"
+        replication_runs:
+          schema: { type: number }
+          value: "${{ inputs.values.?replication_runs.orValue(5) }}"
+    outputs:
+      values:
+        skipped:
+          required: true
+          schema:
+            type: boolean
+            description: True when measurement was skipped because the diff was illegal
+        crashed:
+          required: true
+          schema:
+            type: boolean
+            description: True when the correctness gate failed or any measurement run failed
+        baseline_median:
+          required: true
+          schema:
+            type: number
+            description: Median metric across baseline replications
+        baseline_samples:
+          required: true
+          schema:
+            type: array
+            items: { type: number }
+            description: Every baseline measurement in run order
+        candidate_median:
+          required: true
+          schema:
+            type: number
+            description: Median metric across candidate replications
+        candidate_samples:
+          required: true
+          schema:
+            type: array
+            items: { type: number }
+            description: Every candidate measurement in run order
+        significant:
+          required: true
+          schema:
+            type: boolean
+            description: True iff the direction-correct median delta exceeds the larger per-side spread
+        measured_improvement_pct:
+          required: true
+          schema:
+            type: number
+            description: Direction-correct improvement of candidate over baseline, in percent
+  holdout:
+    needs: [setup, replicate]
+    quality-gate: "${{ has(outputs.values.ran) && has(outputs.values.transferred) && has(outputs.values.baseline_value) && has(outputs.values.candidate_value) }}"
+    instructions: |-
+      Spend the holdout — once — but only when it is earned. A holdout repeatedly queried for promotion decisions becomes training data and stops being evidence, so the discipline is absolute: at most one run per side, ever, and none at all for candidates that already failed.
+
+      Skip (return `ran` false, both values 0, `transferred` false) when any of these hold:
+      - `holdout_command` is empty
+      - replication was skipped or crashed
+      - the replicated improvement was not significant
+
+      Otherwise, in `workspace_path`:
+      - Check out `baseline_commit`, run `holdout_command` exactly once, extract the scalar (same extraction rules as the primary metric: `name: value` line, else JSON key, else last number). Record as `baseline_value`.
+      - Check out `candidate_commit`, run `holdout_command` exactly once. Record as `candidate_value`.
+      - `transferred`: true iff the candidate beats the baseline on the holdout in the `metric_direction` sense. A tie does not transfer.
+      - Never re-run either side to "double-check" a surprising number — report what the single run said. If a run fails outright, return `ran` true, the failing side's value 0, and `transferred` false — the decision packet will surface the failed transfer.
+
+      Requires a worker with tool-use.
+    inputs:
+      values:
+        holdout_command:
+          schema: { type: string }
+          value: "${{ inputs.values.?holdout_command.orValue('') }}"
+        workspace_path:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.workspace_path }}"
+        baseline_commit:
+          schema: { type: string }
+          value: "${{ inputs.values.baseline_commit }}"
+        candidate_commit:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.candidate_commit }}"
+        metric_direction:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        replication_skipped:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.replicate.outputs.values.skipped }}"
+        replication_crashed:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.replicate.outputs.values.crashed }}"
+        significant:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.replicate.outputs.values.significant }}"
+    outputs:
+      values:
+        ran:
+          required: true
+          schema:
+            type: boolean
+            description: Whether the holdout was actually spent
+        baseline_value:
+          required: true
+          schema:
+            type: number
+            description: Holdout scalar at the baseline (0 when not run)
+        candidate_value:
+          required: true
+          schema:
+            type: number
+            description: Holdout scalar at the candidate (0 when not run)
+        transferred:
+          required: true
+          schema:
+            type: boolean
+            description: Whether the candidate beat the baseline on the holdout (false when not run)
+  claim:
+    needs: [legality, replicate, holdout]
+    quality-gate: "${{ has(outputs.values.claim) && size(outputs.values.claim) > 0 && has(outputs.values.evidence) && size(outputs.values.evidence) > 0 && has(outputs.values.context) && size(outputs.values.context) > 0 }}"
+    instructions: |-
+      Draft the narrowest claim this evidence actually supports — the sentence that would go in a changelog or paper, scoped so tightly that every word is backed by a number you can point to.
+
+      Narrowing rules:
+      - Scope to the measured environment: this benchmark, this workload, this machine class. "Parsing is 12% faster" overclaims; "median ns_per_op on the frozen parser bench dropped 12% (spread-adjusted, N=5 per side)" does not.
+      - If the holdout ran, say what it showed; if it did not run, the claim must not imply generality beyond the primary bench.
+      - If replication was skipped, crashed, or not significant, the honest claim is a negative or null one — state what was ruled out or left unresolved. Do not manufacture a positive claim.
+      - Fold in the trial ledger's texture where it sharpens scope (which mechanism produced the win, what repeatedly failed).
+
+      Return:
+      - `claim`: the single narrowest supported sentence (or two at most).
+      - `evidence`: the numbers behind it — medians, spreads, sample counts, holdout values, legality result — written as compact prose a reviewer can check line by line. Copy every number verbatim from the measurement outputs; a claim whose numbers differ from its artifacts is itself a defect.
+      - `context`: background an adversarial reviewer needs to judge the claim fairly — the goal, what the mutable surface was, how significance is defined here, and any suspicious trials or anomalies worth attacking. Checkable facts only: do not include the optimizer's narrative or your own reasoning for the claim. Reviewers judge the claim against the evidence alone; a claimant's story anchors them on the conclusion.
+    inputs:
+      values:
+        goal:
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        metric_name:
+          schema: { type: string }
+          value: "${{ inputs.values.metric_name }}"
+        metric_direction:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        legal:
+          schema: { type: boolean }
+          value: "${{ tasks.legality.outputs.values.legal }}"
+        violations:
+          schema: *violations_schema
+          value: "${{ tasks.legality.outputs.values.violations }}"
+        replication_skipped:
+          schema: { type: boolean }
+          value: "${{ tasks.replicate.outputs.values.skipped }}"
+        replication_crashed:
+          schema: { type: boolean }
+          value: "${{ tasks.replicate.outputs.values.crashed }}"
+        baseline_median:
+          schema: { type: number }
+          value: "${{ tasks.replicate.outputs.values.baseline_median }}"
+        baseline_samples:
+          schema: { type: array, items: { type: number } }
+          value: "${{ tasks.replicate.outputs.values.baseline_samples }}"
+        candidate_median:
+          schema: { type: number }
+          value: "${{ tasks.replicate.outputs.values.candidate_median }}"
+        candidate_samples:
+          schema: { type: array, items: { type: number } }
+          value: "${{ tasks.replicate.outputs.values.candidate_samples }}"
+        significant:
+          schema: { type: boolean }
+          value: "${{ tasks.replicate.outputs.values.significant }}"
+        measured_improvement_pct:
+          schema: { type: number }
+          value: "${{ tasks.replicate.outputs.values.measured_improvement_pct }}"
+        holdout_ran:
+          schema: { type: boolean }
+          value: "${{ tasks.holdout.outputs.values.ran }}"
+        holdout_baseline:
+          schema: { type: number }
+          value: "${{ tasks.holdout.outputs.values.baseline_value }}"
+        holdout_candidate:
+          schema: { type: number }
+          value: "${{ tasks.holdout.outputs.values.candidate_value }}"
+        transferred:
+          schema: { type: boolean }
+          value: "${{ tasks.holdout.outputs.values.transferred }}"
+        trials:
+          schema: *trials_schema
+          value: "${{ inputs.values.?trials.orValue([]) }}"
+    outputs:
+      values:
+        claim:
+          required: true
+          schema:
+            type: string
+            description: The narrowest claim the evidence supports
+        evidence:
+          required: true
+          schema:
+            type: string
+            description: Compact checkable prose of the numbers behind the claim
+        context:
+          required: true
+          schema:
+            type: string
+            description: Background an adversarial reviewer needs to judge the claim
+  review:
+    needs: [claim]
+    uses: dev.wagie/adversarial-review@1.0.0
+    inputs:
+      values:
+        claim:
+          value: "${{ tasks.claim.outputs.values.claim }}"
+        evidence:
+          value: "${{ tasks.claim.outputs.values.evidence }}"
+        context:
+          value: "${{ tasks.claim.outputs.values.context }}"
+  decide:
+    needs: [setup, legality, replicate, holdout, claim, review]
+    quality-gate: "${{ has(outputs.values.verdict) && (outputs.values.verdict == 'accept' || outputs.values.verdict == 'reject' || outputs.values.verdict == 'suspicious') && has(outputs.values.reasons) && size(outputs.values.reasons) > 0 && has(outputs.values.decision_packet) && size(outputs.values.decision_packet) > 0 }}"
+    instructions: |-
+      Produce the acceptance verdict. The rules are ordered and mechanical — apply the first that fires and record every rule you evaluated in `reasons`. The ordering is deliberate: the cheap deterministic gates (legality, replication, holdout) are the boundary, and the adversarial review supplements them — a reviewer from the same model family as the optimizer shares its blind spots, so review can add suspicion but never substitutes for the mechanical gates. Suspicion is not a hedge between accept and reject; it means the evidence conflicts with itself and a human must look before anyone re-runs or merges.
+
+      1. Any `scoring` or `contamination` violation, or broken lineage (`lineage_ok` false) → `suspicious`. The candidate may have edited or memorized its own scorer, or the history was rewritten.
+      2. Not legal (out-of-scope violations only) → `reject`. Recommend relaunching with a corrected mutable surface.
+      3. Replication crashed → `reject`.
+      4. Not significant (including skipped replication) → `reject`. The improvement did not clear the noise it was measured in.
+      5. Holdout ran and did not transfer → `suspicious`. A bench-only win that dies on held-out work smells like overfitting to the scorer.
+      6. Adversarial verdict `refuted` → `suspicious`. The metrics say win but the narrowest claim did not survive scrutiny; that conflict is exactly what this rule exists to surface.
+      7. Otherwise → `accept`. A `weakened` adversarial verdict does not block acceptance but its strongest counterargument must appear in the packet as a caveat, as must any suspicious trials in the ledger.
+
+      Then render `decision_packet` (markdown) for the human who owns promotion:
+      - **Verdict** — accept/reject/suspicious with the rule that fired, first line of the document.
+      - **Candidate** — repo, result branch, candidate commit, baseline commit, goal.
+      - **Legality** — legal flag, violations table when non-empty, diff stat.
+      - **Replication** — per-side samples, medians, spreads, the significance rule spelled out with the actual numbers, measured improvement percent.
+      - **Holdout** — spent or not, both values and the transfer outcome when spent, why it was skipped when not.
+      - **Claim under review** — the claim, the adversarial verdict, the strongest counterargument, missing evidence named by the reviewers.
+      - **Caveats & next step** — suspicious trials, weakened-review caveats, and complexity vs gain: when the diff stat shows growth disproportionate to the measured improvement (many files or hundreds of lines for a marginal win), say so — complexity inflation is a cost the metric never sees. Close with one concrete recommendation: merge, relaunch with corrected scope, investigate the bench, or escalate.
+
+      `reasons` is the audit trail: one entry per rule evaluated, in order, each stating the rule, the inputs it saw, and whether it fired.
+    inputs:
+      values:
+        goal:
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        repo_url:
+          schema: { type: string }
+          value: "${{ inputs.values.repo_url }}"
+        result_branch:
+          schema: { type: string }
+          value: "${{ inputs.values.result_branch }}"
+        baseline_commit:
+          schema: { type: string }
+          value: "${{ inputs.values.baseline_commit }}"
+        candidate_commit:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.candidate_commit }}"
+        lineage_ok:
+          schema: { type: boolean }
+          value: "${{ tasks.setup.outputs.values.lineage_ok }}"
+        legal:
+          schema: { type: boolean }
+          value: "${{ tasks.legality.outputs.values.legal }}"
+        violations:
+          schema: *violations_schema
+          value: "${{ tasks.legality.outputs.values.violations }}"
+        diff_stat:
+          schema: { type: string }
+          value: "${{ tasks.legality.outputs.values.diff_stat }}"
+        replication_skipped:
+          schema: { type: boolean }
+          value: "${{ tasks.replicate.outputs.values.skipped }}"
+        replication_crashed:
+          schema: { type: boolean }
+          value: "${{ tasks.replicate.outputs.values.crashed }}"
+        baseline_median:
+          schema: { type: number }
+          value: "${{ tasks.replicate.outputs.values.baseline_median }}"
+        baseline_samples:
+          schema: { type: array, items: { type: number } }
+          value: "${{ tasks.replicate.outputs.values.baseline_samples }}"
+        candidate_median:
+          schema: { type: number }
+          value: "${{ tasks.replicate.outputs.values.candidate_median }}"
+        candidate_samples:
+          schema: { type: array, items: { type: number } }
+          value: "${{ tasks.replicate.outputs.values.candidate_samples }}"
+        significant:
+          schema: { type: boolean }
+          value: "${{ tasks.replicate.outputs.values.significant }}"
+        measured_improvement_pct:
+          schema: { type: number }
+          value: "${{ tasks.replicate.outputs.values.measured_improvement_pct }}"
+        holdout_ran:
+          schema: { type: boolean }
+          value: "${{ tasks.holdout.outputs.values.ran }}"
+        holdout_baseline:
+          schema: { type: number }
+          value: "${{ tasks.holdout.outputs.values.baseline_value }}"
+        holdout_candidate:
+          schema: { type: number }
+          value: "${{ tasks.holdout.outputs.values.candidate_value }}"
+        transferred:
+          schema: { type: boolean }
+          value: "${{ tasks.holdout.outputs.values.transferred }}"
+        claim:
+          schema: { type: string }
+          value: "${{ tasks.claim.outputs.values.claim }}"
+        review_verdict:
+          schema: { type: string }
+          value: "${{ tasks.review.outputs.values.verdict }}"
+        strongest_counterargument:
+          schema: { type: string }
+          value: "${{ tasks.review.outputs.values.strongest_counterargument }}"
+        missing_evidence:
+          schema: { type: string }
+          value: "${{ tasks.review.outputs.values.missing_evidence }}"
+        trials:
+          schema: *trials_schema
+          value: "${{ inputs.values.?trials.orValue([]) }}"
+    outputs:
+      values:
+        verdict:
+          required: true
+          schema:
+            type: string
+            enum: [accept, reject, suspicious]
+            description: Acceptance verdict for the candidate
+        reasons:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Ordered audit trail of every acceptance rule evaluated
+        decision_packet:
+          required: true
+          schema:
+            type: string
+            description: Markdown decision packet for the human who owns promotion
+outputs:
+  values:
+    verdict:
+      required: true
+      schema: { type: string, enum: [accept, reject, suspicious] }
+      value: "${{ tasks.decide.outputs.values.verdict }}"
+    reasons:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.decide.outputs.values.reasons }}"
+    decision_packet:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.decide.outputs.values.decision_packet }}"
+    claim:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.claim.outputs.values.claim }}"
+    legal:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.legality.outputs.values.legal }}"
+    violations:
+      required: true
+      schema: *violations_schema
+      value: "${{ tasks.legality.outputs.values.violations }}"
+    significant:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.replicate.outputs.values.significant }}"
+    measured_improvement_pct:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.replicate.outputs.values.measured_improvement_pct }}"
+    baseline_median:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.replicate.outputs.values.baseline_median }}"
+    candidate_median:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.replicate.outputs.values.candidate_median }}"
+    holdout_ran:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.holdout.outputs.values.ran }}"
+    transferred:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.holdout.outputs.values.transferred }}"
+    review_verdict:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.review.outputs.values.verdict }}"
+    strongest_counterargument:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.review.outputs.values.strongest_counterargument }}"
+    candidate_commit:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.setup.outputs.values.candidate_commit }}"

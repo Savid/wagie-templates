@@ -1,0 +1,297 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/experiment-prepare
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when you want to optimize a specific function in a GitHub repo but do not yet have a
+  measurable experiment baked: given a repo, a toolchain-ready base snapshot, and a plain
+  instruction naming the target, an agent clones the repo into an ephemeral sandbox, locates
+  the target, finds or builds a hygienic benchmark plus a golden-output correctness oracle
+  derived from the untouched baseline, verifies the harness resists gaming, snapshots the
+  prepared state, and emits exactly the inputs dev.wagie/experiment-snapshot-loop consumes.
+  It bails cleanly when the target cannot be measured honestly rather than hand off a poisoned
+  harness. Usually chained straight into the snapshot loop and report.
+tags: ["experiment", "harness", "benchmark", "prepare", "golang", "repo", "optimization", "snapshot", "autoresearch", "golden-output", "scoring-surface"]
+examples:
+  - "set up an optimization experiment from a github repo and a target function"
+  - "build a benchmark and correctness gate for someFunc then bake a snapshot"
+  - "turn 'optimize parseHeader in internal/parser' into a runnable experiment"
+  - "prepare the scoring surface for a snapshot-loop run from a repo"
+  - "clone a repo, find or write a bench for one function, snapshot it ready to optimize"
+inputs:
+  values:
+    gh_repo:
+      required: true
+      description: "GitHub repository to optimize, as `org/repo` or a clone URL. Must be reachable from inside the sandbox; private repos require credentials already present in the base snapshot (gh auth, git credential helper, or a deploy key)."
+      schema: { type: string }
+    base_snapshot_id:
+      required: true
+      description: Panda-compute snapshot of a toolchain-ready base (the language toolchain, git, and the panda-relevant CLIs installed) that the repo will be cloned into. The prepared snapshot is derived from this; the base itself is never mutated.
+      schema: { type: string }
+    target:
+      required: true
+      description: "Plain-language instruction naming what to optimize, precise enough to resolve to one symbol — e.g. `optimize the Go function parseHeader in internal/parser/header.go` or `speed up JSONEncoder.encode in pkg/codec`."
+      schema: { type: string }
+    ref:
+      description: Branch, tag, or commit SHA to check out. Empty uses the repository's default branch.
+      schema: { type: string, default: "" }
+    metric_direction:
+      description: Whether lower or higher metric values are better for this target. The agent still names the concrete metric; this only fixes its direction.
+      schema: { type: string, default: minimize, enum: [minimize, maximize] }
+    harness_hints:
+      description: "Optional caller-supplied guidance on how to measure this target trustworthily — measurement gotchas the agent would otherwise have to discover: mockable seams to stub instead of real I/O (e.g. an interface with an existing test double), what a realistic corpus/input size looks like, tolerances a correct optimization may legitimately shift (e.g. float reassociation), or where to place the build/setup relative to the timed region. Guidance only, not instructions: the agent still owns the hygiene checklist and verification, and must discover anything not supplied here. Empty means discover everything."
+      schema: { type: string, default: "" }
+    compute_commands:
+      description: Optional pre-verified panda-compute CLI cheatsheet (typically forwarded from a prior run). When supplied the agent spot-checks one pattern and adopts it instead of rediscovering the CLI; the verified cheatsheet is echoed on output for the downstream loop to reuse. Leave empty to derive fresh from the runbook.
+      schema: { type: string, default: "" }
+    sandbox_ttl:
+      description: Lease for the ephemeral preparation sandbox. Must cover clone, dependency fetch, harness authoring, and verification.
+      schema: { type: string, default: 2h }
+    prepared_snapshot_ttl:
+      description: TTL for the prepared snapshot handed to the loop. Only needs to outlive the downstream run's setup, which boots and re-measures it; the loop re-pins its own durable result at finalize.
+      schema: { type: string, default: 24h }
+tasks:
+  prepare:
+    quality-gate: "${{ has(outputs.values.prepared) && has(outputs.values.harness_report) && size(outputs.values.harness_report) > 0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && (outputs.values.prepared == false || (has(outputs.values.prepared_snapshot_id) && size(outputs.values.prepared_snapshot_id) > 0 && has(outputs.values.goal) && size(outputs.values.goal) > 0 && has(outputs.values.workdir) && size(outputs.values.workdir) > 0 && has(outputs.values.target_files) && size(outputs.values.target_files) > 0 && has(outputs.values.frozen_files) && size(outputs.values.frozen_files) > 0 && has(outputs.values.experiment_command) && size(outputs.values.experiment_command) > 0 && has(outputs.values.correctness_command) && size(outputs.values.correctness_command) > 0 && has(outputs.values.metric_name) && size(outputs.values.metric_name) > 0 && has(outputs.values.metric_direction) && size(outputs.values.metric_direction) > 0)) }}"
+    instructions: |-
+      Turn a repository and a plain-language target into a snapshot with a
+      trustworthy, hard-to-game scoring surface, and emit exactly the inputs
+      the optimization loop consumes. You are building the frozen scoring
+      surface an untrusted optimizer will later be measured against, so the
+      harness's integrity is the whole job: a bench that can be gamed, or a
+      correctness gate that does not truly pin behavior, silently corrupts
+      every downstream round. When you cannot establish a trustworthy harness,
+      stop and return `prepared` false with the concrete blocker in
+      `harness_report` — never hand off a harness you do not trust. All
+      sandbox operations use the verified command patterns in
+      `compute_commands`; fall back to the runbook that owns the panda-compute
+      sandbox lifecycle (find it via
+      `panda search runbooks "compute sandbox snapshot lifecycle"`) only if a
+      pattern fails. If `provided_compute_commands` is non-empty, adopt it
+      after spot-checking one cheap read-only pattern rather than rediscovering
+      the CLI; echo the verified cheatsheet on `compute_commands`.
+
+      Step 1 — Boot and clone. Create a sandbox from `base_snapshot_id` with
+      `sandbox_ttl` (recognisable name, deterministic idempotency key so a
+      retry reclaims an orphan). Clone `gh_repo` at `ref` (default branch when
+      empty) into a fresh workdir under the guest (e.g. /root/<repo>). Fetch
+      dependencies with the toolchain's standard command and get the project
+      to a green build. If the repo cannot be cloned or built, bail:
+      `prepared` false, the reason in `harness_report`.
+
+      Step 2 — Resolve the target to exactly one symbol. From `target`,
+      identify the language, the concrete file, and the concrete function or
+      method. Resolve unambiguously: if the name matches several symbols, or
+      none, or the file does not contain it, bail with the specific ambiguity
+      rather than guessing — optimizing the wrong symbol wastes the whole run.
+      The implementation file(s) holding the target become `target_files`
+      (workdir-relative, kept as tight as possible).
+
+      `harness_hints`, when non-empty, is caller-supplied guidance on how to
+      measure this target trustworthily — treat it as a head start on Steps 3–6
+      (mockable seams to stub, realistic input sizes, tolerances a correct
+      change may shift, where to place setup relative to the timed region), not
+      as instructions that replace them. You still own the full hygiene
+      checklist and every verification guard, and must discover anything the
+      hints do not cover; a hint that conflicts with what you observe in the
+      code loses to the code.
+
+      Step 3 — Establish the metric (find or build the benchmark). Prefer an
+      existing benchmark that already exercises the target in isolation
+      (language-native, e.g. a Go `Benchmark*`); use it only if it isolates
+      the target and reports a stable per-operation figure. Otherwise write
+      one, meeting every hygiene rule — these are what make "faster" mean
+      something:
+      - seeded, varied inputs representative of real use, generated
+        deterministically; a warmup before timing;
+      - CONSUME the result (checksum/accumulate and surface it) so the
+        compiler or runtime cannot optimize the measured work away — Go
+        dead-code elimination and Python constant-folding will otherwise make
+        a "speedup" free and meaningless;
+      - internal repetition with a median (or trimmed mean) over several
+        sub-runs; enough total work that the figure sits well above the
+        clock's resolution floor;
+      - deterministic and free of I/O, network, and wall-clock dependence;
+      - reads nothing from `target_files` except by calling the target through
+        its normal interface.
+      Emit a single final `metric_name: <number>` line the loop can parse.
+      Choose a `metric_name` fitting the target (e.g. ns_per_op, ms_per_call,
+      bytes_per_op) and keep `metric_direction` as given.
+
+      Step 4 — Establish the correctness oracle from baseline behavior. Do NOT
+      rely on the agent's own hand-written assertions or on whatever coverage
+      the repo happens to have. While the target is still the untouched
+      original, capture a golden output table: run the original target over a
+      large, seeded, varied input set (overlapping the real call shape but not
+      identical to the bench inputs) and record its outputs (exactly, or
+      within a declared numeric tolerance for floating point). Freeze that
+      table. The `correctness_command` asserts a candidate reproduces the
+      golden outputs and exits non-zero on any divergence. This makes
+      "no change in observable behavior" mechanically enforced against what
+      the code actually did, not against a test the optimizer could satisfy
+      vacuously. Augment, do not replace, the repo's existing tests.
+
+      Step 5 — Partition frozen vs target. `frozen_files` is everything that
+      defines or feeds the score: the benchmark, the correctness harness and
+      its golden table, dependency manifests and lockfiles (so a candidate
+      cannot "win" by swapping a dependency), and any fixtures or testdata the
+      scoring reads. `target_files` is only the implementation the optimizer
+      may edit. The invariant: anything `experiment_command` or
+      `correctness_command` reads as input is frozen and never appears in
+      `target_files`.
+
+      Step 6 — Verify the harness before trusting it. All four must hold; if
+      any fails, bail (`prepared` false, which check failed in
+      `harness_report`):
+      - baseline measures: `experiment_command` from the workdir emits a
+        clean, parseable metric, stable across a few back-to-back runs and
+        well above the timer floor;
+      - baseline is correct: `correctness_command` exits zero on the untouched
+        code;
+      - no-op guard: a semantically neutral edit to a target file (whitespace,
+        reordering independent statements) does NOT materially move the metric
+        — if it does, the bench is measuring noise, not the target;
+      - tamper guard: replacing the target body with a trivially wrong
+        constant MUST make `correctness_command` fail — proving the oracle
+        actually pins behavior and is not vacuous.
+      Revert every probe edit so the sandbox is left in the clean baseline
+      state; the snapshot must capture the original code, not your probes.
+
+      Step 7 — Snapshot and emit. Snapshot the clean prepared sandbox with
+      `prepared_snapshot_ttl` (deterministic key and a byte-identical note
+      across retries; on an idempotency-key conflict the snapshot already
+      exists — resolve its id by key and reuse it; if the server rejects the
+      requested TTL use the longest it accepts). Resolve the concrete id as
+      `prepared_snapshot_id`, then fire-and-forget delete the sandbox. Compose
+      `goal` for the downstream proposer: what to optimize and the guarantee
+      that the frozen test pins correctness while the frozen bench times the
+      target. Return every loop input (`prepared_snapshot_id`, `goal`,
+      `workdir`, `target_files`, `frozen_files`, `experiment_command`,
+      `correctness_command`, `metric_name`, `metric_direction`), the forwarded
+      `compute_commands`, `prepared` true, and a `harness_report` recording
+      what you found or built, the hygiene choices, and all four verification
+      results.
+
+      Requires a worker with shell access to the panda CLI, compute datasource
+      credentials, and the ability to reach and clone the repository.
+    inputs:
+      values:
+        gh_repo:
+          schema: { type: string }
+          value: "${{ inputs.values.gh_repo }}"
+        base_snapshot_id:
+          schema: { type: string }
+          value: "${{ inputs.values.base_snapshot_id }}"
+        target:
+          schema: { type: string }
+          value: "${{ inputs.values.target }}"
+        ref:
+          schema: { type: string }
+          value: "${{ inputs.values.?ref.orValue('') }}"
+        metric_direction:
+          schema: { type: string, enum: [minimize, maximize] }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        harness_hints:
+          schema: { type: string, description: Caller-supplied measurement guidance (empty means discover everything) }
+          value: "${{ inputs.values.?harness_hints.orValue('') }}"
+        provided_compute_commands:
+          schema: { type: string, description: Pre-verified cheatsheet from a previous run (empty means discover fresh) }
+          value: "${{ inputs.values.?compute_commands.orValue('') }}"
+        sandbox_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('2h') }}"
+        prepared_snapshot_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?prepared_snapshot_ttl.orValue('24h') }}"
+    outputs:
+      values:
+        prepared:
+          required: true
+          schema: { type: boolean, description: Whether a trustworthy harness was produced; false means the agent bailed and harness_report holds the blocker }
+        prepared_snapshot_id:
+          required: true
+          schema: { type: string, description: Snapshot of the repo with the harness baked in, ready for the loop (empty when prepared is false) }
+        goal:
+          required: true
+          schema: { type: string, description: Optimization goal for the downstream proposer }
+        workdir:
+          required: true
+          schema: { type: string, description: Absolute in-guest path to the repo root }
+        target_files:
+          required: true
+          schema: { type: array, minItems: 1, items: { type: string }, description: Workdir-relative implementation files the optimizer may edit }
+        frozen_files:
+          required: true
+          schema: { type: array, items: { type: string }, description: Workdir-relative scoring surface (benchmark, correctness harness + golden table, dependency manifests, fixtures) }
+        experiment_command:
+          required: true
+          schema: { type: string, description: In-guest command run from workdir that emits the metric_name scalar }
+        correctness_command:
+          required: true
+          schema: { type: string, description: In-guest command that exits non-zero when a candidate diverges from the golden outputs }
+        metric_name:
+          required: true
+          schema: { type: string, description: Label of the scalar being optimized }
+        metric_direction:
+          required: true
+          schema: { type: string, enum: [minimize, maximize], description: Whether lower or higher is better (echoed from input) }
+        compute_commands:
+          required: true
+          schema: { type: string, description: Verified panda-compute CLI cheatsheet for the downstream loop to reuse verbatim }
+        harness_report:
+          required: true
+          schema: { type: string, description: Markdown record of what was found or built, hygiene choices, and the four verification results (or the bail reason) }
+outputs:
+  values:
+    prepared:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.prepare.outputs.values.prepared }}"
+    prepared_snapshot_id:
+      required: true
+      schema: { type: string, description: "Snapshot with the repo and harness baked, ready for dev.wagie/experiment-snapshot-loop" }
+      value: "${{ tasks.prepare.outputs.values.prepared_snapshot_id }}"
+    goal:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.goal }}"
+    workdir:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.workdir }}"
+    target_files:
+      required: true
+      schema: { type: array, minItems: 1, items: { type: string } }
+      value: "${{ tasks.prepare.outputs.values.target_files }}"
+    frozen_files:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.prepare.outputs.values.frozen_files }}"
+    experiment_command:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.experiment_command }}"
+    correctness_command:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.correctness_command }}"
+    metric_name:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.metric_name }}"
+    metric_direction:
+      required: true
+      schema: { type: string, enum: [minimize, maximize] }
+      value: "${{ tasks.prepare.outputs.values.metric_direction }}"
+    compute_commands:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.compute_commands }}"
+    harness_report:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.harness_report }}"

@@ -1,0 +1,1048 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/experiment-snapshot-loop
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when the experiment environment is already baked into a panda-compute snapshot and a
+  scalar metric must be improved through snapshot lineage instead of git: each round boots an
+  ephemeral sandbox from the best snapshot, applies one change to declared target files,
+  digest-checks the frozen scoring surface, snapshots the candidate, measures, and either
+  promotes the snapshot or lets it expire — no clone, no in-place revert, no sticky worker.
+  Entry is a snapshot id plus in-guest paths and commands; returns a durably pinned result
+  snapshot and a typed trial ledger.
+tags: ["experiment", "optimization", "hillclimb", "snapshot", "panda-compute", "sandbox", "metric", "autoresearch", "keep-or-discard", "lineage", "ephemeral"]
+examples:
+  - "optimize a script already set up in a compute snapshot"
+  - "hillclimb a metric using sandbox snapshots instead of git"
+  - "boot each trial from the best snapshot and keep or discard it"
+  - "tune code in a prebaked sandbox and pin the winning snapshot"
+  - "measure candidates in ephemeral sandboxes from snapshot lineage"
+inputs:
+  values:
+    snapshot_id:
+      required: true
+      description: Panda-compute snapshot with the experiment environment fully pre-installed (code, dependencies, data). This snapshot is the baseline state; the loop never mutates it.
+      schema: { type: string }
+    goal:
+      required: true
+      description: What to optimize and why. Passed to the proposer each round.
+      schema: { type: string }
+    workdir:
+      required: true
+      description: Absolute in-guest path to the experiment root inside the snapshot. All target and frozen paths are relative to it.
+      schema: { type: string }
+    target_files:
+      required: true
+      description: Workdir-relative files the proposer may modify. Keep tight; never include a file the scoring commands read as input.
+      schema: { type: array, minItems: 1, items: { type: string } }
+    frozen_files:
+      description: Workdir-relative scoring surface (benchmark scripts, fixtures, eval splits, test files) that must remain byte-identical all run. A directory freezes its subtree. Empty disables the integrity gate — only safe when the scoring command lives outside the guest.
+      schema: { type: array, default: [], items: { type: string } }
+    experiment_command:
+      required: true
+      description: "In-guest command run from workdir that emits the scalar metric (prefer a final `metric_name: <number>` line)."
+      schema: { type: string }
+    correctness_command:
+      description: Optional in-guest gate command run from workdir; non-zero exit marks the candidate invalid and skips measurement. Empty disables the gate.
+      schema: { type: string, default: "" }
+    metric_name:
+      required: true
+      description: Label of the scalar being optimized (e.g. ns_per_op, val_loss, size_bytes).
+      schema: { type: string }
+    metric_direction:
+      description: Whether lower or higher metric values are better.
+      schema: { type: string, default: minimize, enum: [minimize, maximize] }
+    max_iterations:
+      description: Hard cap on rounds.
+      schema: { type: number, default: 20 }
+    patience:
+      description: Stop after this many consecutive rounds with no accepted improvement. Must be at least 1. Values at or above max_iterations simply mean this early exit never fires before the round cap (the cap then ends the run), which is allowed.
+      schema: { type: number, default: 5 }
+    plateau_patience:
+      description: Stop after this many consecutive rounds where the metric does not move outside the noise band of the current best. Catches a saturated metric where every round ties. Must be at least 1 (1 = exit after the first in-band round, an aggressive early stop). Values at or above max_iterations mean the plateau exit never fires before the round cap, which is allowed.
+      schema: { type: number, default: 3 }
+    noise_epsilon:
+      description: Relative tolerance used as both the acceptance threshold and the plateau detector, anchored to the current best so it stays calibrated after large improvements. A round is "no movement" when |new - best| <= noise_epsilon * max(|best|, 1). Default 0 means setup derives it from observed baseline jitter; set an explicit positive value to override.
+      schema: { type: number, default: 0 }
+    measurement_runs:
+      description: Measurements per candidate; the median is scored and the max-min spread joins the acceptance threshold. Default 0 means setup derives it from observed baseline jitter.
+      schema: { type: number, default: 0 }
+    anomaly_gain_fraction:
+      description: Fraction of the current best beyond which a single-round gain is treated as out-of-family and routed to agent review instead of being mechanically kept (0.9 means any round claiming more than 90% of the remaining metric gets reviewed). Clear sub-threshold rounds are decided by pure arithmetic without an agent.
+      schema: { type: number, default: 0.9 }
+    metric_limit:
+      description: Theoretical best value the metric can reach in the goal direction (0 for a runtime or size, 100 for a percentage). When set, the loop exits as soon as the current best is within the noise band of this limit — from that point no candidate can clear the acceptance threshold, so further rounds are provably wasted. Leave unset to disable.
+      schema: { type: number }
+    simplicity_tiebreak:
+      description: Whether near-tie candidates (within the noise threshold of best) are escalated to agent review for the simplicity tiebreak (a meaningfully simpler change at no metric cost is kept). Set false to skip those reviews — in-band candidates then discard mechanically (the incumbent wins) and the agent gate is reserved for anomalies only.
+      schema: { type: boolean, default: true }
+    sandbox_ttl:
+      description: Lease for each ephemeral sandbox (setup, one per round, finalize). Must comfortably cover one round's apply + snapshot + measurements; a kept round's sandbox is reused by the next round when its remaining lease allows, so generous values save boot time.
+      schema: { type: string, default: 1h }
+    candidate_snapshot_ttl:
+      description: TTL for per-round candidate snapshots. Discarded candidates expire on their own; the surviving best is re-pinned durably at finalize, so this only needs to exceed the worst-case remaining run duration.
+      schema: { type: string, default: 24h }
+    compute_commands:
+      description: Optional pre-verified panda-compute CLI cheatsheet, typically the compute_commands output of a previous run's setup. When supplied, setup spot-checks one pattern and adopts it instead of rediscovering the whole CLI surface, cutting setup time substantially; leave empty to derive it fresh.
+      schema: { type: string, default: "" }
+tasks:
+  setup:
+    quality-gate: "${{ has(outputs.values.baseline_metric) && has(outputs.values.frozen_manifest) && has(outputs.values.frozen_digest) && size(outputs.values.frozen_digest) > 0 && has(outputs.values.effective_noise_epsilon) && outputs.values.effective_noise_epsilon >= 0.0 && has(outputs.values.effective_measurement_runs) && outputs.values.effective_measurement_runs >= 1.0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && has(outputs.values.environment_summary) && size(outputs.values.environment_summary) > 0 }}"
+    instructions: |-
+      Establish the baseline the loop will optimize against. The input snapshot IS
+      the baseline state — you verify it, measure it, and fingerprint its scoring
+      surface, but you never change it. All sandbox operations follow the runbook
+      that owns the panda-compute sandbox lifecycle (find it via
+      `panda search runbooks "compute sandbox snapshot lifecycle"`): capability
+      check, async operation polling, exec limits (launch anything that may
+      outlast the exec timeout detached and poll), TTL safety, teardown.
+
+      Step 0 — Validate knobs. Reject only genuinely broken values: fail with
+      a clear error if `max_iterations` < 1, `patience` < 1, or
+      `plateau_patience` < 1. Do NOT reject a `patience` or `plateau_patience`
+      at or above `max_iterations` — that just means the corresponding early
+      exit never fires before the round cap, which is a valid (cap-bounded)
+      configuration. `plateau_patience` of 1 is a valid aggressive early stop.
+
+      Retry safety: give every sandbox you create a recognisable name and use
+      deterministic idempotency keys, so a retried attempt can find and delete
+      an orphan from a prior attempt instead of leaking it (orphans also expire
+      on their TTL).
+
+      Step 1 — Boot early, overlap the wait. Fire the sandbox create from
+      `snapshot_id` with `sandbox_ttl` as early as possible (verify just the
+      create pattern first), then spend the provisioning wait doing the
+      remaining CLI verification for Step 4 instead of polling idle; only
+      then poll the operation to ready. Once up, confirm `workdir` exists and
+      every entry in `target_files` and `frozen_files` resolves under it —
+      fail listing what is missing rather than silently proceeding — and fold
+      this check into the same guest exec that builds the Step 2 manifest:
+      one round-trip, not two.
+
+      Step 2 — Frozen manifest. Build a deterministic manifest of `frozen_files`
+      in-guest: recurse directories, sort bytewise by workdir-relative path, and
+      record per entry the relative path, entry type, executable mode, and file
+      SHA-256 or symlink target. Return it as `frozen_manifest` and the SHA-256 of
+      its UTF-8 bytes as `frozen_digest` (`sha256:<hex>`). An empty `frozen_files`
+      yields the digest of the empty manifest — the gate then never fires.
+      Prefer a single shell pipeline in one exec (find + sort + sha256sum
+      style) over shipping script files into the guest; fall back to a script
+      only when the pipeline cannot express the rules.
+
+      Step 3 — Baseline and noise calibration. From `workdir` run
+      `experiment_command` three times — batch all three into a single exec
+      call when the expected duration fits the exec limit, otherwise launch
+      detached and poll — and extract the scalar labelled
+      `metric_name` (prefer a `name: value` or `name=value` line, else a JSON key,
+      else the last numeric occurrence). Median is `baseline_metric`. Then:
+      - `effective_noise_epsilon`: the caller's value when > 0; otherwise the
+        observed relative jitter `(max - min) / max(|median|, 1)` padded slightly
+        upward. 0 only when the three runs agree exactly.
+      - `effective_measurement_runs`: the caller's value when > 0; otherwise 1
+        when the command aggregates internally and jitter is small relative to
+        plausible gains, else 3.
+      - Sanity-check: reject a baseline of 0/NaN/infinity for a minimize metric,
+        a value at the timer's resolution floor, or >30% disagreement across the
+        three runs — say what is wrong instead of returning a junk baseline.
+
+      Step 4 — Command cheatsheet. Fast path: if `provided_compute_commands`
+      is non-empty it is a cheatsheet a previous run already verified — adopt
+      it after spot-checking one cheap read-only pattern (e.g. the status or
+      list command), fix anything stale, and skip rediscovering the rest; do
+      not re-run the full help sweep. Otherwise distill the verified CLI
+      surface into `compute_commands`: one ready-to-use line each for create-from-snapshot
+      (with TTL), operation polling to a terminal state, exec (with timeout,
+      plus the detached-launch-and-poll pattern for commands that may outlast
+      the exec limit), snapshot (with ttl, note, and idempotency key), sandbox
+      status/expiry check, a lease renew/extend pattern if the CLI supports
+      one (state plainly if it does not), and sandbox delete — noting that
+      teardown deletes in this run are fire-and-forget: issue them and move
+      on without polling, since TTLs bound any leak. Use placeholders like
+      <snapshot_id> and <sandbox_id>. Open the cheatsheet with two
+      environment facts so loop tasks never re-derive them: the CLI is
+      installed, on PATH, and authenticated (do not probe for it), and every
+      CLI call is a remote round trip — batch shell work into as few exec
+      calls as practical, keeping anything that could outlast the exec
+      timeout on the detached pattern.
+      Every pattern must be one you actually ran successfully in this task (or
+      verified against its --help); loop tasks use these verbatim instead of
+      re-reading the runbook every round, so include any gotchas you hit as
+      one-line notes (e.g. flags the server rejects).
+
+      Step 5 — Teardown. Issue the delete for the setup sandbox and do not
+      wait for the operation to complete (fire-and-forget; the TTL bounds any
+      leak). Its measurement side effects must not leak into the run, and
+      rounds boot from snapshots anyway. Return `environment_summary`: one short note on the verified
+      environment and measurement quality (e.g. "3 runs, median 412ms, jitter
+      ±0.5%, epsilon 0.008, 1 measurement/round").
+
+      Requires a worker with shell access to the panda CLI and compute
+      datasource credentials.
+    inputs:
+      values:
+        snapshot_id:
+          schema: { type: string }
+          value: "${{ inputs.values.snapshot_id }}"
+        workdir:
+          schema: { type: string }
+          value: "${{ inputs.values.workdir }}"
+        target_files:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.target_files }}"
+        frozen_files:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?frozen_files.orValue([]) }}"
+        experiment_command:
+          schema: { type: string }
+          value: "${{ inputs.values.experiment_command }}"
+        metric_name:
+          schema: { type: string }
+          value: "${{ inputs.values.metric_name }}"
+        metric_direction:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        noise_epsilon:
+          schema: { type: number }
+          value: "${{ inputs.values.?noise_epsilon.orValue(0) }}"
+        measurement_runs:
+          schema: { type: number }
+          value: "${{ inputs.values.?measurement_runs.orValue(0) }}"
+        max_iterations:
+          schema: { type: number }
+          value: "${{ inputs.values.?max_iterations.orValue(20) }}"
+        patience:
+          schema: { type: number }
+          value: "${{ inputs.values.?patience.orValue(5) }}"
+        plateau_patience:
+          schema: { type: number }
+          value: "${{ inputs.values.?plateau_patience.orValue(3) }}"
+        sandbox_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('1h') }}"
+        provided_compute_commands:
+          schema: { type: string, description: Pre-verified cheatsheet from a previous run (empty means discover fresh) }
+          value: "${{ inputs.values.?compute_commands.orValue('') }}"
+    outputs:
+      values:
+        baseline_metric:
+          required: true
+          schema: { type: number, description: Median metric of the untouched baseline snapshot }
+        frozen_manifest:
+          required: true
+          schema: { type: string, description: Canonical sorted manifest of the frozen scoring surface }
+        frozen_digest:
+          required: true
+          schema: { type: string, description: SHA-256 digest of frozen_manifest }
+        effective_noise_epsilon:
+          required: true
+          schema: { type: number, description: Relative noise tolerance the loop runs under (caller override or derived from baseline jitter) }
+        effective_measurement_runs:
+          required: true
+          schema: { type: number, description: Measurements per candidate (caller override or derived from baseline jitter) }
+        compute_commands:
+          required: true
+          schema: { type: string, description: Verified panda-compute CLI command patterns (create, poll, exec, snapshot, delete) for loop tasks to use verbatim }
+        environment_summary:
+          required: true
+          schema: { type: string, description: Short note on the verified environment and measurement quality }
+  iterate:
+    needs: [setup]
+    inputs:
+      values:
+        goal:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        snapshot_id:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.snapshot_id }}"
+        workdir:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.workdir }}"
+        target_files:
+          required: true
+          schema: { type: array, minItems: 1, items: { type: string } }
+          value: "${{ inputs.values.target_files }}"
+        frozen_files:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?frozen_files.orValue([]) }}"
+        experiment_command:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.experiment_command }}"
+        correctness_command:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?correctness_command.orValue('') }}"
+        metric_name:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.metric_name }}"
+        metric_direction:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        frozen_manifest:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.frozen_manifest }}"
+        frozen_digest:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.frozen_digest }}"
+        baseline_metric:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.setup.outputs.values.baseline_metric }}"
+        compute_commands:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.compute_commands }}"
+        max_iterations:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?max_iterations.orValue(20) }}"
+        patience:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?patience.orValue(5) }}"
+        plateau_patience:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?plateau_patience.orValue(3) }}"
+        noise_epsilon:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.setup.outputs.values.effective_noise_epsilon }}"
+        anomaly_gain_fraction:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?anomaly_gain_fraction.orValue(0.9) }}"
+        metric_limit_set:
+          required: true
+          schema: { type: boolean }
+          value: "${{ has(inputs.values.metric_limit) }}"
+        metric_limit:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?metric_limit.orValue(0.0) }}"
+        simplicity_tiebreak:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?simplicity_tiebreak.orValue(true) }}"
+        measurement_runs:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.setup.outputs.values.effective_measurement_runs }}"
+        sandbox_ttl:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('1h') }}"
+        candidate_snapshot_ttl:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?candidate_snapshot_ttl.orValue('24h') }}"
+    loop:
+      max: "${{ inputs.values.?max_iterations.orValue(20) }}"
+      until: "${{ outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5) || outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3) || (inputs.values.metric_limit_set && (inputs.values.metric_direction == 'minimize' ? outputs.values.best_metric - inputs.values.metric_limit : inputs.values.metric_limit - outputs.values.best_metric) <= inputs.values.noise_epsilon * ((outputs.values.best_metric >= 0.0 ? outputs.values.best_metric : -outputs.values.best_metric) > 1.0 ? (outputs.values.best_metric >= 0.0 ? outputs.values.best_metric : -outputs.values.best_metric) : 1.0)) }}"
+      onMaxExhausted: continue
+    tasks:
+      propose:
+        quality-gate: "${{ has(outputs.values.sandbox_id) && size(outputs.values.sandbox_id) > 0 && has(outputs.values.change) && size(outputs.values.change) > 0 }}"
+        instructions: |-
+          Obtain this round's sandbox at the current best state, then propose
+          and apply ONE change likely to improve `metric_name` toward
+          `metric_direction` given the `goal`. You propose and apply only — a
+          separate task measures. NEVER run `experiment_command` or any other
+          benchmark of your change, and do not report or estimate any metric;
+          a quick correctness smoke check is allowed when it is cheap, but the
+          measurement channel is not yours.
+
+          Housekeeping first: if `stale_sandbox_id` is non-empty it is the
+          previous round's discarded sandbox — issue a delete for it
+          fire-and-forget (do not poll; ignore errors, it may already be gone).
+
+          Sandbox: if `reusable_sandbox_id` is non-empty it is the previous
+          kept round's still-running sandbox, whose disk state equals
+          `best_snapshot` plus benign measurement artifacts (the snapshot
+          remains the authoritative lineage). Prefer reusing it over booting:
+          confirm it responds to a trivial exec and that its remaining lease
+          comfortably covers this round (renew the lease if `compute_commands`
+          has a renew pattern; if expiry is near and renewal is unsupported,
+          fall back to a fresh boot). Otherwise create a sandbox from
+          `best_snapshot` with `sandbox_ttl`, named exactly `round-<NNNN>`
+          where <NNNN> is the round number (ledger line count plus one)
+          zero-padded to four digits — e.g. `round-0007` — so a retried
+          attempt can spot and delete an orphan from a prior attempt before
+          creating a new one; a reused sandbox keeps its original name. Use
+          the verified command patterns in `compute_commands` verbatim — do
+          not rediscover the CLI. Fall back to the runbook that owns the
+          panda-compute sandbox lifecycle (find it via
+          `panda search runbooks "compute sandbox snapshot lifecycle"`) only
+          if a pattern fails. The previous rounds' state is entirely inside
+          the snapshot (or the reused sandbox); nothing carries over any
+          other way.
+
+          Apply: work in `workdir` inside the guest (drive it with sandbox exec,
+          or ssh when editing interactively is easier). Edit ONLY files listed in
+          `target_files`. Every entry in `frozen_files` must remain byte-identical
+          — never edit, delete, rename, chmod, replace, or add entries beneath
+          those paths; a separate task digest-checks them before any snapshot or
+          measurement. Keep the candidate small and scoped: one hypothesis you can
+          state in two or three sentences, implemented exactly and only — no
+          opportunistic refactors, nothing beyond the change under test.
+
+          Use `log` (the ledger of prior rounds) to steer: build on what was kept
+          — the best snapshot already contains every accepted change — and treat a
+          discarded change as evidence against it, not a permanent ban. Do not
+          simply re-run an identical loser. If `plateau_streak` is non-zero the
+          metric has stopped responding; propose a structurally different change
+          rather than another micro-tweak, or say plainly in `rationale` that you
+          believe the metric is saturated.
+
+          Report `sandbox_id` (this round's sandbox), `change` (one line, no tab
+          characters — it becomes a TSV ledger column and the snapshot note), and
+          `rationale`.
+
+          Requires a worker with shell access to the panda CLI and compute
+          datasource credentials.
+        inputs:
+          values:
+            goal:
+              schema: { type: string }
+              value: "${{ inputs.values.goal }}"
+            workdir:
+              schema: { type: string }
+              value: "${{ inputs.values.workdir }}"
+            target_files:
+              schema: { type: array, items: { type: string } }
+              value: "${{ inputs.values.target_files }}"
+            frozen_files:
+              schema: { type: array, items: { type: string } }
+              value: "${{ inputs.values.frozen_files }}"
+            metric_name:
+              schema: { type: string }
+              value: "${{ inputs.values.metric_name }}"
+            metric_direction:
+              schema: { type: string }
+              value: "${{ inputs.values.metric_direction }}"
+            compute_commands:
+              schema: { type: string }
+              value: "${{ inputs.values.compute_commands }}"
+            best_snapshot:
+              schema: { type: string }
+              value: "${{ loop.best_snapshot.orValue(inputs.values.snapshot_id) }}"
+            best_metric:
+              schema: { type: number }
+              value: "${{ loop.best_metric.orValue(inputs.values.baseline_metric) }}"
+            reusable_sandbox_id:
+              schema: { type: string, description: Previous kept round's still-running sandbox (empty when none survived) }
+              value: "${{ loop.carry_sandbox_id.orValue('') }}"
+            stale_sandbox_id:
+              schema: { type: string, description: Previous discarded round's leftover sandbox to delete fire-and-forget (empty when none) }
+              value: "${{ loop.stale_sandbox_id.orValue('') }}"
+            log:
+              schema: { type: string }
+              value: "${{ loop.log.orValue('') }}"
+            no_improvement_streak:
+              schema: { type: number }
+              value: "${{ loop.no_improvement_streak.orValue(0.0) }}"
+            plateau_streak:
+              schema: { type: number }
+              value: "${{ loop.plateau_streak.orValue(0.0) }}"
+            sandbox_ttl:
+              schema: { type: string }
+              value: "${{ inputs.values.sandbox_ttl }}"
+        outputs:
+          values:
+            sandbox_id:
+              required: true
+              schema: { type: string, description: This round's ephemeral sandbox id (freshly booted or reused from the previous kept round) }
+            change:
+              required: true
+              schema: { type: string, description: One-line tab-free summary of the applied change }
+            rationale:
+              schema: { type: string, description: Why this change was expected to help }
+      verify_and_measure:
+        needs: [propose]
+        quality-gate: "${{ has(outputs.values.observed_digest) && size(outputs.values.observed_digest) > 0 && has(outputs.values.matches) && outputs.values.matches == (outputs.values.observed_digest == inputs.values.expected_digest) && has(outputs.values.violations) && has(outputs.values.candidate_snapshot_id) && (!outputs.values.matches || size(outputs.values.candidate_snapshot_id) > 0) && has(outputs.values.valid) && (outputs.values.matches || outputs.values.valid == false) && has(outputs.values.candidate_metric) && has(outputs.values.candidate_spread) && has(outputs.values.measurement_note) }}"
+        instructions: |-
+          Verify, pin, and score this round's candidate in one pass.
+          You are the independent verification and measurement channel: you did
+          not produce the change and you do not judge its merits — run the checks
+          and commands exactly as written and report what they output. Do not
+          edit the artifact, do not fix a broken candidate, and never estimate,
+          round, or "correct" a number. Use the verified command patterns in
+          `compute_commands` verbatim; fall back to the runbook that owns the
+          panda-compute sandbox lifecycle (find it via
+          `panda search runbooks "compute sandbox snapshot lifecycle"`) only if a
+          pattern fails.
+
+          1 — Integrity. In the guest at `sandbox_id`, rebuild the canonical
+          manifest of `frozen_files` under `workdir` using exactly the setup
+          task's rules: recurse directories, sort bytewise by workdir-relative
+          path, record relative path, entry type, executable mode, and file
+          SHA-256 or symlink target. Missing baseline entries and new entries
+          beneath frozen directories are violations. Compare against
+          `frozen_manifest` to explain differences and report results exactly —
+          never infer or waive a mismatch. An empty `frozen_files` list produces
+          the empty manifest and trivially matches. Return `observed_digest`
+          (`sha256:<hex>`), `matches`, and `violations` (stable sorted
+          descriptions of every added, removed, renamed, mode-changed,
+          content-changed, or retargeted frozen entry).
+
+          If the digest does NOT match, the candidate is rejected before any
+          snapshot or measurement: issue a fire-and-forget delete for the
+          round sandbox (do not poll) and return `matches` false,
+          `candidate_snapshot_id` "", `valid` false, `candidate_metric` equal
+          to `best_metric`, `candidate_spread` 0, `measurement_note` "".
+
+          2 — Snapshot (integrity passed), BEFORE anything runs: snapshot
+          `sandbox_id` with `candidate_snapshot_ttl`, a note shaped
+          `round <n>: <change>` (derive the round number as the ledger's line
+          count plus one), and an idempotency key derived deterministically from
+          the round — never random — so a retried attempt reuses the existing
+          snapshot instead of minting a duplicate. Compose the note verbatim
+          from those fields alone so a retried request body is byte-identical.
+          On an idempotency-key conflict, a prior attempt already created this
+          snapshot: resolve its id by key (list the resources and match
+          `.idempotencyKey`) and use it — never "resolve" the conflict by
+          rotating the key or rewording the note. Poll the operation to a
+          terminal state and resolve the concrete snapshot id before proceeding.
+          Snapshotting before measurement keeps measurement side effects out of
+          the lineage.
+
+          3 — Validity: if `correctness_command` is non-empty, run it from
+          `workdir` in the guest; on non-zero exit issue a fire-and-forget
+          delete for the round sandbox, report `valid` false,
+          `candidate_metric` equal to `best_metric`, `candidate_spread` 0,
+          `measurement_note` "", and skip measurement. An empty command means
+          every candidate is valid.
+
+          4 — Measure: from `workdir` run `experiment_command`
+          `measurement_runs` times and extract the scalar labelled `metric_name`
+          from each (prefer a `name: value` or `name=value` line, else a JSON
+          key, else the last numeric occurrence). Report the median as
+          `candidate_metric` and max minus min as `candidate_spread` (0 for a
+          single run). Launch anything that may outlast the exec timeout
+          detached and poll. Numbers are reported exactly as printed — but set
+          `measurement_note` (one line, otherwise "") when the measurement
+          itself looks untrustworthy: the extracted value sits at the output's
+          print or timer resolution floor (e.g. exactly 0 while `best_metric`
+          is positive), the runs error or emit warnings, or the value's shape
+          is out of family with `best_metric` in a way that suggests the
+          harness rather than the artifact changed. You still report the raw
+          number; the note travels with it.
+
+          5 — Sandbox disposition: after a measured candidate, leave the round
+          sandbox RUNNING — its disk state equals the candidate snapshot plus
+          measurement side effects, and the decision gate may inspect it while
+          the next round can reuse it if the candidate is kept (a later task
+          deletes it otherwise). Only the rejection paths above (integrity
+          violation, correctness failure) delete the sandbox, and those
+          deletes are fire-and-forget.
+
+          You perform no keep/discard judgment — the decision gate reads
+          these numbers. Requires a worker with shell access to the panda CLI
+          and compute datasource credentials.
+        inputs:
+          values:
+            sandbox_id:
+              schema: { type: string }
+              value: "${{ tasks.propose.outputs.values.sandbox_id }}"
+            change:
+              schema: { type: string }
+              value: "${{ tasks.propose.outputs.values.change }}"
+            workdir:
+              schema: { type: string }
+              value: "${{ inputs.values.workdir }}"
+            frozen_files:
+              schema: { type: array, items: { type: string } }
+              value: "${{ inputs.values.frozen_files }}"
+            frozen_manifest:
+              schema: { type: string }
+              value: "${{ inputs.values.frozen_manifest }}"
+            expected_digest:
+              required: true
+              schema: { type: string }
+              value: "${{ inputs.values.frozen_digest }}"
+            experiment_command:
+              schema: { type: string }
+              value: "${{ inputs.values.experiment_command }}"
+            correctness_command:
+              schema: { type: string }
+              value: "${{ inputs.values.correctness_command }}"
+            metric_name:
+              schema: { type: string }
+              value: "${{ inputs.values.metric_name }}"
+            best_metric:
+              schema: { type: number }
+              value: "${{ loop.best_metric.orValue(inputs.values.baseline_metric) }}"
+            measurement_runs:
+              schema: { type: number }
+              value: "${{ inputs.values.measurement_runs }}"
+            candidate_snapshot_ttl:
+              schema: { type: string }
+              value: "${{ inputs.values.candidate_snapshot_ttl }}"
+            compute_commands:
+              schema: { type: string }
+              value: "${{ inputs.values.compute_commands }}"
+            log:
+              schema: { type: string }
+              value: "${{ loop.log.orValue('') }}"
+        outputs:
+          values:
+            observed_digest:
+              required: true
+              schema: { type: string, description: SHA-256 digest of the observed frozen manifest }
+            matches:
+              required: true
+              schema: { type: boolean, description: Whether observed_digest equals the baseline digest }
+            violations:
+              required: true
+              schema: { type: array, items: { type: string }, description: Stable sorted frozen-surface differences (empty when matches) }
+            candidate_snapshot_id:
+              required: true
+              schema: { type: string, description: Snapshot of the applied candidate taken before any measurement ran; empty on an integrity violation }
+            valid:
+              required: true
+              schema: { type: boolean, description: Whether the candidate passed integrity and the correctness gate }
+            candidate_metric:
+              required: true
+              schema: { type: number, description: Median measured metric of the applied candidate (best_metric echoed when unmeasured) }
+            candidate_spread:
+              required: true
+              schema: { type: number, description: Max minus min across this candidate's measurements (0 for a single run or an unmeasured candidate) }
+            measurement_note:
+              required: true
+              schema: { type: string, description: One-line measurement-trust flag (resolution floor, harness errors, out-of-family shape); empty when the measurement looked normal }
+      decide:
+        needs: [propose, verify_and_measure]
+        if: "${{ tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid && ((tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && loop.best_metric.orValue(inputs.values.baseline_metric) > 0.0) || (inputs.values.simplicity_tiebreak && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) <= ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread) && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) >= -((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) || ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 0.0 && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > inputs.values.anomaly_gain_fraction * (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)))) }}"
+        uses: dev.wagie/decide@1.0.0
+        inputs:
+          values:
+            question:
+              value: "${{ 'Should this candidate snapshot be kept or discarded?' }}"
+            context:
+              value: |-
+                ${{
+                  "You are the escalation reviewer for one optimization round. Clear-cut rounds are decided by pure arithmetic without you; this round reached you because it is ambiguous or anomalous: the candidate is within the noise threshold of the current best (near-tie), the candidate metric collapsed to zero or below while the best is positive (possible measurement-resolution floor or broken harness), or the claimed gain is out-of-family large (suspicious champion).\n\n" +
+                  "Goal: " + inputs.values.goal + "\n" +
+                  "Metric: " + inputs.values.metric_name + " (direction: " + inputs.values.metric_direction + ")\n" +
+                  "Baseline: " + string(inputs.values.baseline_metric) + "\n" +
+                  "Best so far: " + string(loop.best_metric.orValue(inputs.values.baseline_metric)) + "\n" +
+                  "Noise epsilon (relative): " + string(inputs.values.noise_epsilon) + "\n" +
+                  "Out-of-family gain fraction: " + string(inputs.values.anomaly_gain_fraction) + "\n" +
+                  "Proposed change: " + tasks.propose.outputs.values.change + "\n" +
+                  "Candidate metric (median): " + string(tasks.verify_and_measure.outputs.values.candidate_metric) + "\n" +
+                  "Candidate spread across measurements: " + string(tasks.verify_and_measure.outputs.values.candidate_spread) + "\n" +
+                  "Measurement note from the verifier: " + (size(tasks.verify_and_measure.outputs.values.measurement_note) > 0 ? tasks.verify_and_measure.outputs.values.measurement_note : "(none)") + "\n" +
+                  "Candidate snapshot (already pinned): " + tasks.verify_and_measure.outputs.values.candidate_snapshot_id + "\n" +
+                  "Round sandbox (still running): " + tasks.propose.outputs.values.sandbox_id + "\n" +
+                  "Experiment workdir: " + inputs.values.workdir + "\n" +
+                  "Experiment command: " + inputs.values.experiment_command + "\n\n" +
+                  "Acceptance rule:\n" +
+                  "- Compute the threshold: threshold = max(noise_epsilon * max(|best_metric|, 1), candidate_spread). The band is anchored to the current best, not the baseline, so it stays calibrated after large improvements. A gain must clear both the configured noise band and the jitter actually observed while measuring this candidate. Treat the candidate as a real improvement only if the move beyond the threshold is in the goal direction:\n" +
+                  "  - minimize: keep iff (best_metric - candidate_metric) > threshold.\n" +
+                  "  - maximize: keep iff (candidate_metric - best_metric) > threshold.\n" +
+                  "- Near-tie simplicity tiebreak: if the candidate is within the threshold of best (neither clearly better nor worse) AND the change is meaningfully simpler than what it replaces (smaller diff, removes complexity, deletes dead code), keep — simplicity at no metric cost is a real win. Otherwise discard. When in doubt, discard: the incumbent wins ties.\n" +
+                  "- If noise_epsilon == 0 and the spread is 0, the threshold is zero and exact ties discard (the strict accept rule).\n\n" +
+                  "Anomaly guidance:\n" +
+                  "- A timing-style metric reported as exactly 0 (or below) while the best is positive usually means the harness hit its print or timer resolution floor, not that the change is infinitely fast. Keeping such a value poisons every later comparison — nothing measurable can beat it. Unless you can establish the true value, discard and name the measurement floor as the reason.\n" +
+                  "- For an out-of-family gain, judge whether the described change plausibly explains the magnitude (an algorithmic-complexity change can; a micro-tweak cannot). Keep only when the mechanism accounts for the size of the move.\n" +
+                  "- You may gather evidence before deciding: the round sandbox is still running, and the verified command patterns below let you exec into it (inspect target files, re-run the experiment command once, check how the harness prints the metric). The candidate snapshot is already pinned, so measurement side effects in the sandbox are harmless — but do not modify target or frozen files. Gather evidence in as few exec calls as practical (each is a full round trip) and never probe for the CLI itself — it is installed and authenticated.\n\n" +
+                  "Verified compute command patterns:\n" + inputs.values.compute_commands
+                }}
+            options:
+              value: "${{ ['keep', 'discard'] }}"
+    outputs:
+      values:
+        best_snapshot:
+          required: true
+          schema: { type: string, description: Best snapshot id after this round }
+          value: >-
+            ${{ (tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid && (((tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && loop.best_metric.orValue(inputs.values.baseline_metric) > 0.0) || (inputs.values.simplicity_tiebreak && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) <= ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread) && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) >= -((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) || ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 0.0 && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > inputs.values.anomaly_gain_fraction * (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)))) ? tasks.decide.outputs.values.decision == 'keep' : (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)))
+                  ? tasks.verify_and_measure.outputs.values.candidate_snapshot_id
+                  : loop.best_snapshot.orValue(inputs.values.snapshot_id) }}
+        best_metric:
+          required: true
+          schema: { type: number, description: Best metric after this round }
+          value: >-
+            ${{ (tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid && (((tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && loop.best_metric.orValue(inputs.values.baseline_metric) > 0.0) || (inputs.values.simplicity_tiebreak && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) <= ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread) && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) >= -((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) || ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 0.0 && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > inputs.values.anomaly_gain_fraction * (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)))) ? tasks.decide.outputs.values.decision == 'keep' : (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)))
+                  ? tasks.verify_and_measure.outputs.values.candidate_metric
+                  : loop.best_metric.orValue(inputs.values.baseline_metric) }}
+        no_improvement_streak:
+          required: true
+          schema: { type: number, description: Consecutive rounds without an accepted improvement }
+          value: >-
+            ${{ (tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid && (((tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && loop.best_metric.orValue(inputs.values.baseline_metric) > 0.0) || (inputs.values.simplicity_tiebreak && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) <= ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread) && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) >= -((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) || ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 0.0 && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > inputs.values.anomaly_gain_fraction * (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)))) ? tasks.decide.outputs.values.decision == 'keep' : (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)))
+                  ? 0.0
+                  : loop.no_improvement_streak.orValue(0.0) + 1.0 }}
+        plateau_streak:
+          required: true
+          schema: { type: number, description: Consecutive rounds whose metric stayed within the noise band of the current best }
+          value: >-
+            ${{ !(tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid)
+                  ? loop.plateau_streak.orValue(0.0)
+                  : ((tasks.verify_and_measure.outputs.values.candidate_metric >= loop.best_metric.orValue(inputs.values.baseline_metric)
+                        ? tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)
+                        : loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric)
+                      <= (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0
+                              ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric))
+                              : 1.0)
+                            > tasks.verify_and_measure.outputs.values.candidate_spread
+                          ? inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0
+                              ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric))
+                              : 1.0)
+                          : tasks.verify_and_measure.outputs.values.candidate_spread)
+                      ? loop.plateau_streak.orValue(0.0) + 1.0
+                      : 0.0) }}
+        log:
+          required: true
+          schema: { type: string, description: Accumulated TSV ledger of all rounds }
+          value: >-
+            ${{ loop.log.orValue('') +
+                (!tasks.verify_and_measure.outputs.values.matches
+                    ? 'violation'
+                    : (tasks.verify_and_measure.outputs.values.valid ? ((((tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && loop.best_metric.orValue(inputs.values.baseline_metric) > 0.0) || (inputs.values.simplicity_tiebreak && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) <= ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread) && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) >= -((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) || ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 0.0 && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > inputs.values.anomaly_gain_fraction * (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)))) ? tasks.decide.outputs.values.decision == 'keep' : (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) ? 'keep' : 'discard') : 'discard')) + "\t" +
+                string(tasks.verify_and_measure.outputs.values.valid) + "\t" +
+                (tasks.verify_and_measure.outputs.values.valid ? string(tasks.verify_and_measure.outputs.values.candidate_metric) : "na") + "\t" +
+                (tasks.verify_and_measure.outputs.values.valid ? string(tasks.verify_and_measure.outputs.values.candidate_spread) : "na") + "\t" +
+                string((tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid && (((tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && loop.best_metric.orValue(inputs.values.baseline_metric) > 0.0) || (inputs.values.simplicity_tiebreak && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) <= ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread) && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) >= -((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) || ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 0.0 && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > inputs.values.anomaly_gain_fraction * (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)))) ? tasks.decide.outputs.values.decision == 'keep' : (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread))) ? tasks.verify_and_measure.outputs.values.candidate_metric : loop.best_metric.orValue(inputs.values.baseline_metric)) + "\t" +
+                (tasks.verify_and_measure.outputs.values.matches ? tasks.verify_and_measure.outputs.values.candidate_snapshot_id : "na") + "\t" +
+                tasks.propose.outputs.values.change.replace("\t", " ") + "\t" +
+                (tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid && ((tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && loop.best_metric.orValue(inputs.values.baseline_metric) > 0.0) || (inputs.values.simplicity_tiebreak && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) <= ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread) && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) >= -((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) || ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 0.0 && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > inputs.values.anomaly_gain_fraction * (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)))) ? 'agent' : 'auto') + "\t" +
+                tasks.verify_and_measure.outputs.values.measurement_note.replace("\t", " ").replace("\n", " ") + "\t" +
+                (has(tasks.propose.outputs.values.rationale) ? tasks.propose.outputs.values.rationale.replace("\t", " ").replace("\n", " ") : "") + "\n" }}
+        accepted_count:
+          required: true
+          schema: { type: number, description: Rounds whose candidate snapshot was promoted }
+          value: >-
+            ${{ (tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid && (((tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && loop.best_metric.orValue(inputs.values.baseline_metric) > 0.0) || (inputs.values.simplicity_tiebreak && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) <= ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread) && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) >= -((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) || ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 0.0 && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > inputs.values.anomaly_gain_fraction * (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)))) ? tasks.decide.outputs.values.decision == 'keep' : (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)))
+                  ? loop.accepted_count.orValue(0.0) + 1.0
+                  : loop.accepted_count.orValue(0.0) }}
+        discarded_count:
+          required: true
+          schema: { type: number, description: Rounds whose candidate was discarded }
+          value: >-
+            ${{ (tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid && (((tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && loop.best_metric.orValue(inputs.values.baseline_metric) > 0.0) || (inputs.values.simplicity_tiebreak && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) <= ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread) && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) >= -((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) || ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 0.0 && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > inputs.values.anomaly_gain_fraction * (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)))) ? tasks.decide.outputs.values.decision == 'keep' : (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)))
+                  ? loop.discarded_count.orValue(0.0)
+                  : loop.discarded_count.orValue(0.0) + 1.0 }}
+        integrity_violation_count:
+          required: true
+          schema: { type: number, description: Rounds rejected before snapshot for frozen-surface changes }
+          value: >-
+            ${{ !tasks.verify_and_measure.outputs.values.matches
+                  ? loop.integrity_violation_count.orValue(0.0) + 1.0
+                  : loop.integrity_violation_count.orValue(0.0) }}
+        carry_sandbox_id:
+          required: true
+          schema: { type: string, description: Kept round's still-running sandbox for the next round to reuse (empty when the round was discarded or rejected) }
+          value: >-
+            ${{ (tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid && (((tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && loop.best_metric.orValue(inputs.values.baseline_metric) > 0.0) || (inputs.values.simplicity_tiebreak && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) <= ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread) && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) >= -((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) || ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 0.0 && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > inputs.values.anomaly_gain_fraction * (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)))) ? tasks.decide.outputs.values.decision == 'keep' : (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)))
+                  ? tasks.propose.outputs.values.sandbox_id
+                  : '' }}
+        stale_sandbox_id:
+          required: true
+          schema: { type: string, description: Measured-but-discarded round's leftover sandbox for the next round to delete fire-and-forget (empty otherwise; rejection paths delete their own sandbox) }
+          value: >-
+            ${{ (tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid && !(((tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && loop.best_metric.orValue(inputs.values.baseline_metric) > 0.0) || (inputs.values.simplicity_tiebreak && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) <= ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread) && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) >= -((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)) || ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 0.0 && (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > inputs.values.anomaly_gain_fraction * (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)))) ? tasks.decide.outputs.values.decision == 'keep' : (inputs.values.metric_direction == 'minimize' ? loop.best_metric.orValue(inputs.values.baseline_metric) - tasks.verify_and_measure.outputs.values.candidate_metric : tasks.verify_and_measure.outputs.values.candidate_metric - loop.best_metric.orValue(inputs.values.baseline_metric)) > ((inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) > tasks.verify_and_measure.outputs.values.candidate_spread ? (inputs.values.noise_epsilon * ((loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) > 1.0 ? (loop.best_metric.orValue(inputs.values.baseline_metric) >= 0.0 ? loop.best_metric.orValue(inputs.values.baseline_metric) : -loop.best_metric.orValue(inputs.values.baseline_metric)) : 1.0)) : tasks.verify_and_measure.outputs.values.candidate_spread)))
+                  ? tasks.propose.outputs.values.sandbox_id
+                  : '' }}
+  finalize:
+    needs: [setup, iterate]
+    quality-gate: "${{ has(outputs.values.result_snapshot_id) && size(outputs.values.result_snapshot_id) > 0 && has(outputs.values.confirmation_metric) && has(outputs.values.trials) && has(outputs.values.summary) && size(outputs.values.summary) > 0 && has(outputs.values.progress_report) && size(outputs.values.progress_report) > 0 }}"
+    instructions: |-
+      Finalize the run: pin the durable result snapshot, confirm the winning
+      metric, and render the trial ledger and report. The reader is deciding
+      whether to trust and reuse the result snapshot — write for them. Use the
+      verified command patterns in `compute_commands` for all sandbox
+      operations; fall back to the runbook that owns the panda-compute sandbox
+      lifecycle (find it via
+      `panda search runbooks "compute sandbox snapshot lifecycle"`) only if a
+      pattern fails.
+
+      Step 0 — Leftover sandbox. If `carry_sandbox_id` is non-empty it is the
+      last kept round's still-running sandbox; issue a fire-and-forget delete
+      for it (do not poll; ignore errors, it may already be gone). The
+      snapshot lineage is authoritative — confirmation below must boot from
+      the snapshot, not reuse this sandbox.
+
+      Step 1 — Pin the result.
+      - If `accepted_count` is 0, nothing was promoted: `result_snapshot_id` is
+        the input `snapshot_id`, `confirmation_metric` is `baseline_metric`, and
+        no sandbox is needed — skip to Step 2.
+      - Otherwise boot a sandbox from `best_snapshot` with `sandbox_ttl`. Run
+        `experiment_command` once from `workdir` and report the extracted scalar
+        verbatim as `confirmation_metric` — do not re-derive the verdict from it;
+        it is a provenance reading, and a large disagreement with `best_metric`
+        belongs in the convergence note. Then take a durable snapshot with no
+        expiry (ttl 0; if the server rejects unlimited TTLs, use the longest
+        it accepts and state the actual expiry in the summary) and a note
+        carrying the goal, metric name, baseline and best values — composed
+        deterministically from those fields alone, with a deterministic
+        idempotency key, so a retried finalize reuses the prior attempt's pin;
+        on an idempotency-key conflict the pin already exists — resolve its id
+        by key and return it rather than changing key or note. Return its id
+        as `result_snapshot_id`. Issue a fire-and-forget delete for the
+        sandbox — the pinned snapshot is the deliverable, and per-round
+        candidate snapshots expire on their own TTL.
+
+      Step 2 — Trial ledger.
+      - `log` is the loop's raw TSV: columns `decision`, `valid`,
+        `candidate_metric_or_na`, `spread_or_na`, `best_after`,
+        `candidate_snapshot_or_na`, `change`, `decision_source`,
+        `measurement_note`, `rationale`. The `best_after` column is the best
+        metric AFTER this round's keep/discard was applied (equals the
+        candidate on a kept round, the prior best otherwise) — a proper
+        best-so-far series, not the incumbent going in. Violation rounds carry `violation` in
+        the decision column; `decision_source` is `auto` for rounds decided by
+        the mechanical threshold rule and `agent` for rounds escalated to the
+        review gate; the last two columns may be empty. Convert it, in order,
+        into one typed trial per round (`round` is the 1-based row index).
+      - `hypothesis`: the row's change description. `snapshot_id`: the row's
+        candidate snapshot column ("" when `na`). `metric`, `spread`,
+        `best_after`: copied verbatim, omitted when `na` — never recomputed or
+        rounded. `decision_source`: copied verbatim. `measurement_note`:
+        copied verbatim, omitted when empty. The rationale column is not a
+        trial field — use it to sharpen `interpretation`.
+      - `status`: `invalid` when the valid column is false (including violation
+        rounds); else `pass` when the decision was keep; else `fail`. Upgrade to
+        `suspicious` — regardless of keep/discard — when the round shows anomaly
+        signals: a non-empty measurement_note, an accepted improvement wildly
+        out of family with every other measured delta, the metric collapsing to
+        an exact floor/ceiling, or a change description that plausibly altered
+        measurement rather than the artifact. Flag only when you can name the
+        concrete signal.
+      - `interpretation`: one scoped sentence — what the round actually
+        established. `next_action`: optional concrete follow-up; omit when none.
+      - Negative and invalid trials are first-class data: never drop rows.
+
+      Step 3 — Progress report (`progress_report`, markdown).
+      - **Run summary**: goal, metric with direction, baseline, best,
+        confirmation metric, absolute and percent improvement, exit reason,
+        rounds, accepted, discarded, integrity violations.
+      - **Environment**: the input snapshot id, workdir, commands, and the
+        setup task's `environment_summary`.
+      - **Trial table**: `#`, `status`, `source` (auto/agent), `metric`,
+        `best`, `snapshot`, `hypothesis`, `interpretation`; bold rows that set
+        a new best, mark suspicious rows and non-empty measurement notes
+        prominently.
+      - **Progress visualisation**: a best-so-far chart across rounds. Use
+        whatever charting tool is available on the worker (gnuplot, python3 +
+        matplotlib, or similar); fall back to an ASCII sparkline of best-so-far
+        in a fenced code block when none is.
+      - **Convergence note**: 2-4 sentences — clean convergence, early plateau,
+        or burned budget; whether the confirmation metric agrees with the loop's
+        best; and whether accepted trials rode a single mechanism (search
+        collapse) or explored diverse ones.
+      - **Result**: `result_snapshot_id` and how to boot it (create a sandbox
+        from the snapshot).
+
+      Step 4 — Summary (`summary`, markdown): 6-12 lines suitable for a report
+      or PR description — goal, the winning change(s) in a sentence, baseline →
+      best (confirmed), exit reason, the pinned result snapshot id. Close by
+      noting the search metric only nominates: independently verify from the
+      result snapshot before promoting, and flag any suspicious trials as making
+      that non-negotiable.
+
+      Requires a worker with shell access to the panda CLI, compute datasource
+      credentials, and reasoning.
+    inputs:
+      values:
+        goal:
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        snapshot_id:
+          schema: { type: string }
+          value: "${{ inputs.values.snapshot_id }}"
+        workdir:
+          schema: { type: string }
+          value: "${{ inputs.values.workdir }}"
+        experiment_command:
+          schema: { type: string }
+          value: "${{ inputs.values.experiment_command }}"
+        metric_name:
+          schema: { type: string }
+          value: "${{ inputs.values.metric_name }}"
+        metric_direction:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        compute_commands:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.compute_commands }}"
+        environment_summary:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.environment_summary }}"
+        baseline_metric:
+          schema: { type: number }
+          value: "${{ tasks.setup.outputs.values.baseline_metric }}"
+        best_snapshot:
+          schema: { type: string }
+          value: "${{ tasks.iterate.outputs.values.best_snapshot }}"
+        best_metric:
+          schema: { type: number }
+          value: "${{ tasks.iterate.outputs.values.best_metric }}"
+        carry_sandbox_id:
+          schema: { type: string }
+          value: "${{ tasks.iterate.outputs.values.carry_sandbox_id }}"
+        accepted_count:
+          schema: { type: number }
+          value: "${{ tasks.iterate.outputs.values.accepted_count }}"
+        discarded_count:
+          schema: { type: number }
+          value: "${{ tasks.iterate.outputs.values.discarded_count }}"
+        integrity_violation_count:
+          schema: { type: number }
+          value: "${{ tasks.iterate.outputs.values.integrity_violation_count }}"
+        log:
+          schema: { type: string }
+          value: "${{ tasks.iterate.outputs.values.log }}"
+        converged:
+          schema: { type: boolean }
+          value: "${{ tasks.iterate.outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5) || tasks.iterate.outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3) || (has(inputs.values.metric_limit) && (inputs.values.?metric_direction.orValue('minimize') == 'minimize' ? tasks.iterate.outputs.values.best_metric - inputs.values.metric_limit : inputs.values.metric_limit - tasks.iterate.outputs.values.best_metric) <= tasks.setup.outputs.values.effective_noise_epsilon * ((tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) > 1.0 ? (tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) : 1.0)) }}"
+        sandbox_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('1h') }}"
+    outputs:
+      values:
+        result_snapshot_id:
+          required: true
+          schema:
+            type: string
+            description: Durably pinned snapshot of the best state (the input snapshot when nothing was accepted)
+        confirmation_metric:
+          required: true
+          schema:
+            type: number
+            description: Single confirmation measurement taken on the result snapshot at finalize (the baseline when nothing was accepted)
+        trials:
+          required: true
+          schema: &trials_schema
+            type: array
+            description: Typed trial ledger, one record per round in run order
+            items:
+              type: object
+              properties:
+                round: { type: number }
+                hypothesis: { type: string }
+                commit: { type: string }
+                snapshot_id: { type: string }
+                status: { type: string, enum: [pass, fail, invalid, suspicious] }
+                metric: { type: number }
+                spread: { type: number }
+                best_after: { type: number }
+                decision_source: { type: string, enum: [auto, agent] }
+                measurement_note: { type: string }
+                interpretation: { type: string }
+                next_action: { type: string }
+              required: [round, hypothesis, status, interpretation]
+        summary:
+          required: true
+          schema:
+            type: string
+            description: Short executive summary of the run
+        progress_report:
+          required: true
+          schema:
+            type: string
+            description: In-depth markdown report with trial table and progress chart (or ASCII fallback)
+outputs:
+  values:
+    baseline_metric:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.setup.outputs.values.baseline_metric }}"
+    best_metric:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.iterate.outputs.values.best_metric }}"
+    best_snapshot_id:
+      required: true
+      schema: { type: string, description: Best snapshot at loop exit (short-TTL candidate lineage; prefer result_snapshot_id) }
+      value: "${{ tasks.iterate.outputs.values.best_snapshot }}"
+    result_snapshot_id:
+      required: true
+      schema: { type: string, description: Durably pinned snapshot of the best state }
+      value: "${{ tasks.finalize.outputs.values.result_snapshot_id }}"
+    confirmation_metric:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.finalize.outputs.values.confirmation_metric }}"
+    improvement_pct:
+      required: true
+      schema: { type: number }
+      value: >-
+        ${{ inputs.values.?metric_direction.orValue('minimize') == 'minimize'
+              ? (tasks.setup.outputs.values.baseline_metric - tasks.iterate.outputs.values.best_metric) / (tasks.setup.outputs.values.baseline_metric == 0.0 ? 1.0 : tasks.setup.outputs.values.baseline_metric) * 100.0
+              : (tasks.iterate.outputs.values.best_metric - tasks.setup.outputs.values.baseline_metric) / (tasks.setup.outputs.values.baseline_metric == 0.0 ? 1.0 : tasks.setup.outputs.values.baseline_metric) * 100.0 }}
+    improved:
+      required: true
+      schema: { type: boolean }
+      value: >-
+        ${{ inputs.values.?metric_direction.orValue('minimize') == 'minimize'
+              ? tasks.iterate.outputs.values.best_metric < tasks.setup.outputs.values.baseline_metric
+              : tasks.iterate.outputs.values.best_metric > tasks.setup.outputs.values.baseline_metric }}
+    rounds_completed:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.iterate.outputs.values.accepted_count + tasks.iterate.outputs.values.discarded_count }}"
+    accepted_count:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.iterate.outputs.values.accepted_count }}"
+    discarded_count:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.iterate.outputs.values.discarded_count }}"
+    integrity_violation_count:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.iterate.outputs.values.integrity_violation_count }}"
+    log:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.iterate.outputs.values.log }}"
+    trials:
+      required: true
+      schema: *trials_schema
+      value: "${{ tasks.finalize.outputs.values.trials }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.finalize.outputs.values.summary }}"
+    progress_report:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.finalize.outputs.values.progress_report }}"
+    converged:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.iterate.outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5) || tasks.iterate.outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3) || (has(inputs.values.metric_limit) && (inputs.values.?metric_direction.orValue('minimize') == 'minimize' ? tasks.iterate.outputs.values.best_metric - inputs.values.metric_limit : inputs.values.metric_limit - tasks.iterate.outputs.values.best_metric) <= tasks.setup.outputs.values.effective_noise_epsilon * ((tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) > 1.0 ? (tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) : 1.0)) }}"
+    exit_reason:
+      required: true
+      schema: { type: string, description: "One of saturated, plateau, patience, improvement, max_iterations" }
+      value: >-
+        ${{ (has(inputs.values.metric_limit) && (inputs.values.?metric_direction.orValue('minimize') == 'minimize' ? tasks.iterate.outputs.values.best_metric - inputs.values.metric_limit : inputs.values.metric_limit - tasks.iterate.outputs.values.best_metric) <= tasks.setup.outputs.values.effective_noise_epsilon * ((tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) > 1.0 ? (tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) : 1.0))
+              ? 'saturated'
+              : tasks.iterate.outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3)
+              ? 'plateau'
+              : tasks.iterate.outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5)
+                  ? 'patience'
+                  : (inputs.values.?metric_direction.orValue('minimize') == 'minimize'
+                        ? tasks.iterate.outputs.values.best_metric < tasks.setup.outputs.values.baseline_metric
+                        : tasks.iterate.outputs.values.best_metric > tasks.setup.outputs.values.baseline_metric)
+                      ? 'improvement'
+                      : 'max_iterations' }}
+    environment_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.setup.outputs.values.environment_summary }}"

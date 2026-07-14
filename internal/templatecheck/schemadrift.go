@@ -36,6 +36,7 @@ var sharedShapes = []sharedShape{
 	{name: "feedback queue", markers: []string{"priority_summary", "terminal", "terminal_reason", "tasks"}},
 	{name: "network target", markers: []string{"kind", "enclave", "sandbox_id", "network_id"}, requiredMarkers: []string{"kind"}},
 	{name: "snapshot catalog item", markers: []string{"epoch", "snapshot_id"}},
+	{name: "trial record", markers: []string{"round", "hypothesis", "status", "interpretation"}},
 }
 
 // SchemaSource is one template file to scan for shared schema occurrences.
