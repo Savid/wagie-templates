@@ -72,8 +72,11 @@ inputs:
       description: Relative tolerance used as both the acceptance threshold and the plateau detector, anchored to the current best so it stays calibrated after large improvements. A round is "no movement" when |new - best| <= noise_epsilon * max(|best|, 1). Default 0 means setup derives it from observed baseline jitter; set an explicit positive value to override.
       schema: { type: number, default: 0 }
     measurement_runs:
-      description: Measurements per candidate; the median is scored and the max-min spread joins the acceptance threshold. Default 0 means setup derives it from observed baseline jitter.
+      description: Number of candidate/incumbent PAIRS measured per round. Each pair runs the experiment twice (once per arm) with the files swapped between them, so a round costs 2 x this many runs. The per-pair differences give both the gain and its standard error, so this is the knob that sets how small a gain the loop can resolve — the resolution limit shrinks with sqrt(this). Fewer than 2 pairs cannot estimate dispersion at all. Default 0 means setup derives it from observed baseline jitter (never below 5).
       schema: { type: number, default: 0 }
+    significance_z:
+      description: One-sided normal critical value a gain must clear, in standard errors of the paired gain. The default 2.8 is deliberately strict — it is roughly Bonferroni-corrected for a 20-round run at 5% family-wise error, because a loop that accepts at per-round 95% confidence over 20 rounds has a ~64% chance of banking at least one pure-noise "win", and every later round then builds on it. Set 1.645 for uncorrected per-round 95% confidence if you are running few rounds and prefer sensitivity to strictness.
+      schema: { type: number, default: 2.8 }
     anomaly_gain_fraction:
       description: Fraction of the current best beyond which a single-round gain is treated as out-of-family and routed to agent review instead of being mechanically kept (0.9 means any round claiming more than 90% of the remaining metric gets reviewed). Clear sub-threshold rounds are decided by pure arithmetic without an agent.
       schema: { type: number, default: 0.9 }
@@ -162,9 +165,16 @@ tasks:
       - `effective_noise_epsilon`: the caller's value when > 0; otherwise the
         observed relative jitter `(max - min) / max(|median|, 1)` padded slightly
         upward. 0 only when the three runs agree exactly.
-      - `effective_measurement_runs`: the caller's value when > 0; otherwise 1
-        when the command aggregates internally and jitter is small relative to
-        plausible gains, else 3.
+      - `effective_measurement_runs`: the number of candidate/incumbent PAIRS
+        each round will measure. Use the caller's value when > 0; otherwise pick
+        from the observed jitter — 5 when the command aggregates internally and
+        jitter is small relative to plausible gains, more (7-10) when it is not.
+        NEVER go below 5, even for a command that looks perfectly stable: the
+        acceptance threshold is built from the standard error of the paired
+        differences, and 1 pair yields no dispersion estimate at all while 2-3
+        yield a wild one. A too-small value here does not make the loop faster,
+        it makes the loop unable to tell a real gain from noise — which is the
+        single most expensive way this experiment can fail.
       - Sanity-check: reject a baseline of 0/NaN/infinity for a minimize metric,
         a value at the timer's resolution floor, or >30% disagreement across the
         three runs — say what is wrong instead of returning a junk baseline.
@@ -369,6 +379,10 @@ tasks:
           required: true
           schema: { type: number }
           value: "${{ tasks.setup.outputs.values.effective_noise_epsilon }}"
+        significance_z:
+          required: true
+          schema: { type: number, description: Standard errors of the paired gain a candidate must clear to be accepted }
+          value: "${{ inputs.values.?significance_z.orValue(2.8) }}"
         anomaly_gain_fraction:
           required: true
           schema: { type: number }
@@ -467,6 +481,27 @@ tasks:
           rather than another micro-tweak, or say plainly in `rationale` that you
           believe the metric is saturated.
 
+          SIZE THE CHANGE AGAINST THE MEASUREMENT FLOOR. `min_detectable_gain` is
+          the smallest improvement this harness can actually resolve — it is the
+          acceptance threshold, in the units of `metric_name`. A change you believe
+          is worth less than that is not a small win; it is INVISIBLE, and it will
+          be discarded as noise no matter how sound the reasoning behind it. Do not
+          propose one. Before you commit to a hypothesis, state to yourself roughly
+          what it is worth: if the honest answer is below `min_detectable_gain`,
+          throw it away and find a bigger one. Micro-tweaks to an already-optimized
+          hot path (reordering a loop body, swapping an equivalent expression,
+          shaving one bounds check) almost never clear this bar once the obvious
+          wins are gone — reach for a different mechanism, a different data
+          structure, or a different algorithm instead.
+
+          If `metric_limit_set` is true, `metric_limit` is the metric's theoretical
+          ceiling — the value the experiment would post if the target's work were
+          removed entirely. `best_metric` minus `metric_limit` (in the goal
+          direction) is ALL the headroom that remains for every future round
+          combined. If that headroom is not comfortably larger than
+          `min_detectable_gain`, there is nothing left worth finding: say so
+          plainly in `rationale` rather than inventing a change.
+
           Report `sandbox_id` (this round's sandbox), `incumbent_backup` (the
           directory holding the pre-edit copy of `target_files`), `change` (one
           line, no tab characters — it becomes a TSV ledger column and the
@@ -518,6 +553,20 @@ tasks:
             plateau_streak:
               schema: { type: number }
               value: "${{ loop.plateau_streak.orValue(0.0) }}"
+            min_detectable_gain:
+              schema: { type: number, description: Smallest improvement this harness can resolve, in metric units — the acceptance threshold. A change worth less than this is invisible and will be discarded as noise. }
+              value: |-
+                ${{ cel.bind(best, loop.best_metric.orValue(inputs.values.baseline_metric),
+                    cel.bind(best_abs, best >= 0.0 ? best : -best,
+                    cel.bind(band, inputs.values.noise_epsilon * (best_abs > 1.0 ? best_abs : 1.0),
+                      cel.bind(prior, loop.threshold.orValue(band),
+                        prior > band ? prior : band)))) }}
+            metric_limit_set:
+              schema: { type: boolean, description: Whether a theoretical ceiling is known for this metric }
+              value: "${{ inputs.values.metric_limit_set }}"
+            metric_limit:
+              schema: { type: number, description: Theoretical best the metric can reach; best_metric minus this (in the goal direction) is all the headroom that remains }
+              value: "${{ inputs.values.metric_limit }}"
             sandbox_ttl:
               schema: { type: string }
               value: "${{ inputs.values.sandbox_ttl }}"
@@ -536,7 +585,7 @@ tasks:
               schema: { type: string, description: Why this change was expected to help }
       verify_and_measure:
         needs: [propose]
-        quality-gate: "${{ has(outputs.values.observed_digest) && size(outputs.values.observed_digest) > 0 && has(outputs.values.matches) && (!outputs.values.matches || outputs.values.observed_digest == inputs.values.expected_digest) && has(outputs.values.violations) && (outputs.values.matches == (size(outputs.values.violations) == 0)) && has(outputs.values.candidate_snapshot_id) && (!outputs.values.matches || size(outputs.values.candidate_snapshot_id) > 0) && has(outputs.values.valid) && (outputs.values.matches || outputs.values.valid == false) && has(outputs.values.candidate_metric) && has(outputs.values.candidate_spread) && has(outputs.values.incumbent_metric) && has(outputs.values.incumbent_spread) && outputs.values.candidate_spread >= 0.0 && outputs.values.incumbent_spread >= 0.0 && (outputs.values.valid || outputs.values.candidate_metric == outputs.values.incumbent_metric) && has(outputs.values.measurement_note) }}"
+        quality-gate: "${{ has(outputs.values.observed_digest) && size(outputs.values.observed_digest) > 0 && has(outputs.values.matches) && (!outputs.values.matches || outputs.values.observed_digest == inputs.values.expected_digest) && has(outputs.values.violations) && (outputs.values.matches == (size(outputs.values.violations) == 0)) && has(outputs.values.candidate_snapshot_id) && (!outputs.values.matches || size(outputs.values.candidate_snapshot_id) > 0) && has(outputs.values.valid) && (outputs.values.matches || outputs.values.valid == false) && has(outputs.values.candidate_metric) && has(outputs.values.incumbent_metric) && has(outputs.values.paired_gain) && has(outputs.values.paired_gain_stderr) && outputs.values.paired_gain_stderr >= 0.0 && has(outputs.values.paired_differences) && (outputs.values.valid || (outputs.values.candidate_metric == outputs.values.incumbent_metric && outputs.values.paired_gain == 0.0 && size(outputs.values.paired_differences) == 0)) && (!outputs.values.valid || size(outputs.values.paired_differences) == int(inputs.values.measurement_runs)) && has(outputs.values.measurement_note) }}"
         instructions: |-
           Verify, pin, and score this round's candidate in one pass.
           You are the independent verification and measurement channel: you did
@@ -580,9 +629,9 @@ tasks:
           measurement: issue a fire-and-forget delete for the round sandbox (do
           not poll) and return `matches` false, `candidate_snapshot_id` "",
           `valid` false, `candidate_metric` and `incumbent_metric` BOTH equal to
-          `best_metric`, `candidate_spread` and `incumbent_spread` 0,
-          `measurement_note` "". (The two metrics must be equal so the decision
-          arithmetic sees a zero gain and discards.)
+          `best_metric`, `paired_gain` and `paired_gain_stderr` 0,
+          `paired_differences` empty, `measurement_note` "". (The gain must be
+          zero so the decision arithmetic discards.)
 
           2 — Snapshot (integrity passed), BEFORE anything runs: snapshot
           `sandbox_id` with `candidate_snapshot_ttl`, a note shaped
@@ -602,7 +651,8 @@ tasks:
           3 — Validity: if `correctness_command` is non-empty, run it from
           `workdir` in the guest; on non-zero exit issue a fire-and-forget
           delete for the round sandbox, report `valid` false, `candidate_metric`
-          and `incumbent_metric` BOTH equal to `best_metric`, both spreads 0,
+          and `incumbent_metric` BOTH equal to `best_metric`, `paired_gain` and
+          `paired_gain_stderr` 0, `paired_differences` empty,
           `measurement_note` "", and skip measurement. An empty command means
           every candidate is valid.
 
@@ -622,22 +672,70 @@ tasks:
             the oracle); it is identical across the two arms of a round so the
             paired comparison stays fair. Never invent your own seed and never
             let the arms differ.
-          - Candidate arm: from `workdir` run `experiment_command`
-            `measurement_runs` times.
-          - Incumbent arm: restore `target_files` from `incumbent_backup`
-            (byte-for-byte, same relative paths), then run `experiment_command`
-            `measurement_runs` more times. Interleave the two arms
-            (candidate, incumbent, candidate, ...) rather than running them in
-            blocks, so slow host drift hits both equally.
-          - Restore the candidate's `target_files` afterwards, so the running
-            sandbox once again matches the pinned candidate snapshot.
+          - FIRST, back up the candidate. Copy every entry in `target_files`,
+            byte-for-byte and preserving relative paths, into a fresh directory
+            outside `workdir` (e.g. `/root/.candidate-<NNNN>`, same round number
+            as the sandbox). You are about to overwrite `target_files` with the
+            incumbent, and without this copy the candidate's edits are gone for
+            good — the snapshot you pinned in step 2 would then be the ONLY
+            surviving copy, and the sandbox this round leaves behind (which the
+            next round reuses on a keep) would silently contain incumbent code.
+            Make the copy idempotent: if the directory already exists from a
+            retried attempt, leave it alone.
+          - Now measure PAIRED, swapping the files between every single run.
+            One pair = restore `target_files` from the candidate backup, run
+            `experiment_command` once, record the candidate value; then restore
+            `target_files` from `incumbent_backup`, run `experiment_command`
+            once, record the incumbent value. Repeat for `measurement_runs`
+            pairs. Both restores are byte-for-byte at the same relative paths.
+          - Run the pairs in that alternating order — candidate, incumbent,
+            candidate, incumbent — NOT as two blocks of `measurement_runs`. A
+            block schedule lets slow host drift land entirely on whichever arm
+            ran second and show up as a fake gain or a fake loss; alternating
+            splits any drift evenly across the two arms, which is the whole point
+            of pairing. The file swap costs milliseconds against a benchmark that
+            costs seconds, so the swap overhead is not a reason to block.
+          - FINALLY, restore `target_files` from the candidate backup one last
+            time, so the running sandbox once again matches the candidate
+            snapshot pinned in step 2. Verify this: the sandbox may be carried
+            into the next round, and leaving the incumbent in place would make
+            the next round build on the wrong code.
 
           Extract the scalar labelled `metric_name` from each run (prefer a
           `name: value` or `name=value` line, else a JSON key, else the last
-          numeric occurrence). Report `candidate_metric` / `incumbent_metric` as
-          the two medians and `candidate_spread` / `incumbent_spread` as each
-          arm's max minus min (0 for a single run). Launch anything that may
-          outlast the exec timeout detached and poll.
+          numeric occurrence). Launch anything that may outlast the exec timeout
+          detached and poll.
+
+          Report `candidate_metric` / `incumbent_metric` as the two arms' medians
+          — those are for the ledger and the report.
+
+          The DECISION, though, runs on the paired differences, so compute them
+          from the pairs you actually ran. For each pair i, the paired difference
+          is the improvement that pair showed, in the goal direction:
+
+            d_i = incumbent_i - candidate_i   when metric_direction is minimize
+            d_i = candidate_i - incumbent_i   when metric_direction is maximize
+
+          Both runs of a pair share a VM, a cache state, a seed and a moment in
+          time, so d_i cancels almost everything that is not the change itself.
+          That is why the decision uses these and not the medians. Report:
+          - `paired_gain`: the MEAN of the d_i. (Mean, not median — the standard
+            error below is the standard error of the mean, and mixing the two
+            statistics would make the error bar describe a number you did not
+            report.)
+          - `paired_gain_stderr`: the standard error of that mean,
+            `stdev(d_i) / sqrt(n)`, using the sample standard deviation
+            (the n-1 / Bessel denominator). With n = 1 pair there is no
+            dispersion to estimate: report 0 and say so in `measurement_note`,
+            because a single pair cannot tell a real gain from a lucky one.
+          - `paired_differences`: the d_i themselves, in run order, so the
+            decision and the report can audit the spread rather than trust a
+            summary.
+
+          Do not substitute a range (max minus min) for the standard error. A
+          range grows with the number of runs and says nothing about how precisely
+          the mean is known; the standard error shrinks as sqrt(n) and is the
+          quantity the acceptance threshold is built from.
 
           Numbers are reported exactly as printed — but set `measurement_note`
           (one line, otherwise "") when the measurement itself looks
@@ -646,9 +744,10 @@ tasks:
           runs error or emit warnings, the value's shape is out of family with
           `best_metric` in a way that suggests the harness rather than the
           artifact changed, or `incumbent_metric` disagrees with `best_metric` by
-          more than this round's spreads (the incumbent is unchanged code, so a
+          more than a few standard errors (the incumbent is unchanged code, so a
           large disagreement means the measurement environment moved, not the
-          artifact — say so). A non-empty note forces the round to an escalation
+          artifact — say so), or only one pair ran, so `paired_gain_stderr` is 0
+          and the gain has no error bar at all. A non-empty note forces the round to an escalation
           review, so write one whenever you would not personally bet on the
           number; you still report the raw value either way.
 
@@ -750,15 +849,18 @@ tasks:
             candidate_metric:
               required: true
               schema: { type: number, description: Median measured metric of the applied candidate (best_metric echoed when unmeasured) }
-            candidate_spread:
-              required: true
-              schema: { type: number, description: Max minus min across this candidate's measurements (0 for a single run or an unmeasured candidate) }
             incumbent_metric:
               required: true
               schema: { type: number, description: Median metric of the UNCHANGED incumbent re-measured in this same sandbox, paired with the candidate (best_metric echoed when unmeasured) }
-            incumbent_spread:
+            paired_gain:
               required: true
-              schema: { type: number, description: Max minus min across the incumbent's measurements in this sandbox (0 for a single run or an unmeasured candidate) }
+              schema: { type: number, description: Mean of the per-pair differences, already signed so positive is an improvement in the goal direction. This is the decision statistic. 0 when unmeasured }
+            paired_gain_stderr:
+              required: true
+              schema: { type: number, description: Standard error of paired_gain — sample stdev of the per-pair differences over sqrt(n). 0 when unmeasured or when only one pair ran (which cannot estimate dispersion) }
+            paired_differences:
+              required: true
+              schema: { type: array, items: { type: number }, description: The per-pair differences in run order, signed toward the goal direction (empty when unmeasured) }
             measurement_note:
               required: true
               schema: { type: string, description: One-line measurement-trust flag (resolution floor, harness errors, out-of-family shape, incumbent drift); empty when the measurement looked normal. Non-empty forces an escalation review }
@@ -770,20 +872,13 @@ tasks:
             tasks.verify_and_measure.outputs.values.valid &&
             cel.bind(best, loop.best_metric.orValue(inputs.values.baseline_metric),
               cel.bind(best_abs, best >= 0.0 ? best : -best,
-                cel.bind(gain,
-                  inputs.values.metric_direction == 'minimize'
-                    ? tasks.verify_and_measure.outputs.values.incumbent_metric - tasks.verify_and_measure.outputs.values.candidate_metric
-                    : tasks.verify_and_measure.outputs.values.candidate_metric - tasks.verify_and_measure.outputs.values.incumbent_metric,
+                cel.bind(gain, tasks.verify_and_measure.outputs.values.paired_gain,
                   cel.bind(epsilon_band,
                     inputs.values.noise_epsilon * (best_abs > 1.0 ? best_abs : 1.0),
-                    cel.bind(candidate_band,
-                      epsilon_band > tasks.verify_and_measure.outputs.values.candidate_spread
-                        ? epsilon_band
-                        : tasks.verify_and_measure.outputs.values.candidate_spread,
+                    cel.bind(resolution_band,
+                      inputs.values.significance_z * tasks.verify_and_measure.outputs.values.paired_gain_stderr,
                       cel.bind(threshold,
-                        candidate_band > tasks.verify_and_measure.outputs.values.incumbent_spread
-                          ? candidate_band
-                          : tasks.verify_and_measure.outputs.values.incumbent_spread,
+                        epsilon_band > resolution_band ? epsilon_band : resolution_band,
                         (tasks.verify_and_measure.outputs.values.candidate_metric <= 0.0 && best > 0.0) ||
                         (inputs.values.simplicity_tiebreak && gain <= threshold && gain >= -threshold) ||
                         (best_abs > 0.0 && gain > inputs.values.anomaly_gain_fraction * best_abs) ||
@@ -813,20 +908,21 @@ tasks:
                   "Out-of-family gain fraction: " + string(inputs.values.anomaly_gain_fraction) + "\n" +
                   "Proposed change: " + tasks.propose.outputs.values.change + "\n" +
                   "Candidate metric (median): " + string(tasks.verify_and_measure.outputs.values.candidate_metric) + "\n" +
-                  "Candidate spread across measurements: " + string(tasks.verify_and_measure.outputs.values.candidate_spread) + "\n" +
+                  "Mean paired gain (positive = better, already signed toward the goal): " + string(tasks.verify_and_measure.outputs.values.paired_gain) + "\n" +
+                  "Standard error of that gain: " + string(tasks.verify_and_measure.outputs.values.paired_gain_stderr) + "\n" +
+                  "The individual per-pair differences: " + tasks.verify_and_measure.outputs.values.paired_differences.map(d, string(d)).join(", ") + "\n" +
                   "Incumbent metric (median, re-measured in the SAME sandbox this round): " + string(tasks.verify_and_measure.outputs.values.incumbent_metric) + "\n" +
-                  "Incumbent spread across measurements: " + string(tasks.verify_and_measure.outputs.values.incumbent_spread) + "\n" +
+                  "Standard errors required to accept (significance_z): " + string(inputs.values.significance_z) + "\n" +
                   "Measurement note from the verifier: " + (size(tasks.verify_and_measure.outputs.values.measurement_note) > 0 ? tasks.verify_and_measure.outputs.values.measurement_note : "(none)") + "\n" +
                   "Candidate snapshot (already pinned): " + tasks.verify_and_measure.outputs.values.candidate_snapshot_id + "\n" +
                   "Round sandbox (still running): " + tasks.propose.outputs.values.sandbox_id + "\n" +
                   "Experiment workdir: " + inputs.values.workdir + "\n" +
                   "Experiment command: " + inputs.values.experiment_command + "\n\n" +
                   "Acceptance rule:\n" +
-                  "- Compute the threshold: threshold = max(noise_epsilon * max(|best_metric|, 1), candidate_spread, incumbent_spread). A gain must clear the configured noise band AND the jitter actually observed in BOTH arms this round. Compute the gain from the PAIRED figures — candidate against the incumbent measured beside it — and treat the candidate as a real improvement only if the move beyond the threshold is in the goal direction:\n" +
-                  "  - minimize: keep iff (incumbent_metric - candidate_metric) > threshold.\n" +
-                  "  - maximize: keep iff (candidate_metric - incumbent_metric) > threshold.\n" +
+                  "- Compute the threshold: threshold = max(noise_epsilon * max(|best_metric|, 1), significance_z * paired_gain_stderr). A gain must be BOTH practically meaningful (it clears the configured noise band) AND statistically resolvable (it is significance_z standard errors away from zero, so it is unlikely to be a fluke of this round's timing). Keep iff paired_gain > threshold. The gain is already signed toward the goal direction, so a positive number is always an improvement regardless of whether the metric is minimized or maximized — do not re-apply the direction yourself.\n" +
+                  "- Look at the individual per-pair differences, not just their mean. If they are tightly clustered and all the same sign, the effect is real. If they straddle zero, or one outlier pair carries the whole mean, the effect is noise wearing a mean's clothing — discard, and say which it was.\n" +
                   "- Near-tie simplicity tiebreak: if the candidate is within the threshold of the incumbent (neither clearly better nor worse) AND the change is meaningfully simpler than what it replaces (smaller diff, removes complexity, deletes dead code), keep — simplicity at no metric cost is a real win. Otherwise discard. When in doubt, discard: the incumbent wins ties. Note that a keep is mechanically refused when the candidate measured WORSE than the incumbent, however simple it is: simplicity at no metric cost means no cost.\n" +
-                  "- If noise_epsilon == 0 and both spreads are 0, the threshold is zero and exact ties discard (the strict accept rule).\n" +
+                  "- If noise_epsilon == 0 and paired_gain_stderr == 0, the threshold is zero and exact ties discard (the strict accept rule). But a zero standard error with more than one pair means every pair returned an identical difference, which for a timing metric is itself suspicious — prefer discarding and saying so.\n" +
                   "- If incumbent_metric disagrees sharply with the historical best above, the measurement environment moved between rounds, not the code. The paired comparison is still valid — it is the historical best that is stale — but say so in your rationale.\n\n" +
                   "Anomaly guidance:\n" +
                   "- When the measurement note is non-empty, the verifier that produced the number is telling you it does not trust it. Do not launder a flagged measurement into a keep because the arithmetic happens to clear the threshold — a wrong number that clears the bar poisons every later round. Either establish the true value (you can re-run; see below) or discard and name the note as the reason.\n" +
@@ -841,26 +937,19 @@ tasks:
       values:
         gain:
           required: true
-          schema: { type: number, description: Paired candidate gain in the configured metric direction for this round }
-          value: |-
-            ${{ inputs.values.metric_direction == 'minimize'
-                ? tasks.verify_and_measure.outputs.values.incumbent_metric - tasks.verify_and_measure.outputs.values.candidate_metric
-                : tasks.verify_and_measure.outputs.values.candidate_metric - tasks.verify_and_measure.outputs.values.incumbent_metric }}
+          schema: { type: number, description: Mean paired gain for this round, signed toward the goal direction (the verifier already applied the sign) }
+          value: "${{ tasks.verify_and_measure.outputs.values.paired_gain }}"
         threshold:
           required: true
-          schema: { type: number, description: Maximum of the relative noise band and both paired measurement spreads }
+          schema: { type: number, description: Acceptance bar — the larger of the practical noise band and the statistical resolution limit (significance_z standard errors of the paired gain) }
           value: |-
             ${{ cel.bind(best, loop.best_metric.orValue(inputs.values.baseline_metric),
                 cel.bind(best_abs, best >= 0.0 ? best : -best,
                   cel.bind(epsilon_band,
                     inputs.values.noise_epsilon * (best_abs > 1.0 ? best_abs : 1.0),
-                    cel.bind(candidate_band,
-                      epsilon_band > tasks.verify_and_measure.outputs.values.candidate_spread
-                        ? epsilon_band
-                        : tasks.verify_and_measure.outputs.values.candidate_spread,
-                      candidate_band > tasks.verify_and_measure.outputs.values.incumbent_spread
-                        ? candidate_band
-                        : tasks.verify_and_measure.outputs.values.incumbent_spread
+                    cel.bind(resolution_band,
+                      inputs.values.significance_z * tasks.verify_and_measure.outputs.values.paired_gain_stderr,
+                      epsilon_band > resolution_band ? epsilon_band : resolution_band
                     )
                   )
                 )
@@ -928,7 +1017,7 @@ tasks:
                     : (tasks.verify_and_measure.outputs.values.valid ? ((outputs.values.kept) ? 'keep' : 'discard') : 'discard')) + "\t" +
                 string(tasks.verify_and_measure.outputs.values.valid) + "\t" +
                 (tasks.verify_and_measure.outputs.values.valid ? string(tasks.verify_and_measure.outputs.values.candidate_metric) : "na") + "\t" +
-                (tasks.verify_and_measure.outputs.values.valid ? string(tasks.verify_and_measure.outputs.values.candidate_spread) : "na") + "\t" +
+                (tasks.verify_and_measure.outputs.values.valid ? string(tasks.verify_and_measure.outputs.values.paired_gain) : "na") + "\t" +
                 string((tasks.verify_and_measure.outputs.values.matches && tasks.verify_and_measure.outputs.values.valid && (outputs.values.kept)) ? tasks.verify_and_measure.outputs.values.candidate_metric : loop.best_metric.orValue(inputs.values.baseline_metric)) + "\t" +
                 (tasks.verify_and_measure.outputs.values.matches ? tasks.verify_and_measure.outputs.values.candidate_snapshot_id : "na") + "\t" +
                 tasks.propose.outputs.values.change.replace("\t", " ") + "\t" +
@@ -936,7 +1025,8 @@ tasks:
                 tasks.verify_and_measure.outputs.values.measurement_note.replace("\t", " ").replace("\n", " ") + "\t" +
                 (has(tasks.propose.outputs.values.rationale) ? tasks.propose.outputs.values.rationale.replace("\t", " ").replace("\n", " ") : "") + "\t" +
                 (tasks.verify_and_measure.outputs.values.valid ? string(tasks.verify_and_measure.outputs.values.incumbent_metric) : "na") + "\t" +
-                (tasks.verify_and_measure.outputs.values.valid ? string(tasks.verify_and_measure.outputs.values.incumbent_spread) : "na") + "\n" }}
+                (tasks.verify_and_measure.outputs.values.valid ? string(tasks.verify_and_measure.outputs.values.paired_gain_stderr) : "na") + "\t" +
+                string(outputs.values.threshold) + "\n" }}
         accepted_count:
           required: true
           schema: { type: number, description: Rounds whose candidate snapshot was promoted }
@@ -944,6 +1034,12 @@ tasks:
             ${{ (outputs.values.kept)
                   ? loop.accepted_count.orValue(0.0) + 1.0
                   : loop.accepted_count.orValue(0.0) }}
+        accepted_gain_total:
+          required: true
+          schema: { type: number, description: Running sum of the paired gains of every accepted round — the total improvement the loop CLAIMS it banked, which finalize reconciles against the cold-boot confirmation }
+          value: |-
+            ${{ loop.accepted_gain_total.orValue(0.0) +
+                ((outputs.values.kept) ? outputs.values.gain : 0.0) }}
         discarded_count:
           required: true
           schema: { type: number, description: Rounds whose candidate was discarded }
@@ -974,7 +1070,7 @@ tasks:
                   : '' }}
   finalize:
     needs: [setup, iterate]
-    quality-gate: "${{ has(outputs.values.result_snapshot_id) && size(outputs.values.result_snapshot_id) > 0 && has(outputs.values.confirmation_metric) && has(outputs.values.confirmation_spread) && outputs.values.confirmation_spread >= 0.0 && has(outputs.values.confirmed) && has(outputs.values.trials) && has(outputs.values.summary) && size(outputs.values.summary) > 0 && has(outputs.values.progress_report) && size(outputs.values.progress_report) > 0 }}"
+    quality-gate: "${{ has(outputs.values.result_snapshot_id) && size(outputs.values.result_snapshot_id) > 0 && has(outputs.values.confirmation_metric) && has(outputs.values.confirmation_spread) && outputs.values.confirmation_spread >= 0.0 && has(outputs.values.confirmed) && has(outputs.values.reconciliation_gap) && has(outputs.values.reconciled) && has(outputs.values.trials) && has(outputs.values.summary) && size(outputs.values.summary) > 0 && has(outputs.values.progress_report) && size(outputs.values.progress_report) > 0 }}"
     instructions: |-
       Finalize the run: pin the durable result snapshot, confirm the winning
       metric, and render the trial ledger and report. The reader is deciding
@@ -1001,7 +1097,8 @@ tasks:
         `confirmation_spread` is 0, `confirmed` is true (there is no claim to
         falsify), and no sandbox is needed — skip to Step 2. Note the input
         snapshot carries only its own TTL, so say in the summary when it expires
-        and that nothing durable was pinned.
+        and that nothing durable was pinned. Report `reconciliation_gap` 0 and
+        `reconciled` true — there is no claim to reconcile.
       - Otherwise boot a sandbox from `best_snapshot` with `sandbox_ttl`. If
         `bench_seed_env` is non-empty, export it set to `holdout_seed` — a value
         NO round used. That makes this a genuine held-out measurement: the
@@ -1027,6 +1124,36 @@ tasks:
         fresh inputs the gain evaporates. This is the more serious of the two,
         and a held-out confirmation is the only thing in the run that can see it.
         Report the numbers exactly as measured; never reconcile them.
+      - RECONCILE THE LEDGER. The loop banked a paired gain on every accepted
+        round, and `accepted_gain_total` is their sum — the total improvement the
+        loop claims it won. If every accepted gain was real and the gains simply
+        add up, then:
+
+          baseline_metric - confirmation_metric  ~=  accepted_gain_total
+          (for a maximize metric: confirmation_metric - baseline_metric)
+
+        Compute both sides and report the difference as
+        `reconciliation_gap` (claimed minus delivered, so a POSITIVE gap means
+        the loop claims more than the cold boot delivers). Set `reconciled`
+        false when the gap exceeds `max(noise_epsilon * max(|baseline_metric|, 1),
+        significance_z * confirmation_spread)`.
+
+        This is the single most informative number in the run and it is nearly
+        free, because it cross-checks the loop's own arithmetic against physical
+        reality on a machine the loop never touched. A large positive gap says
+        the accepted gains did NOT compose — the loop banked improvements that
+        individually measured real and collectively did not survive. The usual
+        causes, in rough order of likelihood: the gains were measured against
+        incumbents that had drifted; several accepted changes relieved the SAME
+        bottleneck and so double-counted; or some accepted rounds were noise that
+        cleared the bar by luck. A large NEGATIVE gap (the cold boot is better
+        than the loop's own arithmetic predicts) is not good news either — it
+        means the measurements are not tracking the artifact, and you should say
+        so rather than celebrate.
+
+        Do not adjust any figure to close the gap. Report the gap, name the most
+        likely cause, and — like a false `confirmed` — let a false `reconciled`
+        lead the summary.
         A false `confirmed` does NOT abort the run — the snapshot is still
         pinned and returned — but it must lead the summary, mark the winning
         trials suspicious, and state plainly that the headline improvement is
@@ -1044,30 +1171,40 @@ tasks:
 
       Step 2 — Trial ledger.
       - `log` is the loop's raw TSV: columns `decision`, `valid`,
-        `candidate_metric_or_na`, `spread_or_na`, `best_after`,
+        `candidate_metric_or_na`, `paired_gain_or_na`, `best_after`,
         `candidate_snapshot_or_na`, `change`, `decision_source`,
         `measurement_note`, `rationale`, `incumbent_metric_or_na`,
-        `incumbent_spread_or_na`. The last two are the incumbent re-measured in
-        the SAME sandbox as the candidate that round — the keep/discard decision
-        was made on `candidate_metric` vs `incumbent_metric`, so that pair is the
-        real evidence for the round and belongs in the report; `best_after` is
-        the running best across the run, useful for the progress chart but not
-        the comparison the decision turned on. A round whose `incumbent_metric`
-        drifts far from the previous round's is telling you the measurement
-        environment moved — call that out. The `best_after` column is the best
-        metric AFTER this round's keep/discard was applied (equals the
-        candidate on a kept round, the prior best otherwise) — a proper
-        best-so-far series, not the incumbent going in. Violation rounds carry `violation` in
-        the decision column; `decision_source` is `auto` for rounds decided by
-        the mechanical threshold rule and `agent` for rounds escalated to the
-        review gate; the last two columns may be empty. Convert it, in order,
-        into one typed trial per round (`round` is the 1-based row index).
+        `paired_gain_stderr_or_na`, `threshold`.
+      - The round's real evidence is the trio `paired_gain`,
+        `paired_gain_stderr` and `threshold`. The candidate and the incumbent
+        were measured as interleaved pairs in the SAME sandbox, and
+        `paired_gain` is the mean of the per-pair differences, already signed so
+        that positive means better. A round was kept when `paired_gain` exceeded
+        `threshold`, which is itself the larger of the configured noise band and
+        `significance_z` standard errors. So a round with a big `paired_gain`
+        and an equally big `paired_gain_stderr` did NOT find anything — it just
+        had a noisy afternoon. Read those two together, always, and say plainly
+        in the report which of the accepted rounds had comfortable margins and
+        which squeaked past.
+      - `candidate_metric` and `incumbent_metric` are the two arms' medians.
+        They are for the chart and for sanity, NOT for the decision. A round
+        whose `incumbent_metric` drifts far from the previous round's is telling
+        you the measurement environment moved between rounds — the paired
+        comparison inside each round is still valid, but call the drift out.
+        `best_after` is the best metric AFTER this round's keep/discard was
+        applied (equals the candidate on a kept round, the prior best otherwise)
+        — a proper best-so-far series for the progress chart.
+      - Violation rounds carry `violation` in the decision column;
+        `decision_source` is `auto` for rounds decided by the mechanical
+        threshold rule and `agent` for rounds escalated to the review gate;
+        `measurement_note` and `rationale` may be empty. Convert the log, in
+        order, into one typed trial per round (`round` is the 1-based row index).
       - `hypothesis`: the row's change description. `snapshot_id`: the row's
-        candidate snapshot column ("" when `na`). `metric`, `spread`,
-        `best_after`: copied verbatim, omitted when `na` — never recomputed or
-        rounded. `decision_source`: copied verbatim. `measurement_note`:
-        copied verbatim, omitted when empty. The rationale column is not a
-        trial field — use it to sharpen `interpretation`.
+        candidate snapshot column ("" when `na`). `metric`, `paired_gain`,
+        `paired_gain_stderr`, `best_after`: copied verbatim, omitted when `na` —
+        never recomputed or rounded. `decision_source`: copied verbatim.
+        `measurement_note`: copied verbatim, omitted when empty. The rationale
+        column is not a trial field — use it to sharpen `interpretation`.
       - `status`: `invalid` when the valid column is false (including violation
         rounds); else `pass` when the decision was keep; else `fail`. Upgrade to
         `suspicious` — regardless of keep/discard — when the round shows anomaly
@@ -1177,9 +1314,15 @@ tasks:
         noise_epsilon:
           schema: { type: number }
           value: "${{ tasks.setup.outputs.values.effective_noise_epsilon }}"
+        significance_z:
+          schema: { type: number }
+          value: "${{ inputs.values.significance_z }}"
         accepted_count:
           schema: { type: number }
           value: "${{ tasks.iterate.outputs.values.accepted_count }}"
+        accepted_gain_total:
+          schema: { type: number, description: Sum of the paired gains the loop accepted — what it claims it banked }
+          value: "${{ tasks.iterate.outputs.values.accepted_gain_total }}"
         discarded_count:
           schema: { type: number }
           value: "${{ tasks.iterate.outputs.values.discarded_count }}"
@@ -1212,6 +1355,16 @@ tasks:
           schema:
             type: number
             description: Max minus min across the confirmation measurements (0 when nothing was accepted)
+        reconciliation_gap:
+          required: true
+          schema:
+            type: number
+            description: Improvement the loop CLAIMED (accepted_gain_total) minus the improvement the cold boot actually DELIVERED (baseline minus confirmation, in the goal direction). Positive means the accepted gains did not compose. 0 when nothing was accepted
+        reconciled:
+          required: true
+          schema:
+            type: boolean
+            description: Whether reconciliation_gap is within the noise band — false means the loop's own accepted gains do not add up to the result it shipped
         confirmed:
           required: true
           schema:
@@ -1231,7 +1384,8 @@ tasks:
                 snapshot_id: { type: string }
                 status: { type: string, enum: [pass, fail, invalid, suspicious] }
                 metric: { type: number }
-                spread: { type: number }
+                paired_gain: { type: number }
+                paired_gain_stderr: { type: number }
                 best_after: { type: number }
                 decision_source: { type: string, enum: [auto, agent] }
                 measurement_note: { type: string }
@@ -1274,6 +1428,14 @@ outputs:
       required: true
       schema: { type: boolean, description: Whether the winning metric reproduced on a cold boot of the result snapshot; false means the headline improvement is unverified }
       value: "${{ tasks.finalize.outputs.values.confirmed }}"
+    reconciliation_gap:
+      required: true
+      schema: { type: number, description: Improvement the loop claimed minus the improvement the cold boot delivered; positive means the accepted per-round gains did not compose }
+      value: "${{ tasks.finalize.outputs.values.reconciliation_gap }}"
+    reconciled:
+      required: true
+      schema: { type: boolean, description: Whether the sum of the loop's accepted gains matches the shipped result; false means the loop's own arithmetic disagrees with physical reality }
+      value: "${{ tasks.finalize.outputs.values.reconciled }}"
     improvement_pct:
       required: true
       schema: { type: number }
