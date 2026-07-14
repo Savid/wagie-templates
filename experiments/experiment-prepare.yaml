@@ -56,7 +56,7 @@ inputs:
       schema: { type: string, default: 24h }
 tasks:
   prepare:
-    quality-gate: "${{ has(outputs.values.prepared) && has(outputs.values.harness_report) && size(outputs.values.harness_report) > 0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && (outputs.values.prepared == false || (has(outputs.values.prepared_snapshot_id) && size(outputs.values.prepared_snapshot_id) > 0 && has(outputs.values.goal) && size(outputs.values.goal) > 0 && has(outputs.values.workdir) && size(outputs.values.workdir) > 0 && has(outputs.values.target_files) && size(outputs.values.target_files) > 0 && has(outputs.values.frozen_files) && size(outputs.values.frozen_files) > 0 && has(outputs.values.experiment_command) && size(outputs.values.experiment_command) > 0 && has(outputs.values.correctness_command) && size(outputs.values.correctness_command) > 0 && has(outputs.values.metric_name) && size(outputs.values.metric_name) > 0 && has(outputs.values.metric_direction) && size(outputs.values.metric_direction) > 0)) }}"
+    quality-gate: "${{ has(outputs.values.prepared) && has(outputs.values.harness_report) && size(outputs.values.harness_report) > 0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && (outputs.values.prepared == false || (has(outputs.values.prepared_snapshot_id) && size(outputs.values.prepared_snapshot_id) > 0 && has(outputs.values.goal) && size(outputs.values.goal) > 0 && has(outputs.values.workdir) && size(outputs.values.workdir) > 0 && has(outputs.values.target_files) && size(outputs.values.target_files) > 0 && has(outputs.values.frozen_files) && size(outputs.values.frozen_files) > 0 && has(outputs.values.experiment_command) && size(outputs.values.experiment_command) > 0 && has(outputs.values.correctness_command) && size(outputs.values.correctness_command) > 0 && has(outputs.values.metric_name) && size(outputs.values.metric_name) > 0 && has(outputs.values.metric_direction) && size(outputs.values.metric_direction) > 0 && has(outputs.values.bench_seed_env) && has(outputs.values.headroom_metric))) }}"
     instructions: |-
       Turn a repository and a plain-language target into a snapshot with a
       trustworthy, hard-to-game scoring surface, and emit exactly the inputs
@@ -126,6 +126,18 @@ tasks:
         inputs, so that no input is timed twice anywhere in the benchmark, not
         within a pass and not across passes. Size the batches so the total work
         puts the figure well above the clock's resolution floor;
+      - SEED THE INPUT GENERATOR FROM THE ENVIRONMENT, not from a constant.
+        Read an integer seed from an environment variable (choose a name, e.g.
+        `BENCH_SEED`, and report it as `bench_seed_env`), falling back to a
+        fixed default when it is unset so the bench stays runnable by hand. The
+        GENERATOR is frozen; only the seed varies. This is what stops a
+        candidate from precomputing the answers: the frozen files are readable
+        by the optimizer, so with a compile-time-known input set it can embed a
+        lookup table keyed on exactly the inputs that get timed, pass the oracle
+        (different inputs, table misses, real code runs), and post a huge fake
+        win. With the seed supplied per round it cannot know at edit time which
+        inputs will be timed. Fairness is preserved because the loop measures
+        the candidate and the incumbent in the same round under the SAME seed;
       - deterministic and free of I/O, network, and wall-clock dependence;
       - reads nothing from `target_files` except by calling the target through
         its normal interface.
@@ -165,31 +177,124 @@ tasks:
       `correctness_command` reads as input is frozen and never appears in
       `target_files`.
 
-      Step 6 — Verify the harness before trusting it. All five must hold; if
-      any fails, bail (`prepared` false, which check failed in
-      `harness_report`):
+      Step 6 — Verify the harness before trusting it. Every guard is an
+      EXECUTED probe: perturb the code, run the commands, compare. None of them
+      is a judgement, and that is the point — a harness is the one artifact an
+      opinion cannot certify. All must hold; if any fails, bail (`prepared`
+      false, naming the failed guard in `harness_report`).
+
+      Baseline guards:
       - baseline measures: `experiment_command` from the workdir emits a
         clean, parseable metric, stable across a few back-to-back runs and
-        well above the timer floor;
+        well above the timer floor. The metric line must appear exactly ONCE
+        in the output — if the target can print a second one, it can lie.
       - baseline is correct: `correctness_command` exits zero on the untouched
-        code;
+        code. Run every command with the language's cache disabled (Go:
+        `-count=1`); a cached PASS from a previous run proves nothing.
+
+      Negative controls (things that must NOT move, or MUST fail):
       - no-op guard: a semantically neutral edit to a target file (whitespace,
         reordering independent statements) does NOT materially move the metric
         — if it does, the bench is measuring noise, not the target;
       - tamper guard: replacing the target body with a trivially wrong
         constant MUST make `correctness_command` fail — proving the oracle
         actually pins behavior and is not vacuous;
-      - CACHE GUARD: add a memoisation cache to the target — keep a map from the
-        call's arguments to its result and return the stored value on a repeat —
-        then run BOTH commands. The oracle must still pass (it will; a cache is
-        semantically correct), and the metric must NOT materially improve. If
-        the cache wins, your benchmark is replaying inputs somewhere and the
-        loop will spend its whole budget discovering that. Find the replay, make
-        every timed input distinct, and re-check. This is the one guard that
-        catches a harness which rewards a change that is correct, plausible, and
-        worthless — and no correctness oracle can catch it for you.
+      - MUTATION BATTERY: one constant-return mutant is the easiest possible
+        mutant to kill and certifies almost nothing. Seed 8-12 mutants that
+        look like PLAUSIBLE OPTIMIZATION BUGS, not sabotage: an off-by-one loop
+        bound; a flipped comparison (`<` -> `<=`); the zero value returned on
+        empty/nil input; a dropped error check; the input returned unchanged;
+        a truncated or reordered result; a dropped normalisation or rounding
+        step; the input mutated in place and returned as a view; the result
+        perturbed by 1 ULP, and by 10x the declared tolerance. EVERY mutant
+        must compile, run, and be KILLED by `correctness_command` (100% kill
+        rate — anything less is a hole an optimizer can walk through). Record
+        which mutants the golden table kills and which only the repo's tests
+        kill: if the table kills nothing the tests don't, it is redundant; if
+        the tests kill nothing the table doesn't, they are vacuous. Both
+        numbers go in `harness_report`.
+      - TOLERANCE CALIBRATION: a perturbation at 10x the declared float
+        tolerance MUST fail; at 0.1x it MUST pass. Otherwise the tolerance is
+        either vacuous or brittle.
+      - ORACLE PLUMBING GUARD: corrupt one row of the frozen golden table —
+        `correctness_command` MUST fail. This catches an empty table, a table
+        that is never read, a swallowed exception, and a comparison that is
+        silently a no-op. It is the tamper guard for the oracle's own wiring.
+      - CACHE GUARD: add a memoisation cache to the target — a map from the
+        call's arguments to its result, returning the stored value on a repeat
+        — then run BOTH commands. The oracle must still pass (it will; a cache
+        is semantically correct), and the metric must NOT materially improve.
+        If the cache wins, the benchmark is replaying inputs somewhere and the
+        loop will spend its whole budget discovering that.
+      - PRECOMPUTATION GUARD: the cache guard above only catches a RUNTIME memo
+        over repeated inputs. The deadlier version is a candidate that reads the
+        frozen bench source (it can — frozen means unmodifiable, not unreadable),
+        derives the exact timed inputs at edit time, and embeds a lookup table
+        keyed on them, falling back to the real implementation on a miss. The
+        oracle uses different inputs, misses the table, runs the real code, and
+        PASSES. Probe it: hard-code a table of the answers for the current seed's
+        inputs into the target. If the metric improves, the loop can win by
+        memorising the benchmark, and the harness is broken. The fix is
+        `bench_seed_env` below — with a per-round seed the candidate cannot know
+        the timed inputs when it edits, and this probe can no longer win.
+      - A/A GUARD: measure the untouched baseline against an IDENTICAL COPY of
+        itself, several times, and compare them the way the loop will — a real
+        gain must exceed `max(relative noise band, observed spread)`. NO A/A
+        comparison may declare a win. If identical code can beat itself, the
+        loop will accept noise as an improvement and promote it into the
+        lineage permanently, and the run is lost before it starts. This tests
+        the ACCEPTANCE RULE, not the benchmark, and it is the only guard that
+        does.
+      - TIMEOUT GUARD: an infinite loop in the target MUST make
+        `correctness_command` terminate non-zero within a bounded time. Without
+        this, one deadlocking candidate stalls the whole run.
+      - BUILD GUARD: a syntax error in the target MUST make both commands fail.
+        A harness that silently scores a stale binary scores nothing.
+      - RACE / ALIASING / IMMUTABILITY: run the oracle with the target called
+        concurrently and with the race detector on (Go: `-race`); deep-copy each
+        input and assert it is byte-identical after the call; call twice and
+        mutate the first result, asserting the second is unaffected. These are
+        the contracts an output-only golden table STRUCTURALLY cannot see, and
+        they are exactly what a plausible optimization breaks — a memo cache
+        shared across goroutines, a returned slice aliasing internal state, a
+        buffer reused in place. If `correctness_command` is the golden table
+        alone, all three sail through.
+
+      POSITIVE CONTROL (the most important guard here — do not skip it):
+      - Every guard above is a negative control: something that must not move or
+        must fail. A harness that measures NOTHING AT ALL passes every one of
+        them. Nothing so far proves a real improvement would actually register.
+      - Inject a calibrated, semantically neutral SLOWDOWN into the target —
+        e.g. redo the target's core work k times, or spin a computed no-op —
+        sized to roughly 10% of the baseline metric. Assert the metric moves in
+        the expected direction by approximately the injected amount (within the
+        observed noise band), and that `correctness_command` still passes (the
+        edit is neutral). Then remove it and confirm the metric returns.
+      - This single probe establishes: the timed region actually contains the
+        target; the metric's sign is right; the oracle does not false-positive
+        on neutral edits; and — most valuable — the harness's MINIMUM DETECTABLE
+        EFFECT. If a deliberately injected 10% regression cannot be seen, then a
+        real 10% win cannot be seen either, and twenty rounds of optimization
+        are already wasted. BAIL.
+      - Report the measured minimum detectable effect in `harness_report`.
+
+      HEADROOM (free — you already made the edit):
+      - During the tamper guard you replace the target body with a constant. You
+        currently read only the oracle. ALSO READ THE METRIC. That gives the
+        theoretical ceiling for the entire experiment:
+        `headroom = (baseline - null_body_metric) / baseline`.
+      - If headroom is 0.15, then deleting the target ENTIRELY buys 15% and the
+        other 85% of the metric is harness overhead the optimizer may not touch.
+        Bail below 0.5, and say so; prefer >= 0.8. Re-scope the timed region
+        instead of running an experiment that is capped before it starts.
+      - Emit it as `headroom_metric` (the null-body figure). The loop takes it as
+        `metric_limit` and stops when it is within the noise band of it, instead
+        of grinding out its remaining rounds for nothing.
+
       Revert every probe edit so the sandbox is left in the clean baseline
       state; the snapshot must capture the original code, not your probes.
+      Verify with the VCS (`git diff` must be empty for target files) rather
+      than by remembering what you changed.
 
       Step 7 — Snapshot and emit. Snapshot the clean prepared sandbox with
       `prepared_snapshot_ttl` (deterministic key and a byte-identical note
@@ -201,10 +306,13 @@ tasks:
       that the frozen test pins correctness while the frozen bench times the
       target. Return every loop input (`prepared_snapshot_id`, `goal`,
       `workdir`, `target_files`, `frozen_files`, `experiment_command`,
-      `correctness_command`, `metric_name`, `metric_direction`), the forwarded
-      `compute_commands`, `prepared` true, and a `harness_report` recording
-      what you found or built, the hygiene choices, and all four verification
-      results.
+      `correctness_command`, `metric_name`, `metric_direction`,
+      `bench_seed_env`, `headroom_metric`), the forwarded `compute_commands`,
+      `prepared` true, and a `harness_report` recording what you found or built,
+      the hygiene choices, and EVERY guard result — including the mutation kill
+      rate, the measured minimum detectable effect from the positive control,
+      and the headroom. A reader must be able to tell from the report alone
+      whether this harness can see the win it is being asked to find.
 
       Requires a worker with shell access to the panda CLI, compute datasource
       credentials, and the ability to reach and clone the repository.
@@ -272,9 +380,15 @@ tasks:
         compute_commands:
           required: true
           schema: { type: string, description: Verified panda-compute CLI cheatsheet for the downstream loop to reuse verbatim }
+        bench_seed_env:
+          required: true
+          schema: { type: string, description: Environment variable the benchmark reads its input-generator seed from; empty when the bench takes no seed (the optimizer can then precompute the timed inputs) }
+        headroom_metric:
+          required: true
+          schema: { type: number, description: Metric with the target body nulled out — the theoretical ceiling for the whole experiment; the loop takes it as metric_limit and stops on reaching it }
         harness_report:
           required: true
-          schema: { type: string, description: Markdown record of what was found or built, hygiene choices, and the four verification results (or the bail reason) }
+          schema: { type: string, description: Markdown record of what was found or built, hygiene choices, and every guard result including the measured minimum detectable effect and headroom (or the bail reason) }
 outputs:
   values:
     prepared:
@@ -309,6 +423,14 @@ outputs:
       required: true
       schema: { type: string }
       value: "${{ tasks.prepare.outputs.values.correctness_command }}"
+    bench_seed_env:
+      required: true
+      schema: { type: string, description: Environment variable the benchmark reads its input-generator seed from (empty when it takes none) }
+      value: "${{ tasks.prepare.outputs.values.bench_seed_env }}"
+    headroom_metric:
+      required: true
+      schema: { type: number, description: Metric with the target body nulled out — the experiment's theoretical ceiling, usable as the loop's metric_limit }
+      value: "${{ tasks.prepare.outputs.values.headroom_metric }}"
     metric_name:
       required: true
       schema: { type: string }

@@ -49,6 +49,9 @@ inputs:
     correctness_command:
       description: Optional in-guest gate command run from workdir; non-zero exit marks the candidate invalid and skips measurement. Empty disables the gate.
       schema: { type: string, default: "" }
+    bench_seed_env:
+      description: "Environment variable the benchmark reads its input-generator seed from. When set, every round exports a fresh seed so a candidate cannot precompute the timed inputs and embed a lookup table (which would pass the correctness oracle and post a huge fake win). Both paired arms of a round share the round's seed, so the comparison stays fair. Empty means the bench takes no seed — the inputs are then knowable at edit time and memorisable."
+      schema: { type: string, default: "" }
     metric_name:
       required: true
       description: Label of the scalar being optimized (e.g. ns_per_op, val_loss, size_bytes).
@@ -148,7 +151,9 @@ tasks:
       the script must live outside `workdir` so it does not perturb
       `tree_manifest`).
 
-      Step 3 — Baseline and noise calibration. From `workdir` run
+      Step 3 — Baseline and noise calibration. If `bench_seed_env` is non-empty,
+      export it set to 0 for every baseline run (the loop uses 1, 2, 3, ... per
+      round, and finalize uses a seed none of them touched). From `workdir` run
       `experiment_command` three times — batch all three into a single exec
       call when the expected duration fits the exec limit, otherwise launch
       detached and poll — and extract the scalar labelled
@@ -214,6 +219,9 @@ tasks:
         experiment_command:
           schema: { type: string }
           value: "${{ inputs.values.experiment_command }}"
+        bench_seed_env:
+          schema: { type: string }
+          value: "${{ inputs.values.?bench_seed_env.orValue('') }}"
         metric_name:
           schema: { type: string }
           value: "${{ inputs.values.metric_name }}"
@@ -305,6 +313,10 @@ tasks:
           required: true
           schema: { type: string }
           value: "${{ inputs.values.?correctness_command.orValue('') }}"
+        bench_seed_env:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?bench_seed_env.orValue('') }}"
         metric_name:
           required: true
           schema: { type: string }
@@ -602,6 +614,14 @@ tasks:
           against a `best_metric` that was recorded on some other machine is how
           a loop convinces itself of a win it cannot reproduce.
 
+          - Seed: if `bench_seed_env` is non-empty, export it set to
+            `round_seed` for EVERY measurement run in this round — both arms,
+            same value. The seed changes each round so a candidate cannot know
+            at edit time which inputs will be timed (and so cannot precompute
+            them into a lookup table that beats the bench while still passing
+            the oracle); it is identical across the two arms of a round so the
+            paired comparison stays fair. Never invent your own seed and never
+            let the arms differ.
           - Candidate arm: from `workdir` run `experiment_command`
             `measurement_runs` times.
           - Incumbent arm: restore `target_files` from `incumbent_backup`
@@ -682,6 +702,16 @@ tasks:
             correctness_command:
               schema: { type: string }
               value: "${{ inputs.values.correctness_command }}"
+            bench_seed_env:
+              schema: { type: string }
+              value: "${{ inputs.values.bench_seed_env }}"
+            round_seed:
+              schema: { type: number, description: This round's benchmark seed; both paired arms use it, and it changes every round }
+              value: >-
+                ${{ loop.accepted_count.orValue(0.0)
+                    + loop.discarded_count.orValue(0.0)
+                    + loop.integrity_violation_count.orValue(0.0)
+                    + 1.0 }}
             metric_name:
               schema: { type: string }
               value: "${{ inputs.values.metric_name }}"
@@ -986,19 +1016,31 @@ tasks:
         falsify), and no sandbox is needed — skip to Step 2. Note the input
         snapshot carries only its own TTL, so say in the summary when it expires
         and that nothing durable was pinned.
-      - Otherwise boot a sandbox from `best_snapshot` with `sandbox_ttl`. Run
-        `experiment_command` from `workdir` `measurement_runs` times and report
-        the median as `confirmation_metric` and max minus min as
+      - Otherwise boot a sandbox from `best_snapshot` with `sandbox_ttl`. If
+        `bench_seed_env` is non-empty, export it set to `holdout_seed` — a value
+        NO round used. That makes this a genuine held-out measurement: the
+        winner was selected against seeds 1..N and is now scored on inputs it
+        never saw. A win that only exists on the seeds it was selected against
+        is not a win, and this is the one place in the run that can tell.
+        Run `experiment_command` from `workdir` `measurement_runs` times and
+        report the median as `confirmation_metric` and max minus min as
         `confirmation_spread`. This is the run's ONLY independent check that the
         winning number survives a cold boot of the very snapshot being shipped,
         so it is authoritative, not decorative: a single reading would be
         indistinguishable from jitter and is not enough to certify a result.
         Set `confirmed` false when `confirmation_metric` differs from
         `best_metric` by more than
-        `max(noise_epsilon * max(|best_metric|, 1), confirmation_spread)` — the
-        code is identical, so a gap that large means the loop's best figure does
-        not reproduce and was measured under conditions the snapshot does not
-        carry. Report the numbers exactly as measured; never reconcile them.
+        `max(noise_epsilon * max(|best_metric|, 1), confirmation_spread)`. The
+        code is identical, so a gap that large has exactly two explanations and
+        you should say which you believe:
+        (a) the loop's numbers were measured under conditions the snapshot does
+        not carry (a warm sandbox, a different host) and the best figure simply
+        does not reproduce; or
+        (b) the win was specific to the seeds it was selected against — i.e. the
+        optimizer fitted the benchmark's inputs rather than the workload, and on
+        fresh inputs the gain evaporates. This is the more serious of the two,
+        and a held-out confirmation is the only thing in the run that can see it.
+        Report the numbers exactly as measured; never reconcile them.
         A false `confirmed` does NOT abort the run — the snapshot is still
         pinned and returned — but it must lead the summary, mark the winning
         trials suspicious, and state plainly that the headline improvement is
@@ -1106,6 +1148,9 @@ tasks:
         experiment_command:
           schema: { type: string }
           value: "${{ inputs.values.experiment_command }}"
+        bench_seed_env:
+          schema: { type: string }
+          value: "${{ inputs.values.?bench_seed_env.orValue('') }}"
         metric_name:
           schema: { type: string }
           value: "${{ inputs.values.metric_name }}"
@@ -1121,6 +1166,13 @@ tasks:
         baseline_metric:
           schema: { type: number }
           value: "${{ tasks.setup.outputs.values.baseline_metric }}"
+        holdout_seed:
+          schema: { type: number, description: A benchmark seed no round used, so the confirmation scores the winner on inputs it was never selected against }
+          value: >-
+            ${{ tasks.iterate.outputs.values.accepted_count
+                + tasks.iterate.outputs.values.discarded_count
+                + tasks.iterate.outputs.values.integrity_violation_count
+                + 1000.0 }}
         best_snapshot:
           schema: { type: string }
           value: "${{ tasks.iterate.outputs.values.best_snapshot }}"
