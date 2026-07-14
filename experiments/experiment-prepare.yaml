@@ -107,14 +107,25 @@ tasks:
       one, meeting every hygiene rule — these are what make "faster" mean
       something:
       - seeded, varied inputs representative of real use, generated
-        deterministically; a warmup before timing;
+        deterministically; a warmup before timing, using inputs DISJOINT from
+        the timed ones;
       - CONSUME the result (checksum/accumulate and surface it) so the
         compiler or runtime cannot optimize the measured work away — Go
         dead-code elimination and Python constant-folding will otherwise make
         a "speedup" free and meaningless;
-      - internal repetition with a median (or trimmed mean) over several
-        sub-runs; enough total work that the figure sits well above the
-        clock's resolution floor;
+      - EVERY TIMED CALL GETS A DISTINCT INPUT. Reach the total work you need by
+        generating more inputs, never by replaying the same one. A benchmark
+        that times the same input N times does not measure the target — it
+        measures the target once and a cache N-1 times, and it hands the
+        optimizer a legitimate-looking memoisation win that is worthless in
+        production and that a correctness oracle will happily wave through
+        (a cache returns correct answers). This is the single easiest way to
+        build a harness that rewards the wrong thing.
+      - aggregate over several sub-runs and report a median (or trimmed mean)
+        across them — but give each sub-run its OWN disjoint batch of generated
+        inputs, so that no input is timed twice anywhere in the benchmark, not
+        within a pass and not across passes. Size the batches so the total work
+        puts the figure well above the clock's resolution floor;
       - deterministic and free of I/O, network, and wall-clock dependence;
       - reads nothing from `target_files` except by calling the target through
         its normal interface.
@@ -133,7 +144,17 @@ tasks:
       golden outputs and exits non-zero on any divergence. This makes
       "no change in observable behavior" mechanically enforced against what
       the code actually did, not against a test the optimizer could satisfy
-      vacuously. Augment, do not replace, the repo's existing tests.
+      vacuously.
+
+      Augment, do not replace, the repo's existing tests — and mean it:
+      `correctness_command` must RUN the repo's own tests covering the target
+      alongside the golden oracle, not the oracle alone. The existing suite
+      encodes contracts the golden table cannot see, because the table only
+      records outputs: concurrency safety, aliasing of returned values,
+      allocation behavior, error paths. Those are exactly the contracts a
+      plausible optimization breaks (a cache shared across goroutines, a
+      returned slice that now aliases internal state), and a golden table taken
+      on a single-threaded pass will pass every one of them.
 
       Step 5 — Partition frozen vs target. `frozen_files` is everything that
       defines or feeds the score: the benchmark, the correctness harness and
@@ -144,7 +165,7 @@ tasks:
       `correctness_command` reads as input is frozen and never appears in
       `target_files`.
 
-      Step 6 — Verify the harness before trusting it. All four must hold; if
+      Step 6 — Verify the harness before trusting it. All five must hold; if
       any fails, bail (`prepared` false, which check failed in
       `harness_report`):
       - baseline measures: `experiment_command` from the workdir emits a
@@ -157,7 +178,16 @@ tasks:
         — if it does, the bench is measuring noise, not the target;
       - tamper guard: replacing the target body with a trivially wrong
         constant MUST make `correctness_command` fail — proving the oracle
-        actually pins behavior and is not vacuous.
+        actually pins behavior and is not vacuous;
+      - CACHE GUARD: add a memoisation cache to the target — keep a map from the
+        call's arguments to its result and return the stored value on a repeat —
+        then run BOTH commands. The oracle must still pass (it will; a cache is
+        semantically correct), and the metric must NOT materially improve. If
+        the cache wins, your benchmark is replaying inputs somewhere and the
+        loop will spend its whole budget discovering that. Find the replay, make
+        every timed input distinct, and re-check. This is the one guard that
+        catches a harness which rewards a change that is correct, plausible, and
+        worthless — and no correctness oracle can catch it for you.
       Revert every probe edit so the sandbox is left in the clean baseline
       state; the snapshot must capture the original code, not your probes.
 
