@@ -2,11 +2,8 @@ module github.com/savid/wagie-templates
 
 go 1.26.5
 
-// Hard-cutover development against local core templates; drop when the next wagie release is pinned.
-replace github.com/savid/wagie => ../wagie
-
 require (
-	github.com/savid/wagie v0.0.10
+	github.com/savid/wagie v0.0.14
 	gopkg.in/yaml.v3 v3.0.1
 )
 

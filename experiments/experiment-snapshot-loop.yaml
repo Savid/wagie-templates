@@ -97,7 +97,7 @@ inputs:
       schema: { type: string, default: "" }
 tasks:
   setup:
-    quality-gate: "${{ has(outputs.values.baseline_metric) && has(outputs.values.frozen_manifest) && has(outputs.values.frozen_digest) && size(outputs.values.frozen_digest) > 0 && has(outputs.values.tree_manifest) && size(outputs.values.tree_manifest) > 0 && has(outputs.values.tree_digest) && size(outputs.values.tree_digest) > 0 && has(outputs.values.manifest_command) && size(outputs.values.manifest_command) > 0 && has(outputs.values.effective_noise_epsilon) && outputs.values.effective_noise_epsilon >= 0.0 && has(outputs.values.effective_measurement_runs) && outputs.values.effective_measurement_runs >= 1.0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && has(outputs.values.environment_summary) && size(outputs.values.environment_summary) > 0 }}"
+    quality-gate: "${{ has(outputs.values.baseline_metric) && has(outputs.values.frozen_digest) && size(outputs.values.frozen_digest) > 0 && has(outputs.values.tree_digest) && size(outputs.values.tree_digest) > 0 && has(outputs.values.manifest_store) && size(outputs.values.manifest_store) > 0 && has(outputs.values.anchored_snapshot_id) && size(outputs.values.anchored_snapshot_id) > 0 && has(outputs.values.manifest_command) && size(outputs.values.manifest_command) > 0 && has(outputs.values.manifest_script_digest) && size(outputs.values.manifest_script_digest) > 0 && has(outputs.values.effective_noise_epsilon) && outputs.values.effective_noise_epsilon >= 0.0 && has(outputs.values.effective_measurement_runs) && outputs.values.effective_measurement_runs >= 1.0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && has(outputs.values.environment_summary) && size(outputs.values.environment_summary) > 0 }}"
     instructions: |-
       Establish the baseline the loop will optimize against. The input snapshot IS
       the baseline state — you verify it, measure it, and fingerprint its scoring
@@ -133,31 +133,76 @@ tasks:
       identical canonical rules: recurse directories, sort bytewise by
       workdir-relative path, and record per entry the relative path, entry type,
       executable mode, and file SHA-256 or symlink target.
-      - `frozen_manifest` over `frozen_files`, plus the SHA-256 of its UTF-8
-        bytes as `frozen_digest` (`sha256:<hex>`). An empty `frozen_files`
-        yields the digest of the empty manifest — the gate then never fires.
-      - `tree_manifest` over the ENTIRE `workdir` (every path under it,
-        excluding only `.git/`), plus its SHA-256 as `tree_digest`. This is the
-        scope baseline: a later task rebuilds it and rejects any candidate that
-        added, removed, or modified a path outside `target_files`. Without it
-        "edit only the target files" is an unenforced request.
+      - the FROZEN manifest over `frozen_files`, with the SHA-256 of its UTF-8
+        bytes returned as `frozen_digest` (`sha256:<hex>`). An empty
+        `frozen_files` yields the digest of the empty manifest — the gate then
+        never fires.
+      - the TREE manifest over the ENTIRE `workdir` (every path under it,
+        excluding only `.git/`), with its SHA-256 returned as `tree_digest`.
+        This is the scope baseline: a later task rebuilds it and rejects any
+        candidate that added, removed, or modified a path outside
+        `target_files`. Without it "edit only the target files" is an
+        unenforced request.
 
-      Emit both manifests with the SAME command, and return that command
-      verbatim as `manifest_command` (a single shell pipeline, with the workdir
-      and the path list as its only variables). Later tasks re-run this exact
-      string rather than reconstructing a pipeline from prose — two agents
+      The manifest CONTENTS stay in the guest — they are machine-comparison
+      data, one hash line per file, and for a real repo they run to hundreds
+      of lines that must never be hauled through workflow state or pasted
+      into any agent's context (build, hash, and store them in one guest
+      exec without reading them back). Write both files to a directory
+      OUTSIDE `workdir` (so the tree manifest does not try to contain
+      itself) that nothing in the experiment reads — e.g.
+      `$HOME/.harness-manifests/` with exactly `frozen_manifest.txt` and
+      `tree_manifest.txt` in it — and return that absolute directory path as
+      `manifest_store`. Only the two digests, the store path, and the command
+      cross the workflow boundary; the digests carried in workflow state are
+      the root of trust that later proves the stored files were not tampered
+      with.
+
+      Generate both manifests with ONE script, and STORE THE SCRIPT in the
+      guest too: write the generator as `manifest.sh` inside `manifest_store`
+      alongside the two baselines. The script takes EXACTLY ONE argument —
+      the absolute directory it writes `frozen_manifest.txt` and
+      `tree_manifest.txt` into — and REFUSES to run (non-zero exit with a
+      one-line message) when that directory is the one containing the script
+      itself: the stored baselines are write-once lineage artifacts, and a
+      live run wedged itself when a later round re-ran the generator pointed
+      at the store and silently overwrote `tree_manifest.txt` with the
+      current tree — every subsequent round then failed the baseline trust
+      check against the state-carried digest, with no way back. Author the
+      baselines by running the script with a throwaway output directory and
+      MOVING the two files into `manifest_store` next to `manifest.sh`.
+      Return `manifest_command` as exactly `sh <manifest_store>/manifest.sh`
+      (each consumer appends its own fresh output directory) plus the script
+      file's `sha256:<hex>` as `manifest_script_digest`. Two agents
       independently reimplementing `find | sort | sha256sum` will disagree on
-      locale sort order or symlink handling and manufacture a false violation.
-      Prefer a single shell pipeline in one exec over shipping script files into
-      the guest; fall back to a script only when the pipeline cannot express the
-      rules (then `manifest_command` is the command that runs that script, and
-      the script must live outside `workdir` so it does not perturb
-      `tree_manifest`).
+      locale sort order or symlink handling and manufacture a false
+      violation — and a multi-line pipeline carried as prompt text gets
+      re-TYPED by every consumer, which is the same transcription channel
+      that must never carry byte-exact artifacts (a live run lost its round-0
+      candidate to three model-made typos in state-carried manifest text).
+      A stored script rides inside every lineage snapshot; the one-line
+      invocation and the two digests are all that cross the workflow
+      boundary, short enough to survive.
+
+      Step 2b — Anchor the lineage. IMMEDIATELY after storing the manifests
+      and BEFORE any baseline measurement runs, snapshot this sandbox with
+      `candidate_snapshot_ttl` (deterministic idempotency key, byte-identical
+      note across retries; on a key conflict resolve the existing snapshot by
+      key and reuse it), poll the operation to terminal, and return the id as
+      `anchored_snapshot_id`. This snapshot is the state the loop actually
+      boots rounds from: it is the input snapshot plus ONLY the stored
+      manifest files, so the baseline manifests ride inside every candidate
+      snapshot and every fresh boot for the whole lineage, while your Step 3
+      measurement side effects stay out of it.
 
       Step 3 — Baseline and noise calibration. If `bench_seed_env` is non-empty,
       export it set to 0 for every baseline run (the loop uses 1, 2, 3, ... per
-      round, and finalize uses a seed none of them touched). From `workdir` run
-      `experiment_command` three times — batch all three into a single exec
+      round, and finalize uses a seed none of them touched). First run
+      `experiment_command` once and DISCARD the reading: the first invocation
+      after a boot or restore primes cold caches and has been observed 40% off
+      the steady state — calibrating jitter on it manufactures a giant noise
+      band (or a failed sanity check) out of a one-off artifact. Then from
+      `workdir` run `experiment_command` three times — batch all three into a single exec
       call when the expected duration fits the exec limit, otherwise launch
       detached and poll — and extract the scalar labelled
       `metric_name` (prefer a `name: value` or `name=value` line, else a JSON key,
@@ -256,6 +301,9 @@ tasks:
         sandbox_ttl:
           schema: { type: string }
           value: "${{ inputs.values.?sandbox_ttl.orValue('1h') }}"
+        candidate_snapshot_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?candidate_snapshot_ttl.orValue('24h') }}"
         provided_compute_commands:
           schema: { type: string, description: Pre-verified cheatsheet from a previous run (empty means discover fresh) }
           value: "${{ inputs.values.?compute_commands.orValue('') }}"
@@ -264,21 +312,24 @@ tasks:
         baseline_metric:
           required: true
           schema: { type: number, description: Median metric of the untouched baseline snapshot }
-        frozen_manifest:
-          required: true
-          schema: { type: string, description: Canonical sorted manifest of the frozen scoring surface }
         frozen_digest:
           required: true
-          schema: { type: string, description: SHA-256 digest of frozen_manifest }
-        tree_manifest:
-          required: true
-          schema: { type: string, description: Canonical sorted manifest of the entire workdir (excluding .git), the scope baseline for enforcing target_files }
+          schema: { type: string, description: SHA-256 digest of the frozen-surface manifest stored in the guest at manifest_store }
         tree_digest:
           required: true
-          schema: { type: string, description: SHA-256 digest of tree_manifest }
+          schema: { type: string, description: SHA-256 digest of the whole-workdir tree manifest stored in the guest at manifest_store }
+        manifest_store:
+          required: true
+          schema: { type: string, description: Absolute in-guest directory OUTSIDE workdir holding frozen_manifest.txt and tree_manifest.txt; baked into anchored_snapshot_id so every lineage boot carries the baselines }
+        anchored_snapshot_id:
+          required: true
+          schema: { type: string, description: "Snapshot of the input state plus the stored manifests, taken BEFORE any baseline measurement; the lineage root the loop boots rounds from" }
         manifest_command:
           required: true
-          schema: { type: string, description: Verbatim shell command that emits both manifests, re-run by later tasks so digests are computed identically }
+          schema: { type: string, description: "One-line invocation of the stored manifest generator script (sh <manifest_store>/manifest.sh), re-run verbatim by later tasks so digests are computed identically" }
+        manifest_script_digest:
+          required: true
+          schema: { type: string, description: "SHA-256 (sha256:<hex>) of the stored manifest.sh, checked by verify before trusting the script's output" }
         effective_noise_epsilon:
           required: true
           schema: { type: number, description: Relative noise tolerance the loop runs under (caller override or derived from baseline jitter) }
@@ -287,7 +338,7 @@ tasks:
           schema: { type: number, description: Measurements per candidate (caller override or derived from baseline jitter) }
         compute_commands:
           required: true
-          schema: { type: string, description: Verified panda-compute CLI command patterns (create, poll, exec, snapshot, delete) for loop tasks to use verbatim }
+          schema: { type: string, description: "Verified panda-compute CLI command patterns (create, poll, exec, snapshot, delete) for loop tasks to use verbatim" }
         environment_summary:
           required: true
           schema: { type: string, description: Short note on the verified environment and measurement quality }
@@ -301,8 +352,8 @@ tasks:
           value: "${{ inputs.values.goal }}"
         snapshot_id:
           required: true
-          schema: { type: string }
-          value: "${{ inputs.values.snapshot_id }}"
+          schema: { type: string, description: Lineage root the rounds boot from — setup's anchored snapshot (input state plus stored baseline manifests) }
+          value: "${{ tasks.setup.outputs.values.anchored_snapshot_id }}"
         workdir:
           required: true
           schema: { type: string }
@@ -335,26 +386,26 @@ tasks:
           required: true
           schema: { type: string }
           value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
-        frozen_manifest:
-          required: true
-          schema: { type: string }
-          value: "${{ tasks.setup.outputs.values.frozen_manifest }}"
         frozen_digest:
           required: true
           schema: { type: string }
           value: "${{ tasks.setup.outputs.values.frozen_digest }}"
-        tree_manifest:
-          required: true
-          schema: { type: string }
-          value: "${{ tasks.setup.outputs.values.tree_manifest }}"
         tree_digest:
           required: true
           schema: { type: string }
           value: "${{ tasks.setup.outputs.values.tree_digest }}"
+        manifest_store:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.manifest_store }}"
         manifest_command:
           required: true
           schema: { type: string }
           value: "${{ tasks.setup.outputs.values.manifest_command }}"
+        manifest_script_digest:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.manifest_script_digest }}"
         baseline_metric:
           required: true
           schema: { type: number }
@@ -413,11 +464,20 @@ tasks:
           value: "${{ inputs.values.?candidate_snapshot_ttl.orValue('24h') }}"
     loop:
       max: "${{ inputs.values.?max_iterations.orValue(20) }}"
-      until: "${{ outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5) || outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3) || (inputs.values.metric_limit_set && (inputs.values.metric_direction == 'minimize' ? outputs.values.best_metric - inputs.values.metric_limit : inputs.values.metric_limit - outputs.values.best_metric) <= inputs.values.noise_epsilon * ((outputs.values.best_metric >= 0.0 ? outputs.values.best_metric : -outputs.values.best_metric) > 1.0 ? (outputs.values.best_metric >= 0.0 ? outputs.values.best_metric : -outputs.values.best_metric) : 1.0)) }}"
+      until: |-
+        ${{ cel.bind(best, outputs.values.best_metric,
+            cel.bind(best_abs, best >= 0.0 ? best : -best,
+              outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5) ||
+              outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3) ||
+              (inputs.values.metric_limit_set &&
+                (inputs.values.metric_direction == 'minimize'
+                    ? best - inputs.values.metric_limit
+                    : inputs.values.metric_limit - best)
+                  <= inputs.values.noise_epsilon * (best_abs > 1.0 ? best_abs : 1.0)))) }}
       onMaxExhausted: continue
     tasks:
       propose:
-        quality-gate: "${{ has(outputs.values.sandbox_id) && size(outputs.values.sandbox_id) > 0 && has(outputs.values.incumbent_backup) && size(outputs.values.incumbent_backup) > 0 && has(outputs.values.change) && size(outputs.values.change) > 0 }}"
+        quality-gate: "${{ has(outputs.values.applied) && has(outputs.values.sandbox_id) && has(outputs.values.incumbent_backup) && has(outputs.values.change) && (outputs.values.applied ? (size(outputs.values.sandbox_id) > 0 && size(outputs.values.incumbent_backup) > 0 && size(outputs.values.change) > 0) : (has(outputs.values.propose_note) && size(outputs.values.propose_note) > 0)) }}"
         instructions: |-
           Obtain this round's sandbox at the current best state, then propose
           and apply ONE change likely to improve `metric_name` toward
@@ -505,7 +565,23 @@ tasks:
           Report `sandbox_id` (this round's sandbox), `incumbent_backup` (the
           directory holding the pre-edit copy of `target_files`), `change` (one
           line, no tab characters — it becomes a TSV ledger column and the
-          snapshot note), and `rationale`.
+          snapshot note), `rationale`, and `applied: true` (which distinguishes
+          a real candidate from the infra-failure shape below).
+
+          INFRA-FAILURE SHAPE: when the compute backend is down — sandbox
+          creation fails everywhere, or every exec errors so the edit cannot
+          be written into the guest — do not retry forever and NEVER report a
+          change you could not actually apply as if it were applied. Bound
+          your attempts (a few distinct retries spread over a couple of
+          minutes), then return the honest failure shape: `applied: false`;
+          `propose_note` one line naming the fault (endpoint and error, e.g.
+          "sandboxes exec HTTP 500 internal_error all round; edit never
+          written"); `change` a one-line description of what you WOULD have
+          applied (or empty); `sandbox_id` the round sandbox if one exists,
+          else empty; `incumbent_backup` whatever was actually created, else
+          empty. The loop treats such a round as an auto-discard and moves
+          straight to the next one; a persistent outage ends the run via
+          `patience`, never via retry-exhaustion inside this task.
 
           Requires a worker with shell access to the panda CLI and compute
           datasource credentials.
@@ -554,7 +630,7 @@ tasks:
               schema: { type: number }
               value: "${{ loop.plateau_streak.orValue(0.0) }}"
             min_detectable_gain:
-              schema: { type: number, description: Smallest improvement this harness can resolve, in metric units — the acceptance threshold. A change worth less than this is invisible and will be discarded as noise. }
+              schema: { type: number, description: "Smallest improvement this harness can resolve, in metric units — the acceptance threshold. A change worth less than this is invisible and will be discarded as noise." }
               value: |-
                 ${{ cel.bind(best, loop.best_metric.orValue(inputs.values.baseline_metric),
                     cel.bind(best_abs, best >= 0.0 ? best : -best,
@@ -577,15 +653,20 @@ tasks:
               schema: { type: string, description: This round's ephemeral sandbox id (freshly booted or reused from the previous kept round) }
             incumbent_backup:
               required: true
-              schema: { type: string, description: Guest directory holding a byte-identical pre-edit copy of target_files, used to re-measure the incumbent in this same sandbox }
+              schema: { type: string, description: "Guest directory holding a byte-identical pre-edit copy of target_files, used to re-measure the incumbent in this same sandbox" }
             change:
               required: true
               schema: { type: string, description: One-line tab-free summary of the applied change }
             rationale:
               schema: { type: string, description: Why this change was expected to help }
+            applied:
+              required: true
+              schema: { type: boolean, description: True when the change was actually written into the guest. False is the infra-failure shape — the round becomes an unmeasured auto-discard and propose_note must name the fault. }
+            propose_note:
+              schema: { type: string, description: One-line infra fault description (endpoint + error). MUST be non-empty when applied is false; empty or absent otherwise. }
       verify_and_measure:
         needs: [propose]
-        quality-gate: "${{ has(outputs.values.observed_digest) && size(outputs.values.observed_digest) > 0 && has(outputs.values.matches) && (!outputs.values.matches || outputs.values.observed_digest == inputs.values.expected_digest) && has(outputs.values.violations) && (outputs.values.matches == (size(outputs.values.violations) == 0)) && has(outputs.values.candidate_snapshot_id) && (!outputs.values.matches || size(outputs.values.candidate_snapshot_id) > 0) && has(outputs.values.valid) && (outputs.values.matches || outputs.values.valid == false) && has(outputs.values.candidate_metric) && has(outputs.values.incumbent_metric) && has(outputs.values.paired_gain) && has(outputs.values.paired_gain_stderr) && outputs.values.paired_gain_stderr >= 0.0 && has(outputs.values.paired_differences) && (outputs.values.valid || (outputs.values.candidate_metric == outputs.values.incumbent_metric && outputs.values.paired_gain == 0.0 && size(outputs.values.paired_differences) == 0)) && (!outputs.values.valid || size(outputs.values.paired_differences) == int(inputs.values.measurement_runs)) && has(outputs.values.measurement_note) }}"
+        quality-gate: "${{ has(outputs.values.observed_digest) && has(outputs.values.matches) && (size(outputs.values.observed_digest) > 0 || (!outputs.values.matches && has(outputs.values.valid) && !outputs.values.valid && has(outputs.values.measurement_note) && size(outputs.values.measurement_note) > 0)) && (!outputs.values.matches || outputs.values.observed_digest == inputs.values.expected_digest) && has(outputs.values.violations) && (outputs.values.matches == (size(outputs.values.violations) == 0)) && has(outputs.values.candidate_snapshot_id) && (!outputs.values.matches || size(outputs.values.candidate_snapshot_id) > 0 || (!outputs.values.valid && size(outputs.values.measurement_note) > 0)) && has(outputs.values.valid) && (outputs.values.matches || outputs.values.valid == false) && has(outputs.values.candidate_metric) && has(outputs.values.incumbent_metric) && has(outputs.values.paired_gain) && has(outputs.values.paired_gain_stderr) && outputs.values.paired_gain_stderr >= 0.0 && has(outputs.values.paired_differences) && (outputs.values.valid || (outputs.values.candidate_metric == outputs.values.incumbent_metric && outputs.values.paired_gain == 0.0 && size(outputs.values.paired_differences) == 0)) && (!outputs.values.valid || size(outputs.values.paired_differences) == int(inputs.values.measurement_runs)) && has(outputs.values.measurement_note) }}"
         instructions: |-
           Verify, pin, and score this round's candidate in one pass.
           You are the independent verification and measurement channel: you did
@@ -598,40 +679,92 @@ tasks:
           `panda search runbooks "compute sandbox snapshot lifecycle"`) only if a
           pattern fails.
 
-          1 — Integrity and scope. In the guest at `sandbox_id`, run
-          `manifest_command` VERBATIM — it is the exact command setup used, and
-          re-running it is what makes the digests comparable. Do not rewrite it,
-          "improve" it, or reconstruct an equivalent pipeline from this prose: a
-          reimplementation that differs in locale sort order or symlink handling
-          manufactures a violation that kills a good candidate. If the command
-          itself errors, that is a harness failure — report it, do not
-          substitute your own.
+          0 — Propose infra short-circuit. If `applied` is false, the
+          candidate was never written into the guest (`propose_note` names
+          the fault): perform NO verification and NO measurement. If
+          `sandbox_id` is non-empty issue a fire-and-forget delete for it
+          (ignore errors). Then emit exactly this shape and stop:
+          `observed_digest` = `expected_digest` echoed verbatim (nothing ran;
+          the echo asserts nothing — no snapshot is promoted from this round
+          and the next round re-verifies from the immutable best snapshot),
+          `matches` true, `violations` [], `candidate_snapshot_id` "",
+          `valid` false, `candidate_metric` 0, `incumbent_metric` 0,
+          `paired_gain` 0, `paired_gain_stderr` 0, `paired_differences` [],
+          `measurement_note` = "propose infra-failure: " + `propose_note`.
+          The loop auto-discards the round and moves on; a persistent outage
+          ends the run via `patience`.
 
-          It yields two manifests. Check both:
-          - FROZEN: compare against `frozen_manifest`. Any added, removed,
-            renamed, mode-changed, content-changed, or retargeted entry is a
-            violation. An empty `frozen_files` list produces the empty manifest
-            and trivially matches.
-          - SCOPE: compare the whole-workdir manifest against `tree_manifest`.
-            Every difference must lie at a path listed in `target_files`. A
-            change to any other path — a NEW file (a fresh `.go` alongside the
-            target compiles into the benchmark just the same), a deleted file, a
-            modified unlisted file — is equally a violation. This is what makes
-            "edit only the target files" real rather than a request.
+          1 — Integrity and scope. The ENTIRE comparison happens inside the
+          guest at `sandbox_id`; the manifests are machine-comparison data
+          (hundreds of hash lines for a real repo) and their contents must
+          never enter your context — only digests and the violating paths
+          come back. Three steps, batched into as few execs as practical:
 
-          Return `observed_digest` (the frozen manifest's `sha256:<hex>`),
-          `matches` (true only when BOTH checks pass), and `violations` (stable
-          sorted descriptions of every frozen-surface difference AND every
-          out-of-scope path). Report exactly what the comparison shows — never
-          infer or waive a mismatch.
+          - TRUST THE BASELINE FIRST: the baseline manifests AND the manifest
+            generator script ride inside the lineage snapshots at
+            `manifest_store` (`frozen_manifest.txt`, `tree_manifest.txt`,
+            `manifest.sh`). Recompute each file's `sha256:<hex>` and require
+            they equal `expected_digest`, `expected_tree_digest`, and
+            `manifest_script_digest` respectively. The digests carried in
+            workflow state are the root of trust: a mismatch means the stored
+            baseline or script was tampered with or lost — an integrity
+            violation, reported as such (never "re-baseline" from the current
+            tree, and never run a script that fails its digest check).
+          - RECOMPUTE: run `manifest_command` VERBATIM with ONE argument
+            appended — a fresh throwaway output directory (`mktemp -d`),
+            NEVER `manifest_store`. The stored baselines are write-once:
+            regenerating them in place is exactly the wedge that killed a
+            live run (one round's verify overwrote `tree_manifest.txt` with
+            the candidate tree, and every later round then failed the trust
+            check forever). The command invokes the
+            stored, digest-checked script setup used, and re-running exactly
+            that is what makes the digests comparable. Do not rewrite it,
+            "improve" it, or reconstruct an equivalent pipeline from this
+            prose: a reimplementation that differs in locale sort order or
+            symlink handling manufactures a violation that kills a good
+            candidate. If the command itself errors, that is a harness
+            failure — report it, do not substitute your own.
+          - DIFF IN-GUEST, both checks:
+            FROZEN: diff the observed frozen manifest against the stored
+            baseline. Any added, removed, renamed, mode-changed,
+            content-changed, or retargeted entry is a violation. An empty
+            `frozen_files` list produces the empty manifest and trivially
+            matches.
+            SCOPE: diff the observed whole-workdir manifest against the
+            stored tree baseline. Every differing path must be listed in
+            `target_files`. A change to any other path — a NEW file (a fresh
+            `.go` alongside the target compiles into the benchmark just the
+            same), a deleted file, a modified unlisted file — is equally a
+            violation. This is what makes "edit only the target files" real
+            rather than a request.
+
+          Return `observed_digest` (the observed frozen manifest's
+          `sha256:<hex>`), `matches` (true only when the baseline trust check
+          AND both diffs pass), and `violations` (stable sorted paths — with a
+          one-word reason each — for every frozen-surface difference AND every
+          out-of-scope path, from the diff output alone). Report exactly what
+          the comparison shows — never infer or waive a mismatch.
 
           If either check fails, the candidate is rejected before any snapshot or
           measurement: issue a fire-and-forget delete for the round sandbox (do
           not poll) and return `matches` false, `candidate_snapshot_id` "",
           `valid` false, `candidate_metric` and `incumbent_metric` BOTH equal to
           `best_metric`, `paired_gain` and `paired_gain_stderr` 0,
-          `paired_differences` empty, `measurement_note` "". (The gain must be
-          zero so the decision arithmetic discards.)
+          `paired_differences` empty. (The gain must be zero so the decision
+          arithmetic discards.) `measurement_note` records WHOSE fault the
+          rejection was, and that distinction matters more than the rejection:
+          - SCOPE or FROZEN diff violation — the candidate's fault:
+            `measurement_note` "".
+          - BASELINE TRUST-CHECK failure or a `manifest_command` error — the
+            harness's fault; the candidate was never evaluated at all. Set
+            `measurement_note` to one line naming the failing file and both
+            digests (stored vs expected). This is never a candidate defect
+            and it never self-heals: a stale or corrupted baseline rejects
+            every future round identically. The round still auto-discards
+            (no review session runs for unmeasured rounds), but the note and
+            the violation text ride the ledger verbatim into finalize, so a
+            wedged harness gets reported as a harness failure instead of
+            silently burning patience as fake "search collapse".
 
           2 — Snapshot (integrity passed), BEFORE anything runs: snapshot
           `sandbox_id` with `candidate_snapshot_ttl`, a note shaped
@@ -647,6 +780,39 @@ tasks:
           terminal state and resolve the concrete snapshot id before proceeding.
           Snapshotting before measurement keeps measurement side effects out of
           the lineage.
+
+          If the snapshot fails repeatedly with an INFRASTRUCTURE error (a
+          capture or operation failure — not an idempotency conflict) after a
+          few properly-keyed attempts, this round is lost to the platform, not
+          to the candidate. Do not loop on it forever and NEVER measure an
+          unpinned candidate. Instead: issue a fire-and-forget delete for the
+          round sandbox (its host node may be unhealthy) and return the
+          unmeasured shape — `matches` true with the digests as computed,
+          `candidate_snapshot_id` "", `valid` false, `candidate_metric` and
+          `incumbent_metric` BOTH equal to `best_metric`, `paired_gain` and
+          `paired_gain_stderr` 0, `paired_differences` empty — with a
+          `measurement_note` naming the exact infra error. The round records
+          as a discard, streak arithmetic carries, and the next round boots a
+          FRESH sandbox from the unchanged best snapshot, likely on a
+          different node.
+
+          EXEC-OUTAGE SHAPE (infra died before the trust check could run): if
+          the exec endpoint itself is down — every `sandboxes exec` erroring
+          or hanging across a few bounded, spread-out attempts, including
+          after one fresh-boot attempt from the best snapshot — then the
+          integrity digests can never be computed and NOTHING about this
+          round is verifiable. Do not fabricate digests and do not loop
+          forever. Issue a fire-and-forget delete for the round sandbox and
+          return the unverifiable shape: `observed_digest` "" (empty — you
+          never computed one), `matches` false, `violations` a single entry
+          prefixed `harness:` naming the endpoint and error, `valid` false,
+          `candidate_snapshot_id` "", `candidate_metric` and
+          `incumbent_metric` BOTH equal to `best_metric`, `paired_gain` and
+          `paired_gain_stderr` 0, `paired_differences` empty, and a non-empty
+          `measurement_note` naming the exact fault. This is a harness fault,
+          never the candidate's: the note and the `harness:` violation prefix
+          are what keep the reporting honest downstream. A persistent outage
+          ends the run via `patience`, not via retry-exhaustion here.
 
           3 — Validity: if `correctness_command` is non-empty, run it from
           `workdir` in the guest; on non-zero exit issue a fire-and-forget
@@ -682,6 +848,15 @@ tasks:
             next round reuses on a keep) would silently contain incumbent code.
             Make the copy idempotent: if the directory already exists from a
             retried attempt, leave it alone.
+          - WARMUP FIRST, then measure. Before the first pair, run
+            `experiment_command` once (with the round seed exported, incumbent
+            files in place) and DISCARD the reading: the first invocation
+            after a boot or restore primes cold caches and has been observed
+            40% off steady state — and since the paired schedule leads with
+            the candidate, skipping the warmup hands that one-off artifact to
+            the candidate's first reading as a fake gain or loss. Do this on
+            reused sandboxes too; one invocation is cheap and keeps the
+            schedule uniform.
           - Now measure PAIRED, swapping the files between every single run.
             One pair = restore `target_files` from the candidate backup, run
             `experiment_command` once, record the candidate value; then restore
@@ -704,7 +879,22 @@ tasks:
           Extract the scalar labelled `metric_name` from each run (prefer a
           `name: value` or `name=value` line, else a JSON key, else the last
           numeric occurrence). Launch anything that may outlast the exec timeout
-          detached and poll.
+          detached and poll — and poll to an ETA, not a rhythm: you know the
+          schedule (pairs x invocation length), so have the measurement script
+          write that estimate to its marker file at launch and append progress
+          per pair; hold off polling until the ETA is nearly elapsed, then use
+          one in-guest wait loop per exec (sized under the sync-exec ceiling)
+          returning a single `done=<0|1> pair=N/M` status line, never partial
+          readings. Every poll costs a full model step; a few thin,
+          ETA-scheduled polls beat a metronome of fat ones. Waiting happens
+          ONLY inside an exec: there is no timer, park, or suspend/resume in
+          this harness — your turn ends exactly once, when you emit the final
+          structured outputs, and any "I'll resume when the timer fires" is
+          parsed as those outputs and fails the task. "Holding off" means
+          chaining in-guest wait loops, each at or under ~45s of total
+          in-guest time (e.g. 7 x `sleep 6`) — the gateway kills sync execs
+          around 50s regardless of the requested timeout. A 504 on a poll is
+          transient: rerun the same poll, change nothing.
 
           Report `candidate_metric` / `incumbent_metric` as the two arms' medians
           — those are for the ledger and the report.
@@ -773,6 +963,12 @@ tasks:
             change:
               schema: { type: string }
               value: "${{ tasks.propose.outputs.values.change }}"
+            applied:
+              schema: { type: boolean, description: Whether propose actually wrote the change into the guest; false short-circuits this task (step 0) }
+              value: "${{ tasks.propose.outputs.values.applied }}"
+            propose_note:
+              schema: { type: string, description: Propose's one-line infra fault description when applied is false }
+              value: "${{ has(tasks.propose.outputs.values.propose_note) ? tasks.propose.outputs.values.propose_note : '' }}"
             workdir:
               schema: { type: string }
               value: "${{ inputs.values.workdir }}"
@@ -782,19 +978,23 @@ tasks:
             frozen_files:
               schema: { type: array, items: { type: string } }
               value: "${{ inputs.values.frozen_files }}"
-            frozen_manifest:
-              schema: { type: string }
-              value: "${{ inputs.values.frozen_manifest }}"
             expected_digest:
               required: true
               schema: { type: string }
               value: "${{ inputs.values.frozen_digest }}"
-            tree_manifest:
+            expected_tree_digest:
+              required: true
               schema: { type: string }
-              value: "${{ inputs.values.tree_manifest }}"
+              value: "${{ inputs.values.tree_digest }}"
+            manifest_store:
+              schema: { type: string, description: In-guest directory holding the baseline frozen_manifest.txt and tree_manifest.txt (baked into the lineage snapshots) }
+              value: "${{ inputs.values.manifest_store }}"
             manifest_command:
               schema: { type: string }
               value: "${{ inputs.values.manifest_command }}"
+            manifest_script_digest:
+              schema: { type: string, description: Expected SHA-256 of the stored manifest.sh; check before trusting its output }
+              value: "${{ inputs.values.manifest_script_digest }}"
             experiment_command:
               schema: { type: string }
               value: "${{ inputs.values.experiment_command }}"
@@ -805,7 +1005,7 @@ tasks:
               schema: { type: string }
               value: "${{ inputs.values.bench_seed_env }}"
             round_seed:
-              schema: { type: number, description: This round's benchmark seed; both paired arms use it, and it changes every round }
+              schema: { type: number, description: "This round's benchmark seed; both paired arms use it, and it changes every round" }
               value: >-
                 ${{ loop.accepted_count.orValue(0.0)
                     + loop.discarded_count.orValue(0.0)
@@ -839,7 +1039,7 @@ tasks:
               schema: { type: boolean, description: Whether observed_digest equals the baseline digest }
             violations:
               required: true
-              schema: { type: array, items: { type: string }, description: Stable sorted frozen-surface differences (empty when matches) }
+              schema: { type: array, items: { type: string }, description: "Stable sorted violating paths with a short reason each — frozen-surface differences, out-of-scope changes, and baseline trust-check failures (empty when matches)" }
             candidate_snapshot_id:
               required: true
               schema: { type: string, description: Snapshot of the applied candidate taken before any measurement ran; empty on an integrity violation }
@@ -851,19 +1051,19 @@ tasks:
               schema: { type: number, description: Median measured metric of the applied candidate (best_metric echoed when unmeasured) }
             incumbent_metric:
               required: true
-              schema: { type: number, description: Median metric of the UNCHANGED incumbent re-measured in this same sandbox, paired with the candidate (best_metric echoed when unmeasured) }
+              schema: { type: number, description: "Median metric of the UNCHANGED incumbent re-measured in this same sandbox, paired with the candidate (best_metric echoed when unmeasured)" }
             paired_gain:
               required: true
-              schema: { type: number, description: Mean of the per-pair differences, already signed so positive is an improvement in the goal direction. This is the decision statistic. 0 when unmeasured }
+              schema: { type: number, description: "Mean of the per-pair differences, already signed so positive is an improvement in the goal direction. This is the decision statistic. 0 when unmeasured" }
             paired_gain_stderr:
               required: true
               schema: { type: number, description: Standard error of paired_gain — sample stdev of the per-pair differences over sqrt(n). 0 when unmeasured or when only one pair ran (which cannot estimate dispersion) }
             paired_differences:
               required: true
-              schema: { type: array, items: { type: number }, description: The per-pair differences in run order, signed toward the goal direction (empty when unmeasured) }
+              schema: { type: array, items: { type: number }, description: "The per-pair differences in run order, signed toward the goal direction (empty when unmeasured)" }
             measurement_note:
               required: true
-              schema: { type: string, description: One-line measurement-trust flag (resolution floor, harness errors, out-of-family shape, incumbent drift); empty when the measurement looked normal. Non-empty forces an escalation review }
+              schema: { type: string, description: "One-line measurement-trust flag (resolution floor, harness errors, baseline trust-check failure, out-of-family shape, incumbent drift); empty when the measurement looked normal AND any integrity rejection was the candidate's own fault. Non-empty forces an escalation review on measured rounds; on unmeasured rejections it is the honest harness-fault record carried to the ledger" }
       decide:
         needs: [propose, verify_and_measure]
         if: |-
@@ -937,7 +1137,7 @@ tasks:
       values:
         gain:
           required: true
-          schema: { type: number, description: Mean paired gain for this round, signed toward the goal direction (the verifier already applied the sign) }
+          schema: { type: number, description: "Mean paired gain for this round, signed toward the goal direction (the verifier already applied the sign)" }
           value: "${{ tasks.verify_and_measure.outputs.values.paired_gain }}"
         threshold:
           required: true
@@ -1026,7 +1226,8 @@ tasks:
                 (has(tasks.propose.outputs.values.rationale) ? tasks.propose.outputs.values.rationale.replace("\t", " ").replace("\n", " ") : "") + "\t" +
                 (tasks.verify_and_measure.outputs.values.valid ? string(tasks.verify_and_measure.outputs.values.incumbent_metric) : "na") + "\t" +
                 (tasks.verify_and_measure.outputs.values.valid ? string(tasks.verify_and_measure.outputs.values.paired_gain_stderr) : "na") + "\t" +
-                string(outputs.values.threshold) + "\n" }}
+                string(outputs.values.threshold) + "\t" +
+                tasks.verify_and_measure.outputs.values.violations.join("; ").replace("\t", " ").replace("\n", " ") + "\n" }}
         accepted_count:
           required: true
           schema: { type: number, description: Rounds whose candidate snapshot was promoted }
@@ -1036,15 +1237,15 @@ tasks:
                   : loop.accepted_count.orValue(0.0) }}
         accepted_gain_total:
           required: true
-          schema: { type: number, description: Running sum of the paired gains of every accepted round — the total improvement the loop CLAIMS it banked, which finalize reconciles against the cold-boot confirmation }
+          schema: { type: number, description: "Running sum of the paired gains of every accepted round — the total improvement the loop CLAIMS it banked, which finalize reconciles against the cold-boot confirmation" }
           value: |-
             ${{ loop.accepted_gain_total.orValue(0.0) +
                 ((outputs.values.kept) ? outputs.values.gain : 0.0) }}
         discarded_count:
           required: true
-          schema: { type: number, description: Rounds whose candidate was discarded }
+          schema: { type: number, description: "Rounds whose measured or invalid candidate was discarded (integrity violations are counted separately, never here)" }
           value: |-
-            ${{ (outputs.values.kept)
+            ${{ (!tasks.verify_and_measure.outputs.values.matches || outputs.values.kept)
                   ? loop.discarded_count.orValue(0.0)
                   : loop.discarded_count.orValue(0.0) + 1.0 }}
         integrity_violation_count:
@@ -1105,7 +1306,10 @@ tasks:
         winner was selected against seeds 1..N and is now scored on inputs it
         never saw. A win that only exists on the seeds it was selected against
         is not a win, and this is the one place in the run that can tell.
-        Run `experiment_command` from `workdir` `measurement_runs` times and
+        Run `experiment_command` once and DISCARD the reading (the first
+        invocation after a boot primes cold caches and has been observed 40%
+        off steady state; folding it in corrupts both the median and the
+        spread), then run it `measurement_runs` times and
         report the median as `confirmation_metric` and max minus min as
         `confirmation_spread`. This is the run's ONLY independent check that the
         winning number survives a cold boot of the very snapshot being shipped,
@@ -1174,7 +1378,7 @@ tasks:
         `candidate_metric_or_na`, `paired_gain_or_na`, `best_after`,
         `candidate_snapshot_or_na`, `change`, `decision_source`,
         `measurement_note`, `rationale`, `incumbent_metric_or_na`,
-        `paired_gain_stderr_or_na`, `threshold`.
+        `paired_gain_stderr_or_na`, `threshold`, `violations`.
       - The round's real evidence is the trio `paired_gain`,
         `paired_gain_stderr` and `threshold`. The candidate and the incumbent
         were measured as interleaved pairs in the SAME sandbox, and
@@ -1194,8 +1398,20 @@ tasks:
         `best_after` is the best metric AFTER this round's keep/discard was
         applied (equals the candidate on a kept round, the prior best otherwise)
         — a proper best-so-far series for the progress chart.
-      - Violation rounds carry `violation` in the decision column;
-        `decision_source` is `auto` for rounds decided by the mechanical
+      - Violation rounds carry `violation` in the decision column, and the
+        `violations` column holds the verifier's verbatim findings. QUOTE
+        that text in the trial's interpretation — never paraphrase it into a
+        plausible story. A violation round was rejected BEFORE snapshot or
+        measurement, so it says NOTHING about the candidate's correctness or
+        merit; attributing it to the oracle/tests/contracts when the
+        recorded text says otherwise fabricates the run's ending (a live
+        run's report described five identical `baseline-digest-mismatch`
+        harness failures as correctness-gate rejections). A trust-check /
+        `baseline-digest-mismatch` violation in particular is a HARNESS
+        failure: report it as such, and describe a streak of them as a
+        wedged run whose remaining proposals went unevaluated — not as
+        evidence the search space was exhausted.
+      - `decision_source` is `auto` for rounds decided by the mechanical
         threshold rule and `agent` for rounds escalated to the review gate;
         `measurement_note` and `rationale` may be empty. Convert the log, in
         order, into one typed trial per round (`round` is the 1-based row index).
@@ -1224,8 +1440,12 @@ tasks:
       Step 3 — Progress report (`progress_report`, markdown).
       - **Run summary**: goal, metric with direction, baseline, best,
         confirmation metric and spread, whether it `confirmed`, absolute and
-        percent improvement, exit reason, rounds, accepted, discarded, integrity
-        violations. When `confirmed` is false, open with that — a headline
+        percent improvement, the `exit_reason` input VERBATIM (one of
+        saturated / plateau / patience / improvement / max_iterations — never
+        a synonym like "converged"; a `patience` exit reached on a streak of
+        harness-fault violations means the run wedged, and the summary must
+        say so rather than dress it as convergence), rounds, accepted,
+        discarded, integrity violations. When `confirmed` is false, open with that — a headline
         improvement that did not reproduce is the most important fact on the
         page, and quoting the loop's best figure without it is misreporting.
       - **Environment**: the input snapshot id, workdir, commands, and the
@@ -1247,8 +1467,8 @@ tasks:
 
       Step 4 — Summary (`summary`, markdown): 6-12 lines suitable for a report
       or PR description — goal, the winning change(s) in a sentence, baseline →
-      best with the confirmation figure beside it, exit reason, the pinned result
-      snapshot id. Report the improvement the CONFIRMATION supports, not the
+      best with the confirmation figure beside it, `exit_reason` verbatim, the
+      pinned result snapshot id. Report the improvement the CONFIRMATION supports, not the
       loop's internal best, whenever the two differ; the confirmation is the
       number a reader can reproduce from the artifact you are shipping. When
       `confirmed` is false, say so in the first line. Close by noting the search
@@ -1290,7 +1510,7 @@ tasks:
           schema: { type: number }
           value: "${{ tasks.setup.outputs.values.baseline_metric }}"
         holdout_seed:
-          schema: { type: number, description: A benchmark seed no round used, so the confirmation scores the winner on inputs it was never selected against }
+          schema: { type: number, description: "A benchmark seed no round used, so the confirmation scores the winner on inputs it was never selected against" }
           value: >-
             ${{ tasks.iterate.outputs.values.accepted_count
                 + tasks.iterate.outputs.values.discarded_count
@@ -1334,7 +1554,35 @@ tasks:
           value: "${{ tasks.iterate.outputs.values.log }}"
         converged:
           schema: { type: boolean }
-          value: "${{ tasks.iterate.outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5) || tasks.iterate.outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3) || (has(inputs.values.metric_limit) && (inputs.values.?metric_direction.orValue('minimize') == 'minimize' ? tasks.iterate.outputs.values.best_metric - inputs.values.metric_limit : inputs.values.metric_limit - tasks.iterate.outputs.values.best_metric) <= tasks.setup.outputs.values.effective_noise_epsilon * ((tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) > 1.0 ? (tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) : 1.0)) }}"
+          value: |-
+            ${{ cel.bind(best, tasks.iterate.outputs.values.best_metric,
+                cel.bind(best_abs, best >= 0.0 ? best : -best,
+                  tasks.iterate.outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5) ||
+                  tasks.iterate.outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3) ||
+                  (has(inputs.values.metric_limit) &&
+                    (inputs.values.?metric_direction.orValue('minimize') == 'minimize'
+                        ? best - inputs.values.metric_limit
+                        : inputs.values.metric_limit - best)
+                      <= tasks.setup.outputs.values.effective_noise_epsilon * (best_abs > 1.0 ? best_abs : 1.0)))) }}
+        exit_reason:
+          schema: { type: string, description: "The loop's mechanically computed exit reason — one of saturated, plateau, patience, improvement, max_iterations. Report it verbatim; never substitute a synonym" }
+          value: |-
+            ${{ cel.bind(best, tasks.iterate.outputs.values.best_metric,
+                cel.bind(best_abs, best >= 0.0 ? best : -best,
+                cel.bind(minimize, inputs.values.?metric_direction.orValue('minimize') == 'minimize',
+                  (has(inputs.values.metric_limit) &&
+                    (minimize ? best - inputs.values.metric_limit : inputs.values.metric_limit - best)
+                      <= tasks.setup.outputs.values.effective_noise_epsilon * (best_abs > 1.0 ? best_abs : 1.0))
+                    ? 'saturated'
+                    : tasks.iterate.outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3)
+                        ? 'plateau'
+                        : tasks.iterate.outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5)
+                            ? 'patience'
+                            : (minimize
+                                  ? best < tasks.setup.outputs.values.baseline_metric
+                                  : best > tasks.setup.outputs.values.baseline_metric)
+                                ? 'improvement'
+                                : 'max_iterations'))) }}
         sandbox_ttl:
           schema: { type: string }
           value: "${{ inputs.values.?sandbox_ttl.orValue('1h') }}"
@@ -1384,6 +1632,7 @@ tasks:
                 snapshot_id: { type: string }
                 status: { type: string, enum: [pass, fail, invalid, suspicious] }
                 metric: { type: number }
+                spread: { type: number }
                 paired_gain: { type: number }
                 paired_gain_stderr: { type: number }
                 best_after: { type: number }
@@ -1404,6 +1653,26 @@ tasks:
             description: In-depth markdown report with trial table and progress chart (or ASCII fallback)
 outputs:
   values:
+    goal:
+      required: true
+      schema: { type: string, description: "Echoed optimization goal, so a report task can bind every input from this template's outputs alone (loop-only compositions have no prepare to bind from)" }
+      value: "${{ inputs.values.goal }}"
+    metric_name:
+      required: true
+      schema: { type: string, description: "Echoed metric label, named to bind verbatim to the report's input of the same name" }
+      value: "${{ inputs.values.metric_name }}"
+    metric_direction:
+      required: true
+      schema: { type: string, description: "Echoed metric direction (minimize|maximize), named to bind verbatim to the report's input of the same name" }
+      value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+    metric_limit_set:
+      required: true
+      schema: { type: boolean, description: Whether the run had a theoretical metric limit configured; when false the echoed metric_limit is a 0.0 placeholder and downstream renderers must omit limit annotations }
+      value: "${{ has(inputs.values.metric_limit) }}"
+    metric_limit:
+      required: true
+      schema: { type: number, description: "Echoed theoretical best the metric can reach (meaningful only when metric_limit_set), named to bind verbatim to the report's input of the same name so a saturated exit can be shown against its ceiling" }
+      value: "${{ inputs.values.?metric_limit.orValue(0.0) }}"
     baseline_metric:
       required: true
       schema: { type: number }
@@ -1424,6 +1693,10 @@ outputs:
       required: true
       schema: { type: number }
       value: "${{ tasks.finalize.outputs.values.confirmation_metric }}"
+    confirmation_spread:
+      required: true
+      schema: { type: number, description: Max minus min across the confirmation measurements (0 when nothing was accepted) }
+      value: "${{ tasks.finalize.outputs.values.confirmation_spread }}"
     confirmed:
       required: true
       schema: { type: boolean, description: Whether the winning metric reproduced on a cold boot of the result snapshot; false means the headline improvement is unverified }
@@ -1452,8 +1725,8 @@ outputs:
               : tasks.iterate.outputs.values.best_metric > tasks.setup.outputs.values.baseline_metric }}
     rounds_completed:
       required: true
-      schema: { type: number }
-      value: "${{ tasks.iterate.outputs.values.accepted_count + tasks.iterate.outputs.values.discarded_count }}"
+      schema: { type: number, description: "Total rounds run — accepted plus discarded plus integrity violations, which are disjoint counts" }
+      value: "${{ tasks.iterate.outputs.values.accepted_count + tasks.iterate.outputs.values.discarded_count + tasks.iterate.outputs.values.integrity_violation_count }}"
     accepted_count:
       required: true
       schema: { type: number }
@@ -1485,22 +1758,36 @@ outputs:
     converged:
       required: true
       schema: { type: boolean }
-      value: "${{ tasks.iterate.outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5) || tasks.iterate.outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3) || (has(inputs.values.metric_limit) && (inputs.values.?metric_direction.orValue('minimize') == 'minimize' ? tasks.iterate.outputs.values.best_metric - inputs.values.metric_limit : inputs.values.metric_limit - tasks.iterate.outputs.values.best_metric) <= tasks.setup.outputs.values.effective_noise_epsilon * ((tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) > 1.0 ? (tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) : 1.0)) }}"
+      value: |-
+        ${{ cel.bind(best, tasks.iterate.outputs.values.best_metric,
+            cel.bind(best_abs, best >= 0.0 ? best : -best,
+              tasks.iterate.outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5) ||
+              tasks.iterate.outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3) ||
+              (has(inputs.values.metric_limit) &&
+                (inputs.values.?metric_direction.orValue('minimize') == 'minimize'
+                    ? best - inputs.values.metric_limit
+                    : inputs.values.metric_limit - best)
+                  <= tasks.setup.outputs.values.effective_noise_epsilon * (best_abs > 1.0 ? best_abs : 1.0)))) }}
     exit_reason:
       required: true
       schema: { type: string, description: "One of saturated, plateau, patience, improvement, max_iterations" }
-      value: >-
-        ${{ (has(inputs.values.metric_limit) && (inputs.values.?metric_direction.orValue('minimize') == 'minimize' ? tasks.iterate.outputs.values.best_metric - inputs.values.metric_limit : inputs.values.metric_limit - tasks.iterate.outputs.values.best_metric) <= tasks.setup.outputs.values.effective_noise_epsilon * ((tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) > 1.0 ? (tasks.iterate.outputs.values.best_metric >= 0.0 ? tasks.iterate.outputs.values.best_metric : -tasks.iterate.outputs.values.best_metric) : 1.0))
-              ? 'saturated'
-              : tasks.iterate.outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3)
-              ? 'plateau'
-              : tasks.iterate.outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5)
-                  ? 'patience'
-                  : (inputs.values.?metric_direction.orValue('minimize') == 'minimize'
-                        ? tasks.iterate.outputs.values.best_metric < tasks.setup.outputs.values.baseline_metric
-                        : tasks.iterate.outputs.values.best_metric > tasks.setup.outputs.values.baseline_metric)
-                      ? 'improvement'
-                      : 'max_iterations' }}
+      value: |-
+        ${{ cel.bind(best, tasks.iterate.outputs.values.best_metric,
+            cel.bind(best_abs, best >= 0.0 ? best : -best,
+            cel.bind(minimize, inputs.values.?metric_direction.orValue('minimize') == 'minimize',
+              (has(inputs.values.metric_limit) &&
+                (minimize ? best - inputs.values.metric_limit : inputs.values.metric_limit - best)
+                  <= tasks.setup.outputs.values.effective_noise_epsilon * (best_abs > 1.0 ? best_abs : 1.0))
+                ? 'saturated'
+                : tasks.iterate.outputs.values.plateau_streak >= inputs.values.?plateau_patience.orValue(3)
+                    ? 'plateau'
+                    : tasks.iterate.outputs.values.no_improvement_streak >= inputs.values.?patience.orValue(5)
+                        ? 'patience'
+                        : (minimize
+                              ? best < tasks.setup.outputs.values.baseline_metric
+                              : best > tasks.setup.outputs.values.baseline_metric)
+                            ? 'improvement'
+                            : 'max_iterations'))) }}
     environment_summary:
       required: true
       schema: { type: string }

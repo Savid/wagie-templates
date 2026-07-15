@@ -14,7 +14,9 @@ description: >-
   derived from the untouched baseline, verifies the harness resists gaming, snapshots the
   prepared state, and emits exactly the inputs dev.wagie/experiment-snapshot-loop consumes.
   It bails cleanly when the target cannot be measured honestly rather than hand off a poisoned
-  harness. Usually chained straight into the snapshot loop and report.
+  harness. Usually chained straight into the snapshot loop and report: every output is named
+  identically to the loop input it binds to, and any downstream task MUST carry
+  `if: prepared` — on a bail the other outputs are empty and a loop started from them fails.
 tags: ["experiment", "harness", "benchmark", "prepare", "golang", "repo", "optimization", "snapshot", "autoresearch", "golden-output", "scoring-surface"]
 examples:
   - "set up an optimization experiment from a github repo and a target function"
@@ -30,7 +32,7 @@ inputs:
       schema: { type: string }
     base_snapshot_id:
       required: true
-      description: Panda-compute snapshot of a toolchain-ready base (the language toolchain, git, and the panda-relevant CLIs installed) that the repo will be cloned into. The prepared snapshot is derived from this; the base itself is never mutated.
+      description: "Panda-compute snapshot of a toolchain-ready base (the language toolchain, git, and the panda-relevant CLIs installed) that the repo will be cloned into. Include a C toolchain (gcc) when the language's race/sanitizer guards need it — Go's `-race` requires cgo, and installing gcc mid-prepare costs minutes. A base with the repo's module/build caches pre-warmed (including a race-instrumented build) turns the cold multi-minute first build into seconds. The prepared snapshot is derived from this; the base itself is never mutated."
       schema: { type: string }
     target:
       required: true
@@ -42,6 +44,9 @@ inputs:
     metric_direction:
       description: Whether lower or higher metric values are better for this target. The agent still names the concrete metric; this only fixes its direction.
       schema: { type: string, default: minimize, enum: [minimize, maximize] }
+    bench_duration_target:
+      description: "Rough wall-clock budget for ONE invocation of the authored experiment_command (Go duration). The downstream loop pays 2 x measurement_runs invocations per round plus setup baselines and a final confirmation, and its paired-differences machinery is the real noise suppression — resolution scales with the NUMBER of pairs, not with invocation length — so the bench should hit this budget with modest internal aggregation rather than burning minutes to look rock-stable on its own. Every timing-guard campaign in this template also pays several invocations per interleaved pass, so this knob multiplies prepare's wall-clock too. The agent sizes corpus, reps, and sub-runs against this; going somewhat over to stay above the timer floor is fine, but a large overshoot should be called out in harness_report."
+      schema: { type: string, default: 15s }
     harness_hints:
       description: "Optional caller-supplied guidance on how to measure this target trustworthily — measurement gotchas the agent would otherwise have to discover: mockable seams to stub instead of real I/O (e.g. an interface with an existing test double), what a realistic corpus/input size looks like, tolerances a correct optimization may legitimately shift (e.g. float reassociation), or where to place the build/setup relative to the timed region. Guidance only, not instructions: the agent still owns the hygiene checklist and verification, and must discover anything not supplied here. Empty means discover everything."
       schema: { type: string, default: "" }
@@ -56,7 +61,7 @@ inputs:
       schema: { type: string, default: 24h }
 tasks:
   prepare:
-    quality-gate: "${{ has(outputs.values.prepared) && has(outputs.values.harness_report) && size(outputs.values.harness_report) > 0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && (outputs.values.prepared == false || (has(outputs.values.prepared_snapshot_id) && size(outputs.values.prepared_snapshot_id) > 0 && has(outputs.values.goal) && size(outputs.values.goal) > 0 && has(outputs.values.workdir) && size(outputs.values.workdir) > 0 && has(outputs.values.target_files) && size(outputs.values.target_files) > 0 && has(outputs.values.frozen_files) && size(outputs.values.frozen_files) > 0 && has(outputs.values.experiment_command) && size(outputs.values.experiment_command) > 0 && has(outputs.values.correctness_command) && size(outputs.values.correctness_command) > 0 && has(outputs.values.metric_name) && size(outputs.values.metric_name) > 0 && has(outputs.values.metric_direction) && size(outputs.values.metric_direction) > 0 && has(outputs.values.bench_seed_env) && has(outputs.values.headroom_metric))) }}"
+    quality-gate: "${{ has(outputs.values.prepared) && has(outputs.values.harness_report) && size(outputs.values.harness_report) > 0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && (outputs.values.prepared == false || (has(outputs.values.snapshot_id) && size(outputs.values.snapshot_id) > 0 && has(outputs.values.goal) && size(outputs.values.goal) > 0 && has(outputs.values.workdir) && size(outputs.values.workdir) > 0 && has(outputs.values.target_files) && size(outputs.values.target_files) > 0 && has(outputs.values.frozen_files) && size(outputs.values.frozen_files) > 0 && has(outputs.values.experiment_command) && size(outputs.values.experiment_command) > 0 && has(outputs.values.correctness_command) && size(outputs.values.correctness_command) > 0 && has(outputs.values.metric_name) && size(outputs.values.metric_name) > 0 && has(outputs.values.metric_direction) && size(outputs.values.metric_direction) > 0 && has(outputs.values.bench_seed_env) && has(outputs.values.metric_limit))) }}"
     instructions: |-
       Turn a repository and a plain-language target into a snapshot with a
       trustworthy, hard-to-game scoring surface, and emit exactly the inputs
@@ -126,6 +131,22 @@ tasks:
         inputs, so that no input is timed twice anywhere in the benchmark, not
         within a pass and not across passes. Size the batches so the total work
         puts the figure well above the clock's resolution floor;
+      - SIZE AGGREGATION FOR THE LOOP, NOT FOR STAND-ALONE STABILITY. One
+        invocation of `experiment_command` should take roughly
+        `bench_duration_target` of wall-clock; size the corpus, reps, and
+        sub-runs against that budget and keep internal aggregation modest (a
+        median over a handful of sub-runs, not dozens). The downstream loop
+        measures every candidate as interleaved candidate/incumbent PAIRS and
+        builds its acceptance threshold from the standard error of the paired
+        differences — the pairing is the noise suppression, and its resolution
+        improves with the NUMBER of pairs, not with heavier medians inside
+        each run. A bench that burns minutes per invocation to look
+        rock-stable on its own steals the budget the loop would spend on more
+        pairs (a round costs 2 x measurement_runs invocations), and multiplies
+        the wall-clock of every setup baseline, every round, and the final
+        confirmation. Staying above the timer's resolution floor outranks the
+        budget; a large overshoot must be called out in `harness_report`
+        with the measured per-invocation duration;
       - SEED THE INPUT GENERATOR FROM THE ENVIRONMENT, not from a constant.
         Read an integer seed from an environment variable (choose a name, e.g.
         `BENCH_SEED`, and report it as `bench_seed_env`), falling back to a
@@ -139,6 +160,26 @@ tasks:
         inputs will be timed. Fairness is preserved because the loop measures
         the candidate and the incumbent in the same round under the SAME seed;
       - deterministic and free of I/O, network, and wall-clock dependence;
+      - PIN THE RUNTIME'S MEMORY MANAGEMENT for the timed region when the
+        language has a nondeterministic GC. In Go: disable ratio-based GC and
+        set a fixed soft memory limit (`debug.SetGCPercent(-1)` +
+        `debug.SetMemoryLimit(<fixed bytes>)`) before the timed loop, and
+        report a median over sub-runs. Under the default ratio GC, collection
+        cadence follows live-heap size, so readings move with heap state
+        rather than code — A/A spread balloons, and a candidate that merely
+        RETAINS more memory shifts GC frequency, a gameable seam. This is
+        first-draft boilerplate on par with the consume-sink, not something to
+        discover after a noisy campaign;
+      - PIN THE PROCESS TO ONE CPU on multi-vCPU guests: run every timed
+        invocation under `taskset -c <core>` with the SAME fixed core for
+        every arm, every guard variant, every pass — baked into the harness's
+        runner script so the loop and every campaign inherit it verbatim
+        rather than re-deriving it. Guest-scheduler migration between vCPUs
+        inflates the paired-diff stderr until the computed threshold swallows
+        real effects (a 2-vCPU guest has shown MDE ~22% unpinned — an injected
+        ~12% positive control became invisible). Check `nproc` once; on a
+        1-vCPU guest omit the wrapper. Same first-draft-boilerplate status as
+        the GC pinning above;
       - reads nothing from `target_files` except by calling the target through
         its normal interface.
       Emit a single final `metric_name: <number>` line the loop can parse.
@@ -182,6 +223,72 @@ tasks:
       is a judgement, and that is the point — a harness is the one artifact an
       opinion cannot certify. All must hold; if any fails, bail (`prepared`
       false, naming the failed guard in `harness_report`).
+
+      Run the battery as ONE campaign, not guard by guard. On a remote-exec
+      substrate every boot-measure-analyze cycle costs minutes, so: author
+      every probe, mutant, and variant FIRST; compile all timing variants into
+      distinct test binaries in as few execs as practical; then run ONE
+      detached, interleaved measurement script covering every timing-sensitive
+      guard (A/A, no-op, positive control, cache, precomputation, null-body
+      headroom) that writes a single results file, and poll that one job.
+      POLL TO AN ETA, NOT A RHYTHM: the campaign script knows its schedule up
+      front (passes x variants x invocation length), so it writes that
+      estimate into its marker file at launch and appends `pass N/M` as each
+      interleaved pass lands. The poller holds off until the ETA is nearly
+      elapsed, then polls with a single in-guest wait loop per exec (sized
+      under the sync-exec ceiling) that returns ONE status line
+      (`done=<0|1> pass=N/M`), never partial results — partial readings
+      invite exactly the mid-campaign second-guessing forbidden below. Every
+      poll costs a full model step; a handful of thin, ETA-scheduled polls
+      beat a metronome of fat ones.
+      WAITING HAPPENS ONLY INSIDE AN EXEC. There is no timer, park, or
+      suspend/resume in this harness: your turn ends exactly once, when you
+      emit the final structured outputs, and any attempt to "come back when
+      the timer fires" is parsed as those outputs and fails the whole task,
+      discarding all work. "Holding off" until an ETA means chaining in-guest
+      wait loops — each one a cheap exec that sleeps and returns one status
+      line. Keep each loop's total in-guest time at or under ~45s (e.g.
+      7 x `sleep 6`): the gateway kills sync execs around the 50s mark
+      regardless of the requested timeout, and a 60s loop has 504ed live. A
+      504 or transient gateway error on a poll is noise — rerun the same
+      poll, change nothing.
+      Batch the correctness-only guards (mutation battery, tolerance
+      calibration, oracle plumbing, timeout, build) into a second script. Two
+      long detached jobs and two analyses beat twenty babysat cycles. If one
+      timing guard produces a surprising single reading, do NOT re-measure it
+      in isolation — a lone re-run just samples the noise again; fold it into
+      the interleaved campaign (or extend that campaign's reps) so every
+      verdict rests on the same interleaved schedule, and report the final
+      interleaved numbers as the guard results.
+
+      CAMPAIGN SCRIPTS COMPUTE THEIR OWN VERDICTS. The timing campaign script
+      ends by computing, for each timing guard, the paired mean difference
+      against baseline over the interleaved passes and printing a per-guard
+      PASS/FAIL line using the SAME acceptance rule the downstream loop
+      applies: a difference is real only when |mean paired diff| exceeds
+      max(noise-epsilon fraction of baseline, significance-z x stderr of the
+      paired diffs). You author the formula into the script once; the script
+      issues the verdicts. You may NOT overrule a computed PASS because the
+      raw readings "look noisy" — pass-to-pass drift that cancels in the
+      pairing is exactly the noise the loop's machinery absorbs, and chasing
+      cosmetic stability with another harness rewrite and another campaign is
+      how a one-hour prepare happens. A computed FAIL you believe is wrong
+      gets ONE response: extend the same interleaved campaign with more
+      passes, never a redesign-and-remeasure cycle on a hunch.
+
+      LAUNCH DISCIPLINE. Verification and launch are SEPARATE execs, in
+      order: first an exec that builds every variant and runs the language's
+      static checks (Go: `go vet`) and ENDS with an unambiguous verdict line;
+      only after reading a clean verdict does a second exec launch the
+      detached campaign. Never combine `nohup ... &` with the build/vet check
+      in one shell line — the campaign launches before the verdict is read,
+      and a broken probe burns the whole campaign plus a runaway-process
+      cleanup. The campaign script itself builds ALL binaries as its first
+      phase and aborts (writing a FAILED marker) before any timed run if one
+      fails, and it appends each interleaved pass to the results file with a
+      pass tag as it completes, so a relaunch after an interruption resumes
+      from the last recorded pass instead of re-paying the passes already
+      measured.
 
       Baseline guards:
       - baseline measures: `experiment_command` from the workdir emits a
@@ -238,13 +345,15 @@ tasks:
         `bench_seed_env` below — with a per-round seed the candidate cannot know
         the timed inputs when it edits, and this probe can no longer win.
       - A/A GUARD: measure the untouched baseline against an IDENTICAL COPY of
-        itself, several times, and compare them the way the loop will — a real
-        gain must exceed `max(relative noise band, observed spread)`. NO A/A
-        comparison may declare a win. If identical code can beat itself, the
-        loop will accept noise as an improvement and promote it into the
-        lineage permanently, and the run is lost before it starts. This tests
-        the ACCEPTANCE RULE, not the benchmark, and it is the only guard that
-        does.
+        itself, interleaved across the campaign's passes, and let the script
+        compute the verdict with the loop's acceptance rule — the A/A paired
+        difference must NOT clear the threshold. That computed comparison IS
+        the guard: raw pass-to-pass spread is not a failure criterion, only a
+        declared A/A "win" is. If identical code can beat itself under the
+        rule, the loop will accept noise as an improvement and promote it into
+        the lineage permanently, and the run is lost before it starts. This
+        tests the ACCEPTANCE RULE, not the benchmark, and it is the only guard
+        that does.
       - TIMEOUT GUARD: an infinite loop in the target MUST make
         `correctness_command` terminate non-zero within a bounded time. Without
         this, one deadlocking candidate stalls the whole run.
@@ -266,10 +375,13 @@ tasks:
         them. Nothing so far proves a real improvement would actually register.
       - Inject a calibrated, semantically neutral SLOWDOWN into the target —
         e.g. redo the target's core work k times, or spin a computed no-op —
-        sized to roughly 10% of the baseline metric. Assert the metric moves in
-        the expected direction by approximately the injected amount (within the
-        observed noise band), and that `correctness_command` still passes (the
-        edit is neutral). Then remove it and confirm the metric returns.
+        sized to roughly 10% of the baseline metric. The campaign script must
+        find its paired difference clears the acceptance threshold in the
+        expected direction and is roughly the injected size, and
+        `correctness_command` must still pass (the edit is neutral). The
+        threshold it had to clear IS the harness's minimum detectable effect
+        at the campaign's pass count. Then remove it and confirm the metric
+        returns.
       - This single probe establishes: the timed region actually contains the
         target; the metric's sign is right; the oracle does not false-positive
         on neutral edits; and — most valuable — the harness's MINIMUM DETECTABLE
@@ -287,9 +399,9 @@ tasks:
         other 85% of the metric is harness overhead the optimizer may not touch.
         Bail below 0.5, and say so; prefer >= 0.8. Re-scope the timed region
         instead of running an experiment that is capped before it starts.
-      - Emit it as `headroom_metric` (the null-body figure). The loop takes it as
-        `metric_limit` and stops when it is within the noise band of it, instead
-        of grinding out its remaining rounds for nothing.
+      - Emit it as `metric_limit` (the null-body figure). The loop input of the
+        same name takes it verbatim and stops when the best is within the noise
+        band of it, instead of grinding out its remaining rounds for nothing.
 
       Revert every probe edit so the sandbox is left in the clean baseline
       state; the snapshot must capture the original code, not your probes.
@@ -301,13 +413,13 @@ tasks:
       across retries; on an idempotency-key conflict the snapshot already
       exists — resolve its id by key and reuse it; if the server rejects the
       requested TTL use the longest it accepts). Resolve the concrete id as
-      `prepared_snapshot_id`, then fire-and-forget delete the sandbox. Compose
+      `snapshot_id`, then fire-and-forget delete the sandbox. Compose
       `goal` for the downstream proposer: what to optimize and the guarantee
       that the frozen test pins correctness while the frozen bench times the
-      target. Return every loop input (`prepared_snapshot_id`, `goal`,
+      target. Return every loop input (`snapshot_id`, `goal`,
       `workdir`, `target_files`, `frozen_files`, `experiment_command`,
       `correctness_command`, `metric_name`, `metric_direction`,
-      `bench_seed_env`, `headroom_metric`), the forwarded `compute_commands`,
+      `bench_seed_env`, `metric_limit`), the forwarded `compute_commands`,
       `prepared` true, and a `harness_report` recording what you found or built,
       the hygiene choices, and EVERY guard result — including the mutation kill
       rate, the measured minimum detectable effect from the positive control,
@@ -333,6 +445,9 @@ tasks:
         metric_direction:
           schema: { type: string, enum: [minimize, maximize] }
           value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        bench_duration_target:
+          schema: { type: string, description: Wall-clock budget one experiment_command invocation should aim for }
+          value: "${{ inputs.values.?bench_duration_target.orValue('45s') }}"
         harness_hints:
           schema: { type: string, description: Caller-supplied measurement guidance (empty means discover everything) }
           value: "${{ inputs.values.?harness_hints.orValue('') }}"
@@ -350,9 +465,9 @@ tasks:
         prepared:
           required: true
           schema: { type: boolean, description: Whether a trustworthy harness was produced; false means the agent bailed and harness_report holds the blocker }
-        prepared_snapshot_id:
+        snapshot_id:
           required: true
-          schema: { type: string, description: Snapshot of the repo with the harness baked in, ready for the loop (empty when prepared is false) }
+          schema: { type: string, description: "Snapshot of the repo with the harness baked in, ready for the loop (empty when prepared is false)" }
         goal:
           required: true
           schema: { type: string, description: Optimization goal for the downstream proposer }
@@ -364,7 +479,7 @@ tasks:
           schema: { type: array, minItems: 1, items: { type: string }, description: Workdir-relative implementation files the optimizer may edit }
         frozen_files:
           required: true
-          schema: { type: array, items: { type: string }, description: Workdir-relative scoring surface (benchmark, correctness harness + golden table, dependency manifests, fixtures) }
+          schema: { type: array, items: { type: string }, description: "Workdir-relative scoring surface (benchmark, correctness harness + golden table, dependency manifests, fixtures)" }
         experiment_command:
           required: true
           schema: { type: string, description: In-guest command run from workdir that emits the metric_name scalar }
@@ -383,22 +498,22 @@ tasks:
         bench_seed_env:
           required: true
           schema: { type: string, description: Environment variable the benchmark reads its input-generator seed from; empty when the bench takes no seed (the optimizer can then precompute the timed inputs) }
-        headroom_metric:
+        metric_limit:
           required: true
-          schema: { type: number, description: Metric with the target body nulled out — the theoretical ceiling for the whole experiment; the loop takes it as metric_limit and stops on reaching it }
+          schema: { type: number, description: Metric with the target body nulled out — the theoretical ceiling for the whole experiment; bind it verbatim to the loop's metric_limit so the loop stops on reaching it }
         harness_report:
           required: true
-          schema: { type: string, description: Markdown record of what was found or built, hygiene choices, and every guard result including the measured minimum detectable effect and headroom (or the bail reason) }
+          schema: { type: string, description: "Markdown record of what was found or built, hygiene choices, and every guard result including the measured minimum detectable effect and headroom (or the bail reason)" }
 outputs:
   values:
     prepared:
       required: true
-      schema: { type: boolean }
+      schema: { type: boolean, description: "Whether a trustworthy harness was produced. Every downstream task consuming this template's outputs must gate on it (if: prepared) — when false the loop inputs are empty sentinels and harness_report holds the blocker" }
       value: "${{ tasks.prepare.outputs.values.prepared }}"
-    prepared_snapshot_id:
+    snapshot_id:
       required: true
-      schema: { type: string, description: "Snapshot with the repo and harness baked, ready for dev.wagie/experiment-snapshot-loop" }
-      value: "${{ tasks.prepare.outputs.values.prepared_snapshot_id }}"
+      schema: { type: string, description: "Snapshot with the repo and harness baked, ready to bind verbatim to dev.wagie/experiment-snapshot-loop's snapshot_id (empty when prepared is false)" }
+      value: "${{ tasks.prepare.outputs.values.snapshot_id }}"
     goal:
       required: true
       schema: { type: string }
@@ -427,10 +542,10 @@ outputs:
       required: true
       schema: { type: string, description: Environment variable the benchmark reads its input-generator seed from (empty when it takes none) }
       value: "${{ tasks.prepare.outputs.values.bench_seed_env }}"
-    headroom_metric:
+    metric_limit:
       required: true
-      schema: { type: number, description: Metric with the target body nulled out — the experiment's theoretical ceiling, usable as the loop's metric_limit }
-      value: "${{ tasks.prepare.outputs.values.headroom_metric }}"
+      schema: { type: number, description: "Metric with the target body nulled out — the experiment's theoretical ceiling, named to bind verbatim to the loop's metric_limit" }
+      value: "${{ tasks.prepare.outputs.values.metric_limit }}"
     metric_name:
       required: true
       schema: { type: string }

@@ -404,6 +404,8 @@ tasks:
                   status: { type: string, enum: [pass, fail, invalid, suspicious] }
                   metric: { type: number }
                   spread: { type: number }
+                  paired_gain: { type: number }
+                  paired_gain_stderr: { type: number }
                   best_after: { type: number }
                   decision_source: { type: string, enum: [auto, agent] }
                   measurement_note: { type: string }

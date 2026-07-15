@@ -64,6 +64,7 @@ func main() {
 	warnings := collectWarnings(files)
 	reported, failed := report(results, warnings, filters)
 	failed += reportSchemaDrift(files)
+	failed += reportStraySchemaKeys(files)
 	fmt.Printf("\n%d reported, %d failed\n", reported, failed)
 	if failed > 0 {
 		os.Exit(1)
@@ -89,6 +90,26 @@ func reportSchemaDrift(files []wagie.TemplateFile) int {
 	}
 	for _, issue := range issues {
 		fmt.Printf("FAIL  schema drift\n        - %s\n", issue.Error())
+	}
+	return len(issues)
+}
+
+// reportStraySchemaKeys scans every file — core included, the comma-split bug
+// has landed in core templates too — for schema keys outside the JSON-schema
+// vocabulary and returns the number found.
+func reportStraySchemaKeys(files []wagie.TemplateFile) int {
+	sources := make([]templatecheck.SchemaSource, 0, len(files))
+	for _, file := range files {
+		sources = append(sources, templatecheck.SchemaSource{Path: relPath(file.Path), Data: file.Data})
+	}
+
+	issues, err := templatecheck.StraySchemaKeys(sources)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "stray schema key check: %v\n", err)
+		os.Exit(1)
+	}
+	for _, issue := range issues {
+		fmt.Printf("FAIL  stray schema key\n        - %s\n", issue.Error())
 	}
 	return len(issues)
 }
