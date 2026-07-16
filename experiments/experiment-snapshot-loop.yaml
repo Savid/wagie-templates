@@ -97,7 +97,7 @@ inputs:
       schema: { type: string, default: "" }
 tasks:
   setup:
-    quality-gate: "${{ has(outputs.values.baseline_metric) && has(outputs.values.frozen_digest) && size(outputs.values.frozen_digest) > 0 && has(outputs.values.tree_digest) && size(outputs.values.tree_digest) > 0 && has(outputs.values.manifest_store) && size(outputs.values.manifest_store) > 0 && has(outputs.values.anchored_snapshot_id) && size(outputs.values.anchored_snapshot_id) > 0 && has(outputs.values.manifest_command) && size(outputs.values.manifest_command) > 0 && has(outputs.values.manifest_script_digest) && size(outputs.values.manifest_script_digest) > 0 && has(outputs.values.effective_noise_epsilon) && outputs.values.effective_noise_epsilon >= 0.0 && has(outputs.values.effective_measurement_runs) && outputs.values.effective_measurement_runs >= 1.0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && has(outputs.values.environment_summary) && size(outputs.values.environment_summary) > 0 }}"
+    quality-gate: "${{ has(outputs.values.sandbox_prefix) && size(outputs.values.sandbox_prefix) >= 3 && size(outputs.values.sandbox_prefix) <= 20 && has(outputs.values.baseline_metric) && has(outputs.values.frozen_digest) && size(outputs.values.frozen_digest) > 0 && has(outputs.values.tree_digest) && size(outputs.values.tree_digest) > 0 && has(outputs.values.manifest_store) && size(outputs.values.manifest_store) > 0 && has(outputs.values.anchored_snapshot_id) && size(outputs.values.anchored_snapshot_id) > 0 && has(outputs.values.manifest_command) && size(outputs.values.manifest_command) > 0 && has(outputs.values.manifest_script_digest) && size(outputs.values.manifest_script_digest) > 0 && has(outputs.values.effective_noise_epsilon) && outputs.values.effective_noise_epsilon >= 0.0 && has(outputs.values.effective_measurement_runs) && outputs.values.effective_measurement_runs >= 1.0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && has(outputs.values.environment_summary) && size(outputs.values.environment_summary) > 0 }}"
     instructions: |-
       Establish the baseline the loop will optimize against. The input snapshot IS
       the baseline state — you verify it, measure it, and fingerprint its scoring
@@ -113,6 +113,17 @@ tasks:
       at or above `max_iterations` — that just means the corresponding early
       exit never fires before the round cap, which is a valid (cap-bounded)
       configuration. `plateau_patience` of 1 is a valid aggressive early stop.
+
+      Before creating anything, choose `sandbox_prefix`: a deterministic,
+      human-readable slug naming what this experiment optimizes, derived from
+      `goal` and `target_files` (for example `eip-search`, `prime-count`, or
+      `json-parse`). Use 1-3 short lowercase words joined by hyphens, 3-20
+      characters total, matching `^[a-z0-9]+(?:-[a-z0-9]+)*$`. It identifies
+      the experiment, not an attempt: never include a random suffix, round
+      number, sandbox id, or timestamp, and choose the same value on a retry.
+      Name the setup sandbox exactly `<sandbox_prefix>-setup`. Return the slug
+      as `sandbox_prefix`; every later task uses the same prefix for readable
+      sandbox names.
 
       Retry safety: give every sandbox you create a recognisable name and use
       deterministic idempotency keys, so a retried attempt can find and delete
@@ -259,6 +270,9 @@ tasks:
       datasource credentials.
     inputs:
       values:
+        goal:
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
         snapshot_id:
           schema: { type: string }
           value: "${{ inputs.values.snapshot_id }}"
@@ -309,6 +323,14 @@ tasks:
           value: "${{ inputs.values.?compute_commands.orValue('') }}"
     outputs:
       values:
+        sandbox_prefix:
+          required: true
+          schema:
+            type: string
+            minLength: 3
+            maxLength: 20
+            pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+            description: Short deterministic slug used as the human-readable prefix for every sandbox in this experiment
         baseline_metric:
           required: true
           schema: { type: number, description: Median metric of the untouched baseline snapshot }
@@ -414,6 +436,10 @@ tasks:
           required: true
           schema: { type: string }
           value: "${{ tasks.setup.outputs.values.compute_commands }}"
+        sandbox_prefix:
+          required: true
+          schema: { type: string, description: Setup-validated workload slug used for readable sandbox names }
+          value: "${{ tasks.setup.outputs.values.sandbox_prefix }}"
         max_iterations:
           required: true
           schema: { type: number }
@@ -477,7 +503,7 @@ tasks:
       onMaxExhausted: continue
     tasks:
       propose:
-        quality-gate: "${{ has(outputs.values.applied) && has(outputs.values.sandbox_id) && has(outputs.values.incumbent_backup) && has(outputs.values.change) && (outputs.values.applied ? (size(outputs.values.sandbox_id) > 0 && size(outputs.values.incumbent_backup) > 0 && size(outputs.values.change) > 0) : (has(outputs.values.propose_note) && size(outputs.values.propose_note) > 0)) }}"
+        quality-gate: "${{ has(outputs.values.applied) && has(outputs.values.sandbox_id) && has(outputs.values.incumbent_backup) && has(outputs.values.change) && (outputs.values.applied ? (size(outputs.values.sandbox_id) > 0 && outputs.values.incumbent_backup == '/root/.incumbent-' + string(inputs.values.round_number) && size(outputs.values.change) > 0) : (has(outputs.values.propose_note) && size(outputs.values.propose_note) > 0)) }}"
         instructions: |-
           Obtain this round's sandbox at the current best state, then propose
           and apply ONE change likely to improve `metric_name` toward
@@ -499,11 +525,16 @@ tasks:
           comfortably covers this round (renew the lease if `compute_commands`
           has a renew pattern; if expiry is near and renewal is unsupported,
           fall back to a fresh boot). Otherwise create a sandbox from
-          `best_snapshot` with `sandbox_ttl`, named exactly `round-<NNNN>`
-          where <NNNN> is the round number (ledger line count plus one)
-          zero-padded to four digits — e.g. `round-0007` — so a retried
+          `best_snapshot` with `sandbox_ttl`, named exactly
+          `<sandbox_prefix>-round-<round_number>` — e.g. `eip-search-round-7`
+          — so a retried
           attempt can spot and delete an orphan from a prior attempt before
-          creating a new one; a reused sandbox keeps its original name. Use
+          creating a new one; a reused sandbox keeps its original name. The
+          typed `round_number` input is authoritative for this iteration:
+          NEVER derive the current round from a reused sandbox's old name or
+          by recounting prose. Derive create/delete idempotency keys from the
+          current `best_snapshot`, `round_number`, and operation kind — never
+          use a globally reusable bare key such as `round-1-create`. Use
           the verified command patterns in `compute_commands` verbatim — do
           not rediscover the CLI. Fall back to the runbook that owns the
           panda-compute sandbox lifecycle (find it via
@@ -514,15 +545,26 @@ tasks:
 
           Preserve the incumbent BEFORE you touch anything. Copy every entry in
           `target_files`, byte-for-byte and preserving relative paths, into a
-          fresh directory outside `workdir` (e.g. `/root/.incumbent-<NNNN>`,
-          same round number as the sandbox name). This is the current best
+          fresh directory outside `workdir`, EXACTLY
+          `/root/.incumbent-<round_number>` (for example
+          `/root/.incumbent-7`). This is the current best
           state of the target files; a later task restores it to re-measure the
           incumbent in this same VM, which is the only way the candidate and the
           incumbent are compared under identical cache and host conditions.
-          Report the directory as `incumbent_backup`. Make the copy idempotent:
-          if the directory already exists from a retried attempt, leave it alone
-          — it holds the pre-edit state and re-copying after a partial edit
-          would capture your own change as the incumbent.
+          Report that exact directory as `incumbent_backup`. Never derive it
+          from the sandbox name: a kept sandbox is reused under its original
+          name in later rounds, which would silently select a stale backup.
+          The directory MUST contain `.wagie-provenance` with exactly two
+          lines: `best_snapshot=<best_snapshot>` and
+          `round_number=<round_number>`. Build a complete backup plus marker in
+          a temporary sibling and rename it into place before editing. If the
+          final directory already exists, reuse it only when the marker matches
+          both current inputs and every target entry exists; that is a retry of
+          this round. A missing or different marker is inherited scratch from
+          another lineage: delete it and rebuild it from the still-untouched
+          worktree. Never edit until the complete, correctly marked backup is
+          in place. If a matching backup is incomplete, fail honestly instead
+          of re-copying after a possibly partial edit.
 
           Apply: work in `workdir` inside the guest (drive it with sandbox exec,
           or ssh when editing interactively is easier). Edit ONLY files listed in
@@ -646,6 +688,17 @@ tasks:
             sandbox_ttl:
               schema: { type: string }
               value: "${{ inputs.values.sandbox_ttl }}"
+            sandbox_prefix:
+              schema: { type: string, description: Setup-validated workload slug used for readable sandbox names }
+              value: "${{ inputs.values.sandbox_prefix }}"
+            round_number:
+              required: true
+              schema: { type: integer, minimum: 1, description: Mechanically computed 1-based round number; authoritative even when a kept sandbox is reused under an older name }
+              value: >-
+                ${{ int(loop.accepted_count.orValue(0.0)
+                    + loop.discarded_count.orValue(0.0)
+                    + loop.integrity_violation_count.orValue(0.0)
+                    + 1.0) }}
         outputs:
           values:
             sandbox_id:
@@ -653,7 +706,7 @@ tasks:
               schema: { type: string, description: This round's ephemeral sandbox id (freshly booted or reused from the previous kept round) }
             incumbent_backup:
               required: true
-              schema: { type: string, description: "Guest directory holding a byte-identical pre-edit copy of target_files, used to re-measure the incumbent in this same sandbox" }
+              schema: { type: string, description: "Exact current-round guest directory /root/.incumbent-<round_number>, holding a byte-identical pre-edit copy of target_files" }
             change:
               required: true
               schema: { type: string, description: One-line tab-free summary of the applied change }
@@ -666,7 +719,7 @@ tasks:
               schema: { type: string, description: One-line infra fault description (endpoint + error). MUST be non-empty when applied is false; empty or absent otherwise. }
       verify_and_measure:
         needs: [propose]
-        quality-gate: "${{ has(outputs.values.observed_digest) && has(outputs.values.matches) && (size(outputs.values.observed_digest) > 0 || (!outputs.values.matches && has(outputs.values.valid) && !outputs.values.valid && has(outputs.values.measurement_note) && size(outputs.values.measurement_note) > 0)) && (!outputs.values.matches || outputs.values.observed_digest == inputs.values.expected_digest) && has(outputs.values.violations) && (outputs.values.matches == (size(outputs.values.violations) == 0)) && has(outputs.values.candidate_snapshot_id) && (!outputs.values.matches || size(outputs.values.candidate_snapshot_id) > 0 || (!outputs.values.valid && size(outputs.values.measurement_note) > 0)) && has(outputs.values.valid) && (outputs.values.matches || outputs.values.valid == false) && has(outputs.values.candidate_metric) && has(outputs.values.incumbent_metric) && has(outputs.values.paired_gain) && has(outputs.values.paired_gain_stderr) && outputs.values.paired_gain_stderr >= 0.0 && has(outputs.values.paired_differences) && (outputs.values.valid || (outputs.values.candidate_metric == outputs.values.incumbent_metric && outputs.values.paired_gain == 0.0 && size(outputs.values.paired_differences) == 0)) && (!outputs.values.valid || size(outputs.values.paired_differences) == int(inputs.values.measurement_runs)) && has(outputs.values.measurement_note) }}"
+        quality-gate: "${{ has(outputs.values.observed_digest) && has(outputs.values.matches) && (size(outputs.values.observed_digest) > 0 || (!outputs.values.matches && has(outputs.values.valid) && !outputs.values.valid && has(outputs.values.measurement_note) && size(outputs.values.measurement_note) > 0)) && (!outputs.values.matches || outputs.values.observed_digest == inputs.values.expected_digest) && has(outputs.values.violations) && (outputs.values.matches == (size(outputs.values.violations) == 0)) && has(outputs.values.candidate_snapshot_id) && (!outputs.values.matches || size(outputs.values.candidate_snapshot_id) > 0 || (!outputs.values.valid && size(outputs.values.measurement_note) > 0)) && has(outputs.values.valid) && has(outputs.values.pair_trusted) && outputs.values.valid == outputs.values.pair_trusted && (outputs.values.matches || outputs.values.valid == false) && has(outputs.values.candidate_metric) && has(outputs.values.incumbent_metric) && has(outputs.values.paired_gain) && has(outputs.values.paired_gain_stderr) && outputs.values.paired_gain_stderr >= 0.0 && has(outputs.values.paired_differences) && (outputs.values.valid || (outputs.values.candidate_metric == outputs.values.incumbent_metric && outputs.values.paired_gain == 0.0 && size(outputs.values.paired_differences) == 0)) && (!outputs.values.valid || size(outputs.values.paired_differences) == int(inputs.values.measurement_runs)) && has(outputs.values.measurement_note) }}"
         instructions: |-
           Verify, pin, and score this round's candidate in one pass.
           You are the independent verification and measurement channel: you did
@@ -679,6 +732,10 @@ tasks:
           `panda search runbooks "compute sandbox snapshot lifecycle"`) only if a
           pattern fails.
 
+          `round_number` is the authoritative typed identity for this round.
+          Use it for seeds, snapshot notes and backup paths. Never infer a round
+          from the sandbox name, the ledger, a log line, or surrounding prose.
+
           0 — Propose infra short-circuit. If `applied` is false, the
           candidate was never written into the guest (`propose_note` names
           the fault): perform NO verification and NO measurement. If
@@ -688,11 +745,32 @@ tasks:
           the echo asserts nothing — no snapshot is promoted from this round
           and the next round re-verifies from the immutable best snapshot),
           `matches` true, `violations` [], `candidate_snapshot_id` "",
-          `valid` false, `candidate_metric` 0, `incumbent_metric` 0,
+          `valid` false, `pair_trusted` false, `candidate_metric` 0,
+          `incumbent_metric` 0,
           `paired_gain` 0, `paired_gain_stderr` 0, `paired_differences` [],
           `measurement_note` = "propose infra-failure: " + `propose_note`.
           The loop auto-discards the round and moves on; a persistent outage
           ends the run via `patience`.
+
+          0b — Incumbent provenance gate. When `applied` is true, require
+          `incumbent_backup` to equal exactly
+          `/root/.incumbent-<round_number>` and require that directory to hold
+          every `target_files` entry at its relative path. Also require its
+          `.wagie-provenance` marker to contain exactly
+          `best_snapshot=<source_snapshot>` and
+          `round_number=<round_number>`. A missing entry, a different path, or
+          a marker for another source or round makes a paired campaign
+          impossible. Do NOT recreate the incumbent from the already-edited
+          worktree, do NOT measure either arm, and do NOT attempt to repair the
+          pair with a standalone rerun or a metric from another round. Delete
+          the sandbox fire-and-forget and return: `observed_digest` =
+          `expected_digest`, `matches` true, `violations` [],
+          `candidate_snapshot_id` "", `valid` false, `pair_trusted` false,
+          `candidate_metric` and `incumbent_metric` BOTH equal to `best_metric`,
+          `paired_gain` and `paired_gain_stderr` 0, `paired_differences` [], and
+          `measurement_note` beginning `incumbent-provenance:` and naming the
+          exact missing or mismatched path. This shape is mechanically
+          unkeepable and no review session runs for it.
 
           1 — Integrity and scope. The ENTIRE comparison happens inside the
           guest at `sandbox_id`; the manifests are machine-comparison data
@@ -748,8 +826,9 @@ tasks:
           If either check fails, the candidate is rejected before any snapshot or
           measurement: issue a fire-and-forget delete for the round sandbox (do
           not poll) and return `matches` false, `candidate_snapshot_id` "",
-          `valid` false, `candidate_metric` and `incumbent_metric` BOTH equal to
-          `best_metric`, `paired_gain` and `paired_gain_stderr` 0,
+          `valid` false, `pair_trusted` false, `candidate_metric` and
+          `incumbent_metric` BOTH equal to `best_metric`, `paired_gain` and
+          `paired_gain_stderr` 0,
           `paired_differences` empty. (The gain must be zero so the decision
           arithmetic discards.) `measurement_note` records WHOSE fault the
           rejection was, and that distinction matters more than the rejection:
@@ -768,11 +847,12 @@ tasks:
 
           2 — Snapshot (integrity passed), BEFORE anything runs: snapshot
           `sandbox_id` with `candidate_snapshot_ttl`, a note shaped
-          `round <n>: <change>` (derive the round number as the ledger's line
-          count plus one), and an idempotency key derived deterministically from
-          the round — never random — so a retried attempt reuses the existing
-          snapshot instead of minting a duplicate. Compose the note verbatim
-          from those fields alone so a retried request body is byte-identical.
+          `<sandbox_prefix> round <round_number>: <change>`, and an idempotency
+          key derived deterministically from `sandbox_id`, `round_number`, and
+          the operation kind — never random and never a bare round number — so
+          a retried attempt reuses the existing snapshot instead of minting a
+          duplicate. Compose the note verbatim from those fields alone so a
+          retried request body is byte-identical.
           On an idempotency-key conflict, a prior attempt already created this
           snapshot: resolve its id by key (list the resources and match
           `.idempotencyKey`) and use it — never "resolve" the conflict by
@@ -788,9 +868,9 @@ tasks:
           unpinned candidate. Instead: issue a fire-and-forget delete for the
           round sandbox (its host node may be unhealthy) and return the
           unmeasured shape — `matches` true with the digests as computed,
-          `candidate_snapshot_id` "", `valid` false, `candidate_metric` and
-          `incumbent_metric` BOTH equal to `best_metric`, `paired_gain` and
-          `paired_gain_stderr` 0, `paired_differences` empty — with a
+          `candidate_snapshot_id` "", `valid` false, `pair_trusted` false,
+          `candidate_metric` and `incumbent_metric` BOTH equal to `best_metric`,
+          `paired_gain` and `paired_gain_stderr` 0, `paired_differences` empty — with a
           `measurement_note` naming the exact infra error. The round records
           as a discard, streak arithmetic carries, and the next round boots a
           FRESH sandbox from the unchanged best snapshot, likely on a
@@ -806,7 +886,7 @@ tasks:
           return the unverifiable shape: `observed_digest` "" (empty — you
           never computed one), `matches` false, `violations` a single entry
           prefixed `harness:` naming the endpoint and error, `valid` false,
-          `candidate_snapshot_id` "", `candidate_metric` and
+          `pair_trusted` false, `candidate_snapshot_id` "", `candidate_metric` and
           `incumbent_metric` BOTH equal to `best_metric`, `paired_gain` and
           `paired_gain_stderr` 0, `paired_differences` empty, and a non-empty
           `measurement_note` naming the exact fault. This is a harness fault,
@@ -816,9 +896,10 @@ tasks:
 
           3 — Validity: if `correctness_command` is non-empty, run it from
           `workdir` in the guest; on non-zero exit issue a fire-and-forget
-          delete for the round sandbox, report `valid` false, `candidate_metric`
-          and `incumbent_metric` BOTH equal to `best_metric`, `paired_gain` and
-          `paired_gain_stderr` 0, `paired_differences` empty,
+          delete for the round sandbox, report `valid` false,
+          `pair_trusted` false, `candidate_metric` and `incumbent_metric` BOTH
+          equal to `best_metric`, `paired_gain` and `paired_gain_stderr` 0,
+          `paired_differences` empty,
           `measurement_note` "", and skip measurement. An empty command means
           every candidate is valid.
 
@@ -831,7 +912,7 @@ tasks:
           a loop convinces itself of a win it cannot reproduce.
 
           - Seed: if `bench_seed_env` is non-empty, export it set to
-            `round_seed` for EVERY measurement run in this round — both arms,
+            `round_number` for EVERY measurement run in this round — both arms,
             same value. The seed changes each round so a candidate cannot know
             at edit time which inputs will be timed (and so cannot precompute
             them into a lookup table that beats the bench while still passing
@@ -840,14 +921,23 @@ tasks:
             let the arms differ.
           - FIRST, back up the candidate. Copy every entry in `target_files`,
             byte-for-byte and preserving relative paths, into a fresh directory
-            outside `workdir` (e.g. `/root/.candidate-<NNNN>`, same round number
-            as the sandbox). You are about to overwrite `target_files` with the
+            outside `workdir` at exactly `/root/.candidate-<round_number>`.
+            Never derive this path from the sandbox name. You are about to
+            overwrite `target_files` with the
             incumbent, and without this copy the candidate's edits are gone for
             good — the snapshot you pinned in step 2 would then be the ONLY
             surviving copy, and the sandbox this round leaves behind (which the
             next round reuses on a keep) would silently contain incumbent code.
-            Make the copy idempotent: if the directory already exists from a
-            retried attempt, leave it alone.
+            Give this directory a `.wagie-provenance` marker with exactly
+            `candidate_snapshot_id=<candidate_snapshot_id>` and
+            `round_number=<round_number>`. Build it completely in a temporary
+            sibling and rename it into place before the first swap. Reuse an
+            existing directory only when that marker matches and every target
+            entry exists. A different or missing marker is stale scratch from
+            another lineage and must be replaced while the worktree still holds
+            the candidate. If a matching backup is incomplete, stop with
+            `pair_trusted` false rather than rebuilding from a possibly swapped
+            worktree.
           - WARMUP FIRST, then measure. Before the first pair, run
             `experiment_command` once (with the round seed exported, incumbent
             files in place) and DISCARD the reading: the first invocation
@@ -922,6 +1012,14 @@ tasks:
             decision and the report can audit the spread rather than trust a
             summary.
 
+          Set `pair_trusted` true only after all `measurement_runs` pairs have
+          completed in the required alternating order using the exact
+          current-round incumbent and candidate backups. Every unmeasured,
+          incomplete, stale, or provenance-mismatched campaign sets it false.
+          `valid` and `pair_trusted` must always agree: a candidate becomes
+          valid only after integrity, correctness, and the trusted paired
+          campaign all succeed.
+
           Do not substitute a range (max minus min) for the standard error. A
           range grows with the number of runs and says nothing about how precisely
           the mean is known; the standard error shrinks as sqrt(n) and is the
@@ -958,12 +1056,18 @@ tasks:
               schema: { type: string }
               value: "${{ tasks.propose.outputs.values.sandbox_id }}"
             incumbent_backup:
+              required: true
               schema: { type: string }
               value: "${{ tasks.propose.outputs.values.incumbent_backup }}"
+            source_snapshot:
+              required: true
+              schema: { type: string, description: Exact best snapshot from which this round's incumbent backup must have been copied }
+              value: "${{ loop.best_snapshot.orValue(inputs.values.snapshot_id) }}"
             change:
               schema: { type: string }
               value: "${{ tasks.propose.outputs.values.change }}"
             applied:
+              required: true
               schema: { type: boolean, description: Whether propose actually wrote the change into the guest; false short-circuits this task (step 0) }
               value: "${{ tasks.propose.outputs.values.applied }}"
             propose_note:
@@ -1004,13 +1108,17 @@ tasks:
             bench_seed_env:
               schema: { type: string }
               value: "${{ inputs.values.bench_seed_env }}"
-            round_seed:
-              schema: { type: number, description: "This round's benchmark seed; both paired arms use it, and it changes every round" }
+            sandbox_prefix:
+              schema: { type: string, description: Short setup-derived workload slug used only to make compute resources recognizable }
+              value: "${{ inputs.values.sandbox_prefix }}"
+            round_number:
+              required: true
+              schema: { type: integer, minimum: 1, description: "Mechanically computed 1-based round identity; authoritative for backups, snapshot notes, and the benchmark seed" }
               value: >-
-                ${{ loop.accepted_count.orValue(0.0)
+                ${{ int(loop.accepted_count.orValue(0.0)
                     + loop.discarded_count.orValue(0.0)
                     + loop.integrity_violation_count.orValue(0.0)
-                    + 1.0 }}
+                    + 1.0) }}
             metric_name:
               schema: { type: string }
               value: "${{ inputs.values.metric_name }}"
@@ -1018,6 +1126,7 @@ tasks:
               schema: { type: number }
               value: "${{ loop.best_metric.orValue(inputs.values.baseline_metric) }}"
             measurement_runs:
+              required: true
               schema: { type: number }
               value: "${{ inputs.values.measurement_runs }}"
             candidate_snapshot_ttl:
@@ -1045,7 +1154,10 @@ tasks:
               schema: { type: string, description: Snapshot of the applied candidate taken before any measurement ran; empty on an integrity violation }
             valid:
               required: true
-              schema: { type: boolean, description: Whether the candidate passed integrity and the correctness gate }
+              schema: { type: boolean, description: "Whether the candidate passed integrity, correctness, and a complete trusted paired campaign" }
+            pair_trusted:
+              required: true
+              schema: { type: boolean, description: True only when every requested candidate/incumbent pair used the exact current-round backups in alternating order }
             candidate_metric:
               required: true
               schema: { type: number, description: Median measured metric of the applied candidate (best_metric echoed when unmeasured) }
@@ -1070,6 +1182,7 @@ tasks:
           ${{
             tasks.verify_and_measure.outputs.values.matches &&
             tasks.verify_and_measure.outputs.values.valid &&
+            tasks.verify_and_measure.outputs.values.pair_trusted &&
             cel.bind(best, loop.best_metric.orValue(inputs.values.baseline_metric),
               cel.bind(best_abs, best >= 0.0 ? best : -best,
                 cel.bind(gain, tasks.verify_and_measure.outputs.values.paired_gain,
@@ -1125,10 +1238,11 @@ tasks:
                   "- If noise_epsilon == 0 and paired_gain_stderr == 0, the threshold is zero and exact ties discard (the strict accept rule). But a zero standard error with more than one pair means every pair returned an identical difference, which for a timing metric is itself suspicious — prefer discarding and saying so.\n" +
                   "- If incumbent_metric disagrees sharply with the historical best above, the measurement environment moved between rounds, not the code. The paired comparison is still valid — it is the historical best that is stale — but say so in your rationale.\n\n" +
                   "Anomaly guidance:\n" +
-                  "- When the measurement note is non-empty, the verifier that produced the number is telling you it does not trust it. Do not launder a flagged measurement into a keep because the arithmetic happens to clear the threshold — a wrong number that clears the bar poisons every later round. Either establish the true value (you can re-run; see below) or discard and name the note as the reason.\n" +
+                  "- A stale or missing incumbent backup, a wrong round path, or an incomplete alternating campaign is mechanically unkeepable (`pair_trusted` is false and this review does not run). A standalone rerun or a metric borrowed from another round cannot reconstruct the missing pair.\n" +
+                  "- For any other non-empty measurement note, do not launder a flagged measurement into a keep because its arithmetic clears the threshold. Additional evidence may validate the paired campaign that already ran, but it cannot replace either arm or substitute a cross-round comparison; otherwise discard and name the note as the reason.\n" +
                   "- A timing-style metric reported as exactly 0 (or below) while the best is positive usually means the harness hit its print or timer resolution floor, not that the change is infinitely fast. Keeping such a value poisons every later comparison — nothing measurable can beat it. Unless you can establish the true value, discard and name the measurement floor as the reason.\n" +
                   "- For an out-of-family gain, judge whether the described change plausibly explains the magnitude (an algorithmic-complexity change can; a micro-tweak cannot). Keep only when the mechanism accounts for the size of the move.\n" +
-                  "- You may gather evidence before deciding: the round sandbox is still running, and the verified command patterns below let you exec into it (inspect target files, re-run the experiment command once, check how the harness prints the metric). The candidate snapshot is already pinned, so measurement side effects in the sandbox are harmless — but do not modify target or frozen files. Gather evidence in as few exec calls as practical (each is a full round trip) and never probe for the CLI itself — it is installed and authenticated.\n\n" +
+                  "- You may gather evidence before deciding: the round sandbox is still running, and the verified command patterns below let you exec into it (inspect target files or check how the harness prints the metric). A diagnostic rerun may validate the existing paired campaign but is never a replacement arm and never changes the reported pair. The candidate snapshot is already pinned, so measurement side effects in the sandbox are harmless — but do not modify target or frozen files. Gather evidence in as few exec calls as practical (each is a full round trip) and never probe for the CLI itself — it is installed and authenticated.\n\n" +
                   "Verified compute command patterns:\n" + inputs.values.compute_commands
                 }}
             options:
@@ -1172,6 +1286,7 @@ tasks:
           value: |-
             ${{ tasks.verify_and_measure.outputs.values.matches &&
                 tasks.verify_and_measure.outputs.values.valid &&
+                tasks.verify_and_measure.outputs.values.pair_trusted &&
                 (outputs.values.escalated
                   ? (tasks.decide.outputs.values.decision == 'keep' && outputs.values.gain >= 0.0)
                   : outputs.values.gain > outputs.values.threshold) }}
@@ -1300,7 +1415,8 @@ tasks:
         snapshot carries only its own TTL, so say in the summary when it expires
         and that nothing durable was pinned. Report `reconciliation_gap` 0 and
         `reconciled` true — there is no claim to reconcile.
-      - Otherwise boot a sandbox from `best_snapshot` with `sandbox_ttl`. If
+      - Otherwise boot a sandbox from `best_snapshot` with `sandbox_ttl`, named
+        exactly `<sandbox_prefix>-confirm`. If
         `bench_seed_env` is non-empty, export it set to `holdout_seed` — a value
         NO round used. That makes this a genuine held-out measurement: the
         winner was selected against seeds 1..N and is now scored on inputs it
@@ -1503,6 +1619,9 @@ tasks:
         compute_commands:
           schema: { type: string }
           value: "${{ tasks.setup.outputs.values.compute_commands }}"
+        sandbox_prefix:
+          schema: { type: string, description: Setup-derived workload slug used to name the cold confirmation sandbox }
+          value: "${{ tasks.setup.outputs.values.sandbox_prefix }}"
         environment_summary:
           schema: { type: string }
           value: "${{ tasks.setup.outputs.values.environment_summary }}"
@@ -1510,12 +1629,12 @@ tasks:
           schema: { type: number }
           value: "${{ tasks.setup.outputs.values.baseline_metric }}"
         holdout_seed:
-          schema: { type: number, description: "A benchmark seed no round used, so the confirmation scores the winner on inputs it was never selected against" }
+          schema: { type: number, description: "A benchmark seed no round used, so the confirmation scores the winner on inputs it was never selected against — one past the final round's seed (rounds use 1..N, the baseline uses 0), so it is unused at any round count" }
           value: >-
             ${{ tasks.iterate.outputs.values.accepted_count
                 + tasks.iterate.outputs.values.discarded_count
                 + tasks.iterate.outputs.values.integrity_violation_count
-                + 1000.0 }}
+                + 1.0 }}
         best_snapshot:
           schema: { type: string }
           value: "${{ tasks.iterate.outputs.values.best_snapshot }}"

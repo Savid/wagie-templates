@@ -121,9 +121,11 @@ tasks:
       issue (via `panda search runbooks "root-cause a devnet issue"`): one
       first-cause issue. The issue-contract runbook owns the record shape; the
       fingerprinting runbook owns identity. Preserve the incoming fingerprint
-      and handles verbatim; fill the fingerprint block when absent, and record
-      its dedupe decision — a duplicate gets occurrence-attachment, not
-      re-investigation, and the report must say so.
+      and handles verbatim; fill the fingerprint block when absent, and when
+      handles are absent populate every id kind the evidence names (at minimum
+      `handles.network`) rather than leaving them blank. Record the dedupe
+      decision — a duplicate gets occurrence-attachment, not re-investigation,
+      and the report must say so.
 
       Emit the canonical issue and a one-line objective of the form "Identify
       the first-cause of: <issue>".
@@ -145,13 +147,22 @@ tasks:
     needs: [intake]
     quality-gate: "${{ has(outputs.values.network_target) && has(outputs.values.access_summary) && size(outputs.values.access_summary) > 0 && has(outputs.values.reproduction) }}"
     instructions: |-
-      Establish an investigable network, preferring the strongest handle you
+      Establish an investigable network — checking two disqualifiers first:
+      when the issue's classification layer is tooling and the failing
+      component is a datasource or pipeline outside any devnet
+      (ClickHouse/CBT/ingestion/test-runners), or the live network handle
+      still exhibits the symptom, target the live surface directly and do not
+      restore or launch anything. Otherwise prefer the strongest handle you
       were given: a supplied network target, else a snapshot (the snapshot_id
       input, the snapshots catalog, or the issue's handles), else reproduce
       from the issue's network handle. When the snapshots catalog offers
       several restore points, choose per the reproduction rules of the runbook
       that owns root-causing a devnet issue — it owns picking between the
       broken state and the latest snapshot before the issue's first_bad.
+      Fan-out siblings share compute: before any restore, list the running
+      sandboxes and reuse one whose lineage covers your restore point — at
+      most one restore per snapshot per run; the compute-lifecycle runbook
+      owns restore capacity and contention.
       Resolve each path's runbook via `panda search runbooks "<need>"`: the
       panda-compute lifecycle for snapshot/restore; running and reaching a
       Kurtosis devnet for local; Kurtosis config synthesis plus hosted devnet
@@ -160,12 +171,19 @@ tasks:
 
       Label the mode honestly with the reproduction status enum of the runbook
       that owns root-causing a devnet issue, and record the recipe that reaches
-      the state. If the state cannot be reproduced, set status historical-only
-      and proceed on the named historical evidence — do not fabricate a
-      reproduction.
+      the state. Check fidelity before claiming reproduction: record the
+      target's genesis time and chain id against the source network's — a
+      snapshot lineage with a different genesis is a local mirror, not the
+      source, and must be labeled as such. Never label `reproduced` on
+      evidence the target itself did not produce, and point network_target at
+      the surface where the recipe's verifying commands actually run. If the
+      state cannot be reproduced, set status historical-only and proceed on
+      the named historical evidence — do not fabricate a reproduction.
 
       Emit the network target, the reproduction record, and a short
-      access_summary a worker can act on.
+      access_summary a worker can act on — every handle in it spelled as a
+      runnable command with placeholders, never a bare tool or datasource
+      name.
     inputs:
       values:
         canonical_issue:
@@ -218,7 +236,10 @@ tasks:
 
       Write the plan as one self-contained text: fold in the issue's first_bad
       anchor and its key evidence refs — the hunt workers receive only this
-      plan and the access summary.
+      plan and the access summary. Do not embed review or process disclaimers
+      ("pending adversarial review", "must pass plan review") in the plan
+      text: reviewers attack the plan's substance, and self-referential
+      process caveats read as self-refutation.
     inputs:
       values:
         canonical_issue:
@@ -243,19 +264,52 @@ tasks:
     inputs:
       values:
         claim:
-          value: "${{ 'This hypothesis plan is sufficient to find the first cause: ' + tasks.plan.outputs.values.plan }}"
+          value: "${{ 'Executing this hypothesis plan will localize the first cause or falsify every listed hypothesis: ' + tasks.plan.outputs.values.plan }}"
         context:
           value: "${{ tasks.intake.outputs.values.objective }}"
+  revise:
+    needs: [plan, plan_review]
+    quality-gate: "${{ has(outputs.values.plan) && size(outputs.values.plan) > 0 }}"
+    instructions: |-
+      Finalize the hypothesis plan against its adversarial review — the hunt
+      executes only your output.
+
+      When the verdict is survives, return the plan verbatim. When it is
+      weakened or refuted, revise the plan to answer the strongest
+      counterargument and fold the missing evidence into a hypothesis test —
+      keep the same hypothesis budget and the same access, do not relitigate
+      the review, and do not run any tests.
+    inputs:
+      values:
+        plan:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.plan.outputs.values.plan }}"
+        verdict:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.plan_review.outputs.values.verdict }}"
+        strongest_counterargument:
+          schema: { type: string }
+          value: "${{ tasks.plan_review.outputs.values.strongest_counterargument }}"
+        missing_evidence:
+          schema: { type: string }
+          value: "${{ tasks.plan_review.outputs.values.missing_evidence }}"
+    outputs:
+      values:
+        plan:
+          required: true
+          schema: { type: string, description: "Review-adjusted hypothesis plan the hunt executes" }
   investigate:
-    # Load-bearing order ("judge twice"): plan_review must gate the hunt, so the
-    # adversarial plan review runs before any compute is spent. Do not drop
-    # plan_review from these needs.
-    needs: [intake, reproduce, plan, plan_review]
+    # Load-bearing order ("judge twice"): the adversarial plan review gates the
+    # hunt through revise, so review runs before any compute is spent. Do not
+    # drop plan_review or revise from these needs.
+    needs: [intake, reproduce, plan_review, revise]
     uses: dev.wagie/scoped-discovery@1.0.0
     inputs:
       values:
         target:
-          value: "${{ tasks.intake.outputs.values.canonical_issue.summary + ' || Access: ' + tasks.reproduce.outputs.values.access_summary + ' || Plan: ' + tasks.plan.outputs.values.plan + ' || Plan review (' + tasks.plan_review.outputs.values.verdict + '): ' + tasks.plan_review.outputs.values.strongest_counterargument }}"
+          value: "${{ tasks.intake.outputs.values.canonical_issue.summary + ' || Access: ' + tasks.reproduce.outputs.values.access_summary + ' || Plan: ' + tasks.revise.outputs.values.plan + ' || Plan review (' + tasks.plan_review.outputs.values.verdict + '): ' + tasks.plan_review.outputs.values.strongest_counterargument + ' || Tooling: the panda CLI is on PATH — resolve procedures with panda search runbooks <topic> then panda read runbooks://<stem>; query data with panda clickhouse query <datasource> <sql>; reach nodes with panda ethnode <cmd> <network> <node>; reach a compute sandbox with panda compute sandboxes exec <sandbox-id> -- <cmd>' }}"
         objective:
           value: "${{ tasks.intake.outputs.values.objective }}"
         max_gapfill_rounds:
@@ -308,7 +362,7 @@ tasks:
           schema: { type: string, description: high | medium | low }
   trace:
     needs: [intake, reproduce, synthesize]
-    quality-gate: "${{ has(outputs.values.reachability) && size(outputs.values.reachability) > 0 }}"
+    quality-gate: "${{ has(outputs.values.reachability) && size(outputs.values.reachability) > 0 && has(outputs.values.source_findings) && (outputs.values.reachability != 'reachable' || size(outputs.values.source_findings) > 200) }}"
     instructions: |-
       Trace before blame: tie the leading cause to the observed failure.
 
@@ -318,7 +372,11 @@ tasks:
       Escalate to the runbook that owns spec and client source drilldown only
       when its escalation gate demands it.
 
-      Emit the reachability verdict and any source findings.
+      Emit the reachability verdict and the source findings. A `reachable`
+      verdict must document the actual cause-to-first_bad chain in
+      source_findings — the paths taken, the edge evidence, and the
+      alternatives rejected, in the shape the reachability runbook owns. A
+      reachable verdict without a documented chain is a rubber stamp.
     inputs:
       values:
         root_cause_claim:
@@ -358,7 +416,7 @@ tasks:
         evidence:
           value: "${{ tasks.synthesize.outputs.values.evidence }}"
         context:
-          value: "${{ tasks.investigate.outputs.values.coverage_summary + ' || Reachability: ' + tasks.trace.outputs.values.reachability + ' || Source findings: ' + tasks.trace.outputs.values.source_findings }}"
+          value: "${{ tasks.investigate.outputs.values.coverage_summary + ' || Reachability: ' + tasks.trace.outputs.values.reachability + ' || Source findings: ' + tasks.trace.outputs.values.source_findings + ' || Note: the claim and its evidence POSTDATE this coverage summary — access it describes as unavailable may since have been obtained; judge the evidence on its own citations before inferring fabrication' }}"
   report:
     needs: [intake, reproduce, investigate, synthesize, trace, validate]
     quality-gate: "${{ has(outputs.values.report) && has(outputs.values.feedback) }}"
@@ -374,6 +432,15 @@ tasks:
       if the review weakened or refuted the
       cause, lead with that and cap confidence; a duplicate fingerprint
       decision gets occurrence-attachment, not re-publication.
+
+      Quote the review's strongest_counterargument verbatim. If the review's
+      summary or counterargument is empty or degenerate (placeholder text),
+      say "review output unusable" and treat the verdict as unvalidated —
+      never attribute reconstructed rationale to the review; recover the real
+      objections from review_attempts instead. A publish/file-bug next_action
+      requires reproduction=reproduced and review_verdict=survives — otherwise
+      the publish feedback task must be blocked_by the reconfirmation task
+      that would earn it.
 
       Convert every remaining gap — including the review's missing evidence —
       into the feedback queue per the runbook that owns shaping investigation
@@ -404,6 +471,17 @@ tasks:
         missing_evidence:
           schema: { type: string }
           value: "${{ tasks.validate.outputs.values.missing_evidence }}"
+        review_attempts:
+          schema:
+            type: array
+            description: The raw adversarial attack attempts behind the verdict
+            items:
+              type: object
+              properties:
+                vote: { type: string }
+                strongest_counterargument: { type: string }
+                reasoning: { type: string }
+          value: "${{ tasks.validate.outputs.values.attempts }}"
         coverage_summary:
           schema: { type: string }
           value: "${{ tasks.investigate.outputs.values.coverage_summary }}"
