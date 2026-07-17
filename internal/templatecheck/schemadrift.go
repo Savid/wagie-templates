@@ -37,6 +37,11 @@ var sharedShapes = []sharedShape{
 	{name: "network target", markers: []string{"kind", "enclave", "sandbox_id", "network_id"}, requiredMarkers: []string{"kind"}},
 	{name: "snapshot catalog item", markers: []string{"epoch", "snapshot_id"}},
 	{name: "trial record", markers: []string{"round", "hypothesis", "status", "interpretation"}},
+	// The research finding record's strict producer copies (research-findings
+	// output, deep-research accumulate) must stay structurally identical; the
+	// requiredMarkers keep the deliberately-loosened consumer input bindings
+	// and the verified-findings variant out of the comparison.
+	{name: "research finding record", markers: []string{"claim", "evidence", "sources", "confidence", "polarity"}, requiredMarkers: []string{"sources", "source_type", "evidence_strength"}},
 }
 
 // SchemaSource is one template file to scan for shared schema occurrences.

@@ -7,13 +7,13 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when accumulated research findings need adversarial verification; probes for missing perspectives, checks evidence-claim alignment, and calibrates confidence.
-tags: ["research", "verification", "adversarial"]
+  Use when accumulated research findings need a calibration audit before synthesis; spot-checks sources, probes evidence-claim alignment and missing perspectives, and calibrates confidence, folding in independent adversarial verdicts when provided. Cross-finding critic — pair with per-claim adversarial review for high-stakes claims.
+tags: ["research", "verification", "calibration", "audit"]
 examples:
   - "audit research claims against their evidence"
   - "calibrate confidence where citations are thin"
   - "find missing perspectives in accumulated evidence"
-  - "audit temporal geographic and method blind spots"
+  - "spot-check the sources behind load-bearing claims"
   - "flag contradictions and unstated assumptions"
 inputs:
   values:
@@ -33,11 +33,27 @@ inputs:
               type: string
             evidence:
               type: string
+            sources:
+              type: array
+              items:
+                type: object
+                properties:
+                  ref:
+                    type: string
+                  title:
+                    type: string
+                  date:
+                    type: string
+                  quote:
+                    type: string
+                required: [ref]
             confidence:
               type: number
             source_type:
               type: string
             evidence_strength:
+              type: string
+            polarity:
               type: string
             corroboration:
               type: number
@@ -56,43 +72,91 @@ inputs:
             rationale:
               type: string
           required: [name]
+    adversarial_results:
+      description: >-
+        Independent refutation verdicts for specific claims, produced by
+        adversarial review in fresh contexts. Optional; folded into calibration
+        when provided.
+      schema: &adversarial_results_schema
+        type: array
+        items:
+          type: object
+          properties:
+            claim:
+              type: string
+            verdict:
+              type: string
+              description: survives | weakened | refuted
+            strongest_counterargument:
+              type: string
+            missing_evidence:
+              type: string
+          required: [claim, verdict]
 tasks:
   verify:
-    quality-gate: "${{ has(outputs.values.verified_findings) && size(outputs.values.verified_findings) > 0 && has(outputs.values.issues) && has(outputs.values.open_questions) && has(outputs.values.verification_summary) && size(outputs.values.verification_summary) > 0 }}"
+    quality-gate: "${{ size(outputs.values.verified_findings) >= size(inputs.values.findings) && outputs.values.verified_findings.all(f, f.confidence_state == 'unknown' ? !has(f.adjusted_confidence) : has(f.adjusted_confidence)) && size(outputs.values.verification_summary) > 0 }}"
     instructions: |
       You are a rigorous research auditor. Your job is to stress-test
       these findings, not to validate them. Assume every claim might be
-      wrong until the evidence convinces you otherwise.
+      wrong until the evidence convinces you otherwise. A worker with
+      tool-use (web search and source retrieval) is required: spot-check
+      the sources behind the most load-bearing claims by ref rather than
+      auditing prose alone.
+
+      Every input finding must reappear in verified_findings — calibrate,
+      never drop, and preserve each finding's sources, source_type,
+      evidence_strength, and polarity as given.
 
       Step 1 — Evidence-claim alignment:
       For each finding, assess whether the stated evidence actually
       supports the claim at the stated confidence level. Flag:
       - Claims where confidence exceeds what the evidence warrants
       - Claims where evidence is vague, circular, or unverifiable
-      - Claims that rely on a single source for a strong assertion
+      - Claims whose corroboration count does not match distinct
+        entries in sources, or that rely on a single source for a
+        strong assertion
+      For the highest-stakes claims (high confidence, load-bearing for
+      the topic), retrieve the cited refs and check the quote or
+      locator against the source. More sources means more scrutiny of
+      those sources, not less — fabricated refs hide behind the
+      appearance of corroboration, so multi-ref high-confidence claims
+      deserve spot-checks as much as single-ref ones.
 
-      Step 2 — Adversarial probing:
+      Step 2 — Adversarial results:
+      If adversarial_results are provided, they are independent
+      refutation verdicts produced without the researcher's narrative.
+      Weigh them heavily: refuted means confidence must drop sharply or
+      become unknown and an issue must be recorded — unless your own
+      documented source retrieval overturns the counterargument, in
+      which case record both the verdict and the retrieval that answers
+      it; weakened means a concrete unresolved concern to reflect in
+      the rationale; survives corroborates internal coherence only —
+      the reviewers could not retrieve sources, so it must not raise
+      confidence in unchecked citations.
+
+      Step 3 — Adversarial probing:
       Actively challenge the research by asking:
       - What evidence would contradict the strongest conclusions?
       - Which perspectives or stakeholders are not represented?
       - What assumptions are unstated but load-bearing?
       - Are there temporal, geographic, or methodological blind spots?
 
-      Step 3 — Contradiction audit:
+      Step 4 — Contradiction audit:
       Identify findings that conflict with each other. For each
       conflict, determine whether it reflects genuine disagreement
       in the evidence or a flaw in the research.
 
-      Step 4 — Confidence calibration:
+      Step 5 — Confidence calibration:
       Adjust confidence scores based on your audit:
       - Increase confidence where evidence is strong but was
         conservatively scored
       - Decrease confidence where evidence is weak but was
         aggressively scored
-      - Flag findings where confidence should be "unknown" rather
-        than a number
+      - When the evidence cannot honestly support any number, set
+        confidence_state to unknown and omit adjusted_confidence —
+        do not invent a value
 
-      Step 5 — Open questions:
+      Step 6 — Open questions:
       List substantive questions that the research did not answer
       and could not reasonably be expected to answer with available
       sources. Distinguish these from gaps that further research
@@ -106,11 +170,15 @@ tasks:
           schema: { type: string }
           value: "${{ inputs.values.topic }}"
         findings:
+          required: true
           schema: *research_findings_schema
           value: "${{ inputs.values.findings }}"
         perspectives:
           schema: *perspectives_schema
           value: "${{ inputs.values.?perspectives.orValue([]) }}"
+        adversarial_results:
+          schema: *adversarial_results_schema
+          value: "${{ inputs.values.?adversarial_results.orValue([]) }}"
     outputs:
       values:
         verified_findings:
@@ -124,22 +192,43 @@ tasks:
                   type: string
                 evidence:
                   type: string
+                sources:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      ref:
+                        type: string
+                      title:
+                        type: string
+                      date:
+                        type: string
+                      quote:
+                        type: string
+                    required: [ref]
                 original_confidence:
                   type: number
                 adjusted_confidence:
                   type: number
+                  description: Omitted when confidence_state is unknown
+                confidence_state:
+                  type: string
+                  enum: [calibrated, unknown]
+                  description: unknown when the evidence cannot honestly support any numeric confidence
                 confidence_rationale:
                   type: string
                 source_type:
                   type: string
                 evidence_strength:
                   type: string
+                polarity:
+                  type: string
                 corroboration:
                   type: number
                 contradictions:
                   type: string
-              required: [claim, evidence, original_confidence, adjusted_confidence, confidence_rationale]
-            description: Findings with calibrated confidence scores
+              required: [claim, evidence, sources, original_confidence, confidence_state, confidence_rationale]
+            description: Findings with calibrated confidence scores; sources may be empty only for inference or negative findings
         issues:
           required: true
           schema: &verification_issues_schema
@@ -149,7 +238,7 @@ tasks:
               properties:
                 type:
                   type: string
-                  enum: [over-confident, under-supported, contradiction, missing-perspective, unstated-assumption]
+                  enum: [over-confident, under-supported, contradiction, missing-perspective, unstated-assumption, refuted]
                 description:
                   type: string
                 affected_claims:

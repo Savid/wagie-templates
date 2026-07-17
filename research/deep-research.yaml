@@ -7,7 +7,7 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when a topic requires structured, iterative research; decomposes via perspective-driven planning, accumulates typed findings across iterations, assesses coverage with a structured rubric, and verifies results adversarially before output.
+  Use when a topic requires structured, iterative research; decomposes via perspective-driven planning, accumulates source-referenced findings across iterations, and assesses coverage with a structured rubric. Before synthesis it stress-tests the thinnest-sourced high-confidence claims through independent adversarial review and calibrates confidence against sources and verdicts.
 tags: ["research", "iterative", "deep-research"]
 examples:
   - "produce a verified deep research report"
@@ -29,16 +29,19 @@ inputs:
       description: Optional context or constraints to guide the research
       schema: { type: string }
     max_iterations:
-      description: Maximum research iterations
+      description: >-
+        Maximum research iterations. Each iteration dispatches three workers
+        (investigate, accumulate, assess); after the loop, stress-testing adds
+        up to four workers per selected claim (max five claims).
       schema: { type: number, default: 5 }
 tasks:
   plan:
-    uses: dev.wagie/research-plan@1.0.0
+    uses: dev.wagie/decompose@1.0.0
     inputs:
       values:
-        topic:
+        objective:
           value: "${{ inputs.values.topic }}"
-        depth:
+        thoroughness:
           value: "${{ inputs.values.?depth.orValue('moderate') }}"
         context:
           value: "${{ inputs.values.?context.orValue('') }}"
@@ -52,7 +55,7 @@ tasks:
           value: "${{ inputs.values.topic }}"
         depth:
           required: true
-          schema: { type: string }
+          schema: { type: string, enum: [shallow, moderate, deep] }
           value: "${{ inputs.values.?depth.orValue('moderate') }}"
         plan_questions:
           required: true
@@ -72,9 +75,12 @@ tasks:
                 rationale:
                   type: string
               required: [question]
-          value: "${{ tasks.plan.outputs.values.questions }}"
+          value: "${{ tasks.plan.outputs.values.subquestions }}"
     loop:
       max: "${{ inputs.values.?max_iterations.orValue(5) }}"
+      # Keep this condition, the `converged` output below, and the template's
+      # `stop_reason` output in sync — all three encode the same stop
+      # predicate against different namespaces.
       until: "${{ outputs.values.completeness == 'sufficient' || outputs.values.information_gain == 'diminishing' }}"
       onMaxExhausted: continue
     tasks:
@@ -92,27 +98,33 @@ tasks:
               value: "${{ inputs.values.plan_questions }}"
       accumulate:
         needs: [investigate]
-        quality-gate: "${{ has(outputs.values.findings) }}"
+        quality-gate: "${{ size(outputs.values.findings) >= size(inputs.values.previous_findings) }}"
         instructions: |
           Merge prior findings with the new research batch.
 
           Rules:
-          - Preserve all previous findings verbatim unless superseded
+          - Preserve every previous finding — never drop one, and keep
+            each finding's sources, source_type, evidence_strength, and
+            polarity intact
+          - A new finding may supersede at most one previous finding,
+            replacing it in place with a note on the upgrade; never
+            collapse multiple previous entries into one — cross-reference
+            them in contradictions instead
           - Append only substantively new findings
-          - When a new finding corroborates an existing one, increase
-            the existing finding's corroboration count rather than
-            adding a duplicate
+          - When a new finding corroborates an existing one, union
+            their sources lists (deduplicating by ref) and set the
+            existing finding's corroboration to the count of distinct
+            sources[].ref entries — never increment corroboration
+            without a new distinct source
           - When a new finding contradicts an existing one, update the
             contradictions field on both findings
-          - If a new finding supersedes an old one with stronger
-            evidence, replace the old finding and note the upgrade
-          - Drop findings with confidence below 20 that have been
-            superseded by stronger evidence on the same claim
 
+          The merged list must never be shorter than the previous list.
           Preserve information. When in doubt, keep the finding.
         inputs:
           values:
             previous_findings:
+              required: true
               schema: &research_findings_schema
                 type: array
                 description: Accumulated research findings across iterations
@@ -123,17 +135,36 @@ tasks:
                       type: string
                     evidence:
                       type: string
+                    sources:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          ref:
+                            type: string
+                          title:
+                            type: string
+                          date:
+                            type: string
+                          quote:
+                            type: string
+                        required: [ref]
                     confidence:
                       type: number
                     source_type:
                       type: string
+                      enum: [primary, secondary, tertiary, inference]
                     evidence_strength:
                       type: string
+                      enum: [strong, moderate, weak]
+                    polarity:
+                      type: string
+                      enum: [positive, negative]
                     corroboration:
                       type: number
                     contradictions:
                       type: string
-                  required: [claim, evidence, confidence]
+                  required: [claim, evidence, sources, confidence, source_type, evidence_strength, polarity]
               value: "${{ loop.findings.orValue([]) }}"
             new_findings:
               schema: *research_findings_schema
@@ -164,6 +195,41 @@ tasks:
           required: true
           schema: *research_findings_schema
           value: "${{ tasks.accumulate.outputs.values.findings }}"
+        stress_targets:
+          # Single authority for the adversarial stress-test selection: positive
+          # findings claiming confidence >= 70 backed by fewer than two distinct
+          # source refs, ranked by confidence descending, capped at five.
+          required: true
+          schema: &stress_targets_schema
+            type: array
+            description: High-stakes findings selected for independent adversarial review
+            items:
+              type: object
+              properties:
+                claim:
+                  type: string
+                evidence:
+                  type: string
+                sources:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      ref:
+                        type: string
+                      title:
+                        type: string
+                      date:
+                        type: string
+                      quote:
+                        type: string
+                    required: [ref]
+              required: [claim, evidence]
+          value: "${{ cel.bind(elig, tasks.accumulate.outputs.values.findings.filter(f, f.confidence >= 70.0 && f.?polarity.orValue('positive') == 'positive' && size(f.?sources.orValue([]).map(s, s.ref).distinct()) < 2), cel.bind(ranked, elig.sortBy(f, -f.confidence), lists.range(0, size(ranked) < 5 ? size(ranked) : 5).map(i, {'claim': ranked[i].claim, 'evidence': ranked[i].evidence, 'sources': ranked[i].?sources.orValue([])}))) }}"
+        iterations:
+          required: true
+          schema: { type: number }
+          value: "${{ loop.iterations.orValue(0.0) + 1.0 }}"
         gaps:
           required: true
           schema:
@@ -215,8 +281,69 @@ tasks:
           required: true
           schema: { type: boolean }
           value: "${{ tasks.assess.outputs.values.completeness == 'sufficient' || tasks.assess.outputs.values.information_gain == 'diminishing' }}"
+  stress:
+    # Independent adversarial review of the highest-stakes accumulated
+    # findings (selection policy lives on research.outputs.stress_targets).
+    # Reviewers see claim, evidence, and source refs only — never the
+    # researcher's confidence numbers.
+    #
+    # Do NOT add `onError: continue` to this matrix: the verdicts output
+    # zips targets positionally against aggregated child outputs, and a
+    # skipped combo would silently misattribute verdicts to claims.
+    needs: [research]
+    inputs:
+      values:
+        topic:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.topic }}"
+        targets:
+          required: true
+          schema: *stress_targets_schema
+          value: "${{ tasks.research.outputs.values.stress_targets }}"
+    matrix:
+      axes:
+        target:
+          schema: *stress_targets_schema
+          value: "${{ tasks.research.outputs.values.stress_targets }}"
+    tasks:
+      attack:
+        uses: dev.wagie/adversarial-review@1.0.0
+        inputs:
+          values:
+            claim:
+              value: "${{ matrix.target.claim }}"
+            evidence:
+              value: "${{ matrix.target.evidence + (size(matrix.target.?sources.orValue([])) > 0 ? ' Sources: ' + matrix.target.sources.map(s, s.ref).join(', ') : '') }}"
+            context:
+              value: "${{ 'Research topic: ' + inputs.values.topic }}"
+    outputs:
+      values:
+        verdicts:
+          required: true
+          schema: &adversarial_results_schema
+            type: array
+            description: >-
+              Independent adversarial verdicts for the stress-tested claims.
+              Empty when no accumulated finding met the selection criteria
+              (positive polarity, confidence >= 70, fewer than two distinct
+              source refs).
+            items:
+              type: object
+              properties:
+                claim:
+                  type: string
+                verdict:
+                  type: string
+                  description: survives | weakened | refuted
+                strongest_counterargument:
+                  type: string
+                missing_evidence:
+                  type: string
+              required: [claim, verdict]
+          value: "${{ lists.range(0, size(inputs.values.targets)).map(i, {'claim': inputs.values.targets[i].claim, 'verdict': tasks.attack.outputs.values.verdict[i], 'strongest_counterargument': tasks.attack.outputs.values.strongest_counterargument[i], 'missing_evidence': tasks.attack.outputs.values.missing_evidence[i]}) }}"
   verify:
-    needs: [plan, research]
+    needs: [plan, research, stress]
     uses: dev.wagie/research-verify@1.0.0
     inputs:
       values:
@@ -226,9 +353,11 @@ tasks:
           value: "${{ tasks.research.outputs.values.findings }}"
         perspectives:
           value: "${{ tasks.plan.outputs.values.perspectives }}"
+        adversarial_results:
+          value: "${{ tasks.stress.outputs.values.verdicts }}"
   synthesize:
-    needs: [plan, research, verify]
-    quality-gate: "${{ has(outputs.values.summary) && size(outputs.values.summary) > 0 }}"
+    needs: [plan, research, stress, verify]
+    quality-gate: "${{ has(outputs.values.summary) && size(outputs.values.summary) > 0 && has(outputs.values.report) && size(outputs.values.report) > 0 }}"
     instructions: |
       Render a structured markdown research report from the verified
       findings.
@@ -236,27 +365,38 @@ tasks:
       Structure:
       1. Title — the research topic as a heading
       2. Executive summary — 3-5 sentences covering the most important
-         findings, written as direct assertions not hedged qualifications
+         findings, written as direct assertions not hedged qualifications.
+         If completeness is not sufficient or converged is false, the
+         summary must open with an explicit coverage caveat naming what
+         the research did not cover and why it stopped (stop_reason)
       3. Key findings — organized by the perspectives used during
-         research, each finding presented with its evidence and
-         confidence assessment
+         research, each finding presented with its evidence, source
+         references, and confidence assessment. Present negative
+         findings (polarity negative) here with their search scope —
+         they are results, not open questions
       4. Areas of disagreement — where sources or findings conflict,
          present both sides with the evidence for each
       5. Verification notes — significant issues found during
-         verification, adjusted confidence levels, and why
+         verification, the adversarial verdicts on stress-tested
+         claims, adjusted confidence levels, and why
       6. Open questions — what the research could not answer and why
       7. Coverage assessment — the rubric scores and what they mean
 
       Writing standards:
       - Write in direct, assertive prose — not bullet-point summaries
-      - Every factual claim must reference its evidence
+      - Cite inline by number and render a numbered References section
+        (ref — title — date, deduplicated across findings); every
+        factual claim must carry its citation numbers
       - Where confidence was adjusted during verification, note the
-        original and adjusted values with rationale
+        original and adjusted values with rationale; where
+        confidence_state is unknown, say so rather than presenting a
+        number
       - Do not hedge with phrases like "it is important to note" or
         "it should be considered" — state what the evidence shows
       - Use tables when comparing alternatives or presenting structured
         data
-      - Flag high-severity verification issues prominently
+      - Flag high-severity verification issues and refuted claims
+        prominently
 
       Write the rendered report as the `report` output.
     inputs:
@@ -281,7 +421,7 @@ tasks:
           value: "${{ tasks.plan.outputs.values.perspectives }}"
         plan:
           schema: *plan_questions_schema
-          value: "${{ tasks.plan.outputs.values.questions }}"
+          value: "${{ tasks.plan.outputs.values.subquestions }}"
         findings:
           schema: &verified_findings_schema
             type: array
@@ -292,22 +432,46 @@ tasks:
                   type: string
                 evidence:
                   type: string
+                sources:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      ref:
+                        type: string
+                      title:
+                        type: string
+                      date:
+                        type: string
+                      quote:
+                        type: string
+                    required: [ref]
                 original_confidence:
                   type: number
                 adjusted_confidence:
                   type: number
+                  description: Omitted when confidence_state is unknown
+                confidence_state:
+                  type: string
+                  enum: [calibrated, unknown]
+                  description: unknown when the evidence cannot honestly support any numeric confidence
                 confidence_rationale:
                   type: string
                 source_type:
                   type: string
                 evidence_strength:
                   type: string
+                polarity:
+                  type: string
                 corroboration:
                   type: number
                 contradictions:
                   type: string
-              required: [claim, evidence, original_confidence, adjusted_confidence, confidence_rationale]
+              required: [claim, evidence, sources, original_confidence, confidence_state, confidence_rationale]
           value: "${{ tasks.verify.outputs.values.verified_findings }}"
+        adversarial_verdicts:
+          schema: *adversarial_results_schema
+          value: "${{ tasks.stress.outputs.values.verdicts }}"
         issues:
           schema: &verification_issues_schema
             type: array
@@ -316,7 +480,7 @@ tasks:
               properties:
                 type:
                   type: string
-                  enum: [over-confident, under-supported, contradiction, missing-perspective, unstated-assumption]
+                  enum: [over-confident, under-supported, contradiction, missing-perspective, unstated-assumption, refuted]
                 description:
                   type: string
                 affected_claims:
@@ -340,12 +504,20 @@ tasks:
         verification_summary:
           schema: { type: string }
           value: "${{ tasks.verify.outputs.values.verification_summary }}"
+        completeness:
+          schema: { type: string }
+          value: "${{ tasks.research.outputs.values.completeness }}"
         information_gain:
           schema: { type: string }
           value: "${{ tasks.research.outputs.values.information_gain }}"
         converged:
           schema: { type: boolean }
           value: "${{ tasks.research.outputs.values.converged }}"
+        stop_reason:
+          # Same ternary as the template's stop_reason output — see the
+          # sync comment on the research loop.
+          schema: { type: string }
+          value: "${{ tasks.research.outputs.values.completeness == 'sufficient' ? 'sufficient' : (tasks.research.outputs.values.information_gain == 'diminishing' ? 'diminishing' : 'budget-exhausted') }}"
     outputs:
       values:
         report:
@@ -376,19 +548,39 @@ outputs:
       required: true
       schema: { type: array, items: { type: string } }
       value: "${{ tasks.verify.outputs.values.open_questions }}"
+    adversarial_verdicts:
+      required: true
+      schema: *adversarial_results_schema
+      value: "${{ tasks.stress.outputs.values.verdicts }}"
     scores:
       required: true
       schema: *coverage_scores_schema
       value: "${{ tasks.research.outputs.values.scores }}"
     completeness:
       required: true
-      schema: { type: string }
+      schema: { type: string, description: "insufficient | sufficient, from the coverage critic" }
       value: "${{ tasks.research.outputs.values.completeness }}"
     information_gain:
       required: true
-      schema: { type: string }
+      schema: { type: string, description: "high | moderate | diminishing, from the coverage critic" }
       value: "${{ tasks.research.outputs.values.information_gain }}"
     converged:
       required: true
-      schema: { type: boolean }
+      schema:
+        type: boolean
+        description: >-
+          True when the loop stopped via its own stop predicate (sufficient
+          coverage or diminishing returns); false when the iteration budget
+          was exhausted first. See stop_reason for the specific cause.
       value: "${{ tasks.research.outputs.values.converged }}"
+    iterations_used:
+      required: true
+      schema: { type: number, description: How many research iterations actually ran }
+      value: "${{ tasks.research.outputs.values.iterations }}"
+    stop_reason:
+      required: true
+      schema:
+        type: string
+        enum: [sufficient, diminishing, budget-exhausted]
+        description: Why the research loop stopped — coverage reached, diminishing returns, or iteration budget exhausted
+      value: "${{ tasks.research.outputs.values.completeness == 'sufficient' ? 'sufficient' : (tasks.research.outputs.values.information_gain == 'diminishing' ? 'diminishing' : 'budget-exhausted') }}"

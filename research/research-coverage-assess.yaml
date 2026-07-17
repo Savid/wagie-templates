@@ -24,7 +24,7 @@ inputs:
     depth:
       required: true
       description: Requested research depth
-      schema: { type: string }
+      schema: { type: string, enum: [shallow, moderate, deep] }
     findings:
       required: true
       description: Accumulated findings to assess
@@ -35,9 +35,20 @@ inputs:
           properties:
             claim: { type: string }
             evidence: { type: string }
+            sources:
+              type: array
+              items:
+                type: object
+                properties:
+                  ref: { type: string }
+                  title: { type: string }
+                  date: { type: string }
+                  quote: { type: string }
+                required: [ref]
             confidence: { type: number }
             source_type: { type: string }
             evidence_strength: { type: string }
+            polarity: { type: string }
             corroboration: { type: number }
             contradictions: { type: string }
           required: [claim, evidence, confidence]
@@ -65,11 +76,17 @@ tasks:
         objective:
           value: "${{ inputs.values.topic }}"
         target_depth:
-          value: "${{ inputs.values.depth in ['shallow', 'moderate', 'deep'] ? inputs.values.depth : 'moderate' }}"
+          value: "${{ inputs.values.depth }}"
         prior_gap_count:
           value: "${{ inputs.values.?previous_gap_count.orValue(0) }}"
         items:
-          value: "${{ inputs.values.findings.map(f, {'content': f.claim, 'evidence': f.evidence, 'confidence': f.confidence, 'source_type': f.?source_type.orValue(''), 'strength': f.?evidence_strength.orValue(''), 'corroboration': f.?corroboration.orValue(0.0), 'contradictions': f.?contradictions.orValue('')}) }}"
+          # corroboration is derived from distinct source refs when sources are
+          # present, so the critic never scores an asserted, unverifiable count;
+          # the asserted field is only a fallback for source-less callers.
+          value: "${{ inputs.values.findings.map(f, {'content': f.claim, 'evidence': f.evidence, 'confidence': f.confidence, 'source_type': f.?source_type.orValue(''), 'strength': f.?evidence_strength.orValue(''), 'corroboration': cel.bind(refs, f.?sources.orValue([]).map(s, s.ref).distinct(), size(refs) > 0 ? double(size(refs)) : f.?corroboration.orValue(0.0)), 'contradictions': f.?contradictions.orValue('')}) }}"
+        # TODO(pin-bump): once the pinned wagie release ships coverage-assess's
+        # prior_item_count input, add a previous_finding_count input here and
+        # thread it through — deep-research already holds size(loop.findings).
         plan:
           value: "${{ inputs.values.?plan_questions.orValue([]).map(q, {'item': q.question, 'priority': q.?priority.orValue('')}) }}"
 outputs:
