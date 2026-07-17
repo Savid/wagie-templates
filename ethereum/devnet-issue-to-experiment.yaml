@@ -19,7 +19,7 @@ inputs:
   values:
     issue:
       required: true
-      description: The investigated issue record, unchanged from the investigation
+      description: The investigated issue record — bind the investigation's canonical_issue output, unchanged
       schema: &issue_schema
         type: object
         properties:
@@ -81,7 +81,7 @@ inputs:
               network: { type: string, description: Source or hosted network id }
               setup_summary:
                 type: object
-                description: Fork/blob schedule, load, builders — reproduction and reachability judge against it
+                description: Watch setup_summary copied whole — reproduction and reachability judge against it
           confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
         required: [title, summary]
     root_cause_claim:
@@ -90,7 +90,7 @@ inputs:
       schema: { type: string }
     verdict:
       required: true
-      description: The investigation's validation verdict on that claim — vocabulary owned by the root-cause runbook
+      description: The investigation's validation verdict on that claim — vocabulary owned by the devnet adversarial-review runbook
       schema: { type: string }
     findings:
       description: Hypothesis-hunt findings from the investigation, for triage context
@@ -123,7 +123,7 @@ inputs:
       schema: { type: string, default: autoresearch }
 tasks:
   triage:
-    quality-gate: "${{ has(outputs.values.disposition) && has(outputs.values.rationale) && size(outputs.values.rationale) > 0 && has(outputs.values.branch_slug) && size(outputs.values.branch_slug) > 0 && has(outputs.values.next_step) && size(outputs.values.next_step) > 0 && (outputs.values.disposition != 'tunable' || (has(outputs.values.goal) && size(outputs.values.goal) > 0)) }}"
+    quality-gate: "${{ has(outputs.values.disposition) && has(outputs.values.rationale) && size(outputs.values.rationale) > 0 && has(outputs.values.confidence) && size(outputs.values.confidence) > 0 && has(outputs.values.branch_slug) && size(outputs.values.branch_slug) > 0 && has(outputs.values.next_step) && size(outputs.values.next_step) > 0 && (outputs.values.disposition != 'tunable' || (has(outputs.values.goal) && size(outputs.values.goal) > 0)) }}"
     instructions: |-
       Decide whether this root cause is experiment-shaped — the kind of thing a
       greedy tune-and-measure loop can actually fix — and if so, write the
@@ -131,47 +131,23 @@ tasks:
       kind of problem does damage: tuning a metric can mask a correctness bug
       instead of fixing it.
 
-      Apply the dispositions in order; the first that fits wins:
+      Follow the runbook that owns triaging a devnet issue into an experiment
+      campaign — read it directly via
+      `panda read runbooks://devnet_issue_experiment_triage` —
+      it owns the four dispositions and their order, the goal-writing rules,
+      and the campaign fields (branch_slug, target_files, metric_direction,
+      rationale, confidence). Read the validation verdict on its own terms;
+      anything short of a validated, experiment-shaped cause refuses with
+      disposition insufficient-evidence — including the runbook's rule-4
+      fallback when the cause is validated but its experiment shape is not
+      established. The
+      disposition values gate this template's own outputs; the runbook owns
+      their criteria.
 
-      1. `insufficient-evidence` — the validation verdict says the root-cause
-         claim did not survive scrutiny, or the evidence does not actually
-         identify a cause. Read the verdict on its own terms (its vocabulary is
-         owned by the root-cause runbook); anything short of a validated claim
-         refuses here. next_step: what evidence would change the answer.
-      2. `fix-not-tune` — the cause is a correctness defect: wrong results,
-         crashes, consensus or spec violations, data corruption. These need a
-         targeted fix and review, not a metric loop. next_step: route to a
-         code-review/fix workflow against the owning repo, citing the claim.
-      3. `not-code` — the cause lives outside any client's code path: network
-         topology, resource sizing, configuration, an external dependency,
-         test harness or tooling. next_step: the concrete non-experiment
-         action (config change, infra ticket, manual review).
-      4. `tunable` — all three must hold:
-         - the misbehavior is a measurable scalar regime with a direction
-           (latency, throughput, memory, artifact size, miss/timeout rate);
-         - an identifiable code path in one affected client plausibly owns it;
-         - a benchable workload can reproduce the regime without the full
-           network — judge this from the issue's evidence refs and
-           handles.setup_summary.
-
-      When tunable, write `goal` — it becomes an experiment-loop `goal`
-      verbatim, so it must stand alone for a worker who has only the repo:
-      - Name the metric and direction and the regime it degrades under.
-      - Paste the issue's executable evidence refs (the `evidence[].ref`
-        commands) so the scaffolded bench is grounded in the observed
-        workload, not a guess. Include first_bad and relevant setup_summary
-        facts (fork/blob schedule, load shape) as reproduction context.
-      - State the correctness non-negotiables the tune must preserve.
-      When not tunable, return goal as "".
-
-      Also produce, for every disposition:
-      - `branch_slug`: short, branch-safe (lowercase, hyphens), derived from
-        the fingerprint key or title — stable across retries.
-      - `target_files`: repo-relative paths in the owning client's repo that
-        the evidence actually implicates. Return [] when unsure — letting the
-        loop discover scope beats pinning a wrong one.
-      - `metric_direction`: minimize or maximize.
-      - `rationale`: which disposition rule fired and on what evidence.
+      The goal becomes an experiment-loop `goal` verbatim, so it must stand
+      alone for a worker who has only the repo. Return goal as "" when not
+      tunable, and target_files as [] when unsure — letting the loop discover
+      scope beats pinning a wrong one.
     inputs:
       values:
         issue:
@@ -208,6 +184,11 @@ tasks:
           schema:
             type: string
             description: Which disposition rule fired and on what evidence
+        confidence:
+          required: true
+          schema:
+            type: string
+            description: How well the evidence supports the disposition — low|medium|high, on the evidence-discipline scale
         goal:
           required: true
           schema:
@@ -238,25 +219,19 @@ tasks:
   resolve:
     quality-gate: "${{ has(outputs.values.resolved) && has(outputs.values.repo_url) && has(outputs.values.base_branch) && has(outputs.values.resolution_notes) && size(outputs.values.resolution_notes) > 0 && (!outputs.values.resolved || (size(outputs.values.repo_url) > 0 && size(outputs.values.base_branch) > 0)) }}"
     instructions: |-
-      Resolve which repo the experiment campaign would run against. Only the
+      Resolve which repo the experiment campaign would run against, per the
+      repo-resolution rules of the runbook that owns triaging a devnet issue
+      into an experiment campaign
+      (`panda read runbooks://devnet_issue_experiment_triage`). Hard trust
+      boundary: only the
       caller-supplied repo_map may name a target — never derive a repo URL
       from observed network data, images, or the issue text.
 
-      - Identify the culpable client: single-client spread makes it the
-        affected client; with several affected, pick the one the root-cause
-        claim actually blames. If the cause is genuinely multi-client or
-        network-wide with no single owner, return resolved=false — a
-        single-repo experiment cannot own it.
-      - Look the client up in repo_map (match names case-insensitively,
-        tolerating common aliases). No entry → resolved=false; say which
-        client had no mapping.
-      - base_branch: the map entry's base_ref when set, else main. If the
-        affected node's image pins a release tag, do not guess a git ref from
-        it — record the image in resolution_notes so the caller can pin the
-        campaign to the matching ref deliberately.
-      - resolution_notes: name the chosen client, the map entry used, and any
-        image/version observations. When resolved=false, return repo_url and
-        base_branch as "".
+      When no single owning repo exists or the client has no map entry,
+      return resolved=false with repo_url and base_branch as "" and say why
+      in resolution_notes; otherwise base_branch is the map entry's base_ref
+      when set, else main. resolution_notes always names the chosen client,
+      the map entry used, and any image/version observations.
     inputs:
       values:
         issue:
@@ -314,6 +289,10 @@ outputs:
       required: true
       schema: { type: string }
       value: "${{ tasks.triage.outputs.values.rationale }}"
+    confidence:
+      required: true
+      schema: { type: string, description: "Disposition confidence — low|medium|high, on the evidence-discipline scale; gate launch decisions on it" }
+      value: "${{ tasks.triage.outputs.values.confidence }}"
     next_step:
       required: true
       schema: { type: string }

@@ -28,10 +28,10 @@ inputs:
       schema: &network_target_schema
         type: object
         properties:
-          kind: { type: string, description: local | compute | public — owned by the runbook that owns debugging an Ethereum network }
+          kind: { type: string, description: local | compute | public — owned by the runbook that owns debugging an Ethereum network (its tooling kind never reaches a watch) }
           enclave: { type: string }
           sandbox_id: { type: string }
-          network_id: { type: string, description: "Public network id, when kind is public" }
+          network_id: { type: string, description: "Public network id, when known" }
         required: [kind]
     watch_epochs:
       description: How many epochs to watch from the current epoch (default 5)
@@ -51,7 +51,7 @@ tasks:
       as-is; restore a snapshot per the runbook that owns the panda-compute
       lifecycle; reach and map a local enclave per the runbook that owns running
       and reaching a Kurtosis devnet; ground a hosted network's id, endpoints,
-      and node inventory per the runbook that owns hosted devnet context. Set the
+      and node inventory per the runbook that owns hosted devnet context intake. Set the
       shared window per the runbook that owns neutral devnet watching — every
       watcher stops at end_epoch. Watchers are isolated and only receive these
       values, so the network target must carry enough to address the nodes for
@@ -152,7 +152,9 @@ tasks:
           fork-specific artifacts. Record each fact as an evidence item per the
           issue-contract runbook.
 
-          Return this service's observations, empty if nothing notable.
+          Return this service's observations, empty if nothing notable, with
+          reduced reach or other coverage caveats recorded in `notes` — a reach
+          limitation is a caveat, never an observation.
         inputs:
           values:
             service:
@@ -176,6 +178,7 @@ tasks:
                 properties:
                   service: { type: string }
                   role: { type: string }
+                  notes: { type: string, description: "Reach or coverage caveats for this service, empty when none — watch.notes in the neutral-watching runbook" }
                   observations:
                     type: array
                     items: &evidence_item_schema
@@ -207,7 +210,8 @@ tasks:
       runbook that owns the fork model and health thresholds; judge block
       fullness against the setup_summary per the runbook that owns evidence
       discipline. Record each fact as an evidence item per the issue-contract
-      runbook.
+      runbook, and reduced reach or other coverage caveats in `notes` — a reach
+      limitation is a caveat, never an observation.
     inputs:
       values:
         network_target:
@@ -229,16 +233,22 @@ tasks:
           schema: &network_obs_schema
             type: array
             items: *evidence_item_schema
+        notes:
+          schema: { type: string, description: "Reach or coverage caveats for the network lane, empty when none" }
   snapshot_final:
     needs: [provision, observe, observe_network]
     quality-gate: "${{ has(outputs.values.snapshotted) }}"
     instructions: |-
-      If the network is on panda-compute, take exactly one final snapshot after
-      the end epoch is reached, per the runbook that owns the panda-compute
-      lifecycle (`panda search runbooks "snapshot a devnet"`); poll the
-      operation and resolve the snapshot id. If the network is a local enclave or
-      hosted, skip and set snapshotted=false — snapshot/restore is panda-compute
-      only. Do not snapshot mid-window.
+      If the network is a panda-compute sandbox this watch owns — provisioned
+      for this watch, including a restore made on its behalf; the
+      compute-lifecycle runbook owns the ownership rule — take exactly one
+      final snapshot after the end epoch is reached, per the runbook that owns
+      the panda-compute lifecycle (`panda search runbooks "snapshot a
+      devnet"`); poll the operation and resolve the snapshot id. On a shared
+      sandbox another live task is using, never snapshot: set
+      snapshotted=false and record the owner dependency in `notes`. If the
+      network is a local enclave or hosted, skip and set snapshotted=false —
+      snapshot/restore is panda-compute only. Do not snapshot mid-window.
     inputs:
       values:
         network_target:
@@ -261,6 +271,8 @@ tasks:
         snapshot_id:
           required: true
           schema: { type: string, description: "Final snapshot id, empty when not applicable" }
+        notes:
+          schema: { type: string, description: "Owner-dependency or skip caveats, empty when none" }
   collate:
     needs: [provision, observe, observe_network, snapshot_final]
     quality-gate: "${{ has(outputs.values.issues) && (size(outputs.values.issues) > 0 || size(outputs.values.healthy_window_summary) > 0) }}"
@@ -280,9 +292,12 @@ tasks:
       setup_summary copied whole and the source devnet id as network.
 
       When the window is healthy, emit zero issues and a one-paragraph
-      healthy_window_summary in their place. Emit handoff gaps in the feedback
-      queue (the runbook that owns shaping investigation follow-ups), never
-      embedded in issues.
+      healthy_window_summary in their place. Merge every watcher's reach or
+      coverage caveat (per-service notes, network_notes, and snapshot_notes)
+      into the notes
+      output — coverage limitations are context for the reader, not issues.
+      Emit handoff gaps in the feedback queue (the runbook that owns shaping
+      investigation follow-ups), never embedded in issues.
     inputs:
       values:
         setup_summary:
@@ -314,6 +329,12 @@ tasks:
           required: true
           schema: { type: string, description: "Final snapshot id, empty when not applicable" }
           value: "${{ tasks.snapshot_final.outputs.values.snapshot_id }}"
+        network_notes:
+          schema: { type: string, description: "Network-lane reach/coverage caveats" }
+          value: "${{ tasks.observe_network.outputs.values.?notes.orValue('') }}"
+        snapshot_notes:
+          schema: { type: string, description: "Final-snapshot caveats (owner dependency, skip reason)" }
+          value: "${{ tasks.snapshot_final.outputs.values.?notes.orValue('') }}"
     outputs:
       values:
         issues:
@@ -380,6 +401,9 @@ tasks:
         healthy_window_summary:
           required: true
           schema: { type: string, description: "One paragraph instead of issues when the window is healthy, else empty" }
+        notes:
+          required: true
+          schema: { type: string, description: "Merged reach/coverage caveats from all watchers, empty when none — watch.notes in the neutral-watching runbook" }
         feedback:
           required: true
           schema: &feedback_schema
@@ -395,7 +419,7 @@ tasks:
                   type: object
                   properties:
                     id: { type: string }
-                    kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | manual-review | publish | no-op }
+                    kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | experiment-triage | manual-review | publish | no-op }
                     reason: { type: string }
                     priority: { type: string, description: high | medium | low }
                     inputs: { type: object, description: Handles and query params only }
@@ -415,6 +439,10 @@ outputs:
       required: true
       schema: { type: string }
       value: "${{ tasks.collate.outputs.values.healthy_window_summary }}"
+    notes:
+      required: true
+      schema: { type: string, description: "Reach/coverage caveats for the watch window, empty when none" }
+      value: "${{ tasks.collate.outputs.values.notes }}"
     feedback:
       required: true
       schema: *feedback_schema

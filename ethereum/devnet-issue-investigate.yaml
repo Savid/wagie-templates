@@ -12,7 +12,6 @@ tags: ["ethereum", "devnet", "root-cause", "investigation", "adversarial", "host
 examples:
   - "root-cause one observed devnet issue"
   - "root-cause yesterday's finality stall from retained evidence"
-  - "investigate evidence-only when reproduction fails"
   - "restore the snapshot nearest before the failure and watch it develop"
   - "trace whether suspected cause reaches the failure"
   - "turn RCA gaps into follow-up tasks"
@@ -82,7 +81,7 @@ inputs:
               network: { type: string, description: Source or hosted network id }
               setup_summary:
                 type: object
-                description: Fork/blob schedule, load, builders — reproduction and reachability judge against it
+                description: Watch setup_summary copied whole — reproduction and reachability judge against it
           confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
         required: [title, summary]
     network_target:
@@ -90,10 +89,10 @@ inputs:
       schema: &network_target_schema
         type: object
         properties:
-          kind: { type: string, description: local | compute | public — owned by the runbook that owns debugging an Ethereum network }
+          kind: { type: string, description: "local | compute | public | tooling (a tooling-live surface, not a network) — owned by the runbook that owns debugging an Ethereum network" }
           enclave: { type: string }
           sandbox_id: { type: string }
-          network_id: { type: string, description: "Public network id, when kind is public" }
+          network_id: { type: string, description: "Public network id, when known" }
         required: [kind]
     snapshot_id:
       description: Broken-state snapshot to restore when no live target is supplied
@@ -107,7 +106,11 @@ inputs:
           properties:
             epoch: { type: number }
             snapshot_id: { type: string }
+            captured_at: { type: string, description: "Capture time on the sandbox clock — carried on the epoch-0 base entry (a mid-epoch capture); the root-cause runbook reads it for pre-first_bad restores" }
           required: [epoch, snapshot_id]
+    genesis_time:
+      description: The source network's genesis time (sandbox clock frame), when known — the reproduce task's fidelity check compares the target against it
+      schema: { type: string }
     max_investigation_rounds:
       description: Gap-filling rounds for the scoped hypothesis hunt
       schema: { type: number, default: 2 }
@@ -122,8 +125,8 @@ tasks:
       first-cause issue. The issue-contract runbook owns the record shape; the
       fingerprinting runbook owns identity. Preserve the incoming fingerprint
       and handles verbatim; fill the fingerprint block when absent, and when
-      handles are absent populate every id kind the evidence names (at minimum
-      `handles.network`) rather than leaving them blank. Record the dedupe
+      handles are absent populate every id kind the evidence names, leaving
+      the rest empty per the issue-contract runbook. Record the dedupe
       decision — a duplicate gets occurrence-attachment, not re-investigation,
       and the report must say so.
 
@@ -147,13 +150,12 @@ tasks:
     needs: [intake]
     quality-gate: "${{ has(outputs.values.network_target) && has(outputs.values.access_summary) && size(outputs.values.access_summary) > 0 && has(outputs.values.reproduction) }}"
     instructions: |-
-      Establish an investigable network — checking two disqualifiers first:
-      when the issue's classification layer is tooling and the failing
-      component is a datasource or pipeline outside any devnet
-      (ClickHouse/CBT/ingestion/test-runners), or the live network handle
-      still exhibits the symptom, target the live surface directly and do not
-      restore or launch anything. Otherwise prefer the strongest handle you
-      were given: a supplied network target, else a snapshot (the snapshot_id
+      Establish an investigable network. Apply the target-selection
+      disqualifiers of the runbook that owns root-causing a devnet issue first
+      — it owns when to target a live tooling surface or a still-broken live
+      network directly instead of restoring or launching anything. Otherwise
+      prefer the strongest handle you were given: a supplied network target,
+      else a snapshot (the snapshot_id
       input, the snapshots catalog, or the issue's handles), else reproduce
       from the issue's network handle. When the snapshots catalog offers
       several restore points, choose per the reproduction rules of the runbook
@@ -170,15 +172,16 @@ tasks:
       for public-live — it also owns the network_target contract.
 
       Label the mode honestly with the reproduction status enum of the runbook
-      that owns root-causing a devnet issue, and record the recipe that reaches
-      the state. Check fidelity before claiming reproduction: record the
-      target's genesis time and chain id against the source network's — a
-      snapshot lineage with a different genesis is a local mirror, not the
-      source, and must be labeled as such. Never label `reproduced` on
+      that owns root-causing a devnet issue, record the recipe that reaches
+      the state, and apply that runbook's reproduction-fidelity check before
+      claiming reproduction — the `genesis_time` input, when set, is the
+      source value that check compares against. Never label `reproduced` on
       evidence the target itself did not produce, and point network_target at
-      the surface where the recipe's verifying commands actually run. If the
-      state cannot be reproduced, set status historical-only and proceed on
-      the named historical evidence — do not fabricate a reproduction.
+      the surface where the recipe's verifying commands actually run. If no
+      target can re-exhibit or reach the state, label the mode honestly per
+      that runbook — not-reproduced for a failed re-exhibition on a fresh
+      target, historical-only when proceeding on named historical evidence
+      with no target — do not fabricate a reproduction.
 
       Emit the network target, the reproduction record, and a short
       access_summary a worker can act on — every handle in it spelled as a
@@ -206,6 +209,9 @@ tasks:
         snapshots:
           schema: *snapshot_catalog_schema
           value: "${{ inputs.values.?snapshots.orValue([]) }}"
+        genesis_time:
+          schema: { type: string, description: "Source network genesis time for the fidelity check, when known" }
+          value: "${{ inputs.values.?genesis_time.orValue('') }}"
     outputs:
       values:
         network_target:
@@ -219,7 +225,7 @@ tasks:
           schema: &reproduction_schema
             type: object
             properties:
-              status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | historical-only }
+              status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | tooling-live | historical-only }
               recipe: { type: array, items: { type: string } }
             required: [status]
   plan:
@@ -238,8 +244,7 @@ tasks:
       anchor and its key evidence refs — the hunt workers receive only this
       plan and the access summary. Do not embed review or process disclaimers
       ("pending adversarial review", "must pass plan review") in the plan
-      text: reviewers attack the plan's substance, and self-referential
-      process caveats read as self-refutation.
+      text — reviewers judge the plan's substance.
     inputs:
       values:
         canonical_issue:
@@ -266,7 +271,7 @@ tasks:
         claim:
           value: "${{ 'Executing this hypothesis plan will localize the first cause or falsify every listed hypothesis: ' + tasks.plan.outputs.values.plan }}"
         context:
-          value: "${{ tasks.intake.outputs.values.objective }}"
+          value: "${{ tasks.intake.outputs.values.objective + ' || Domain checklist: the PLAN-review mode of the devnet issue adversarial-review runbook owns the attack questions for this claim; when the panda CLI is available, read it via panda search runbooks \"adversarial review of a devnet issue\"' }}"
   revise:
     needs: [plan, plan_review]
     quality-gate: "${{ has(outputs.values.plan) && size(outputs.values.plan) > 0 }}"
@@ -416,7 +421,7 @@ tasks:
         evidence:
           value: "${{ tasks.synthesize.outputs.values.evidence }}"
         context:
-          value: "${{ tasks.investigate.outputs.values.coverage_summary + ' || Reachability: ' + tasks.trace.outputs.values.reachability + ' || Source findings: ' + tasks.trace.outputs.values.source_findings + ' || Note: the claim and its evidence POSTDATE this coverage summary — access it describes as unavailable may since have been obtained; judge the evidence on its own citations before inferring fabrication' }}"
+          value: "${{ 'Hunt coverage summary, recorded before the claim was finalized: ' + tasks.investigate.outputs.values.coverage_summary + ' || Reachability verdict: ' + tasks.trace.outputs.values.reachability + ' || Domain checklist: the EVIDENCE-review mode of the devnet issue adversarial-review runbook owns the attack questions for this claim; when the panda CLI is available, read it via panda search runbooks \"adversarial review of a devnet issue\"' }}"
   report:
     needs: [intake, reproduce, investigate, synthesize, trace, validate]
     quality-gate: "${{ has(outputs.values.report) && has(outputs.values.feedback) }}"
@@ -428,7 +433,10 @@ tasks:
 
       Assemble the report in the shape owned by the runbook that owns
       root-causing a devnet issue (via
-      `panda search runbooks "root-cause a devnet issue"`). Do not overstate —
+      `panda search runbooks "root-cause a devnet issue"`), with the follow-up
+      queue embedded in the report per that runbook's shape AND lifted out as
+      the separate `feedback` output with identical content — the sibling
+      output is the copy this pipeline consumes. Do not overstate —
       if the review weakened or refuted the
       cause, lead with that and cap confidence; a duplicate fingerprint
       decision gets occurrence-attachment, not re-publication.
@@ -438,7 +446,10 @@ tasks:
       say "review output unusable" and treat the verdict as unvalidated —
       never attribute reconstructed rationale to the review; recover the real
       objections from review_attempts instead. A publish/file-bug next_action
-      requires reproduction=reproduced and review_verdict=survives — otherwise
+      requires review_verdict=survives and a reproduction the feedback-queue
+      runbook counts as strong — `reproduced`, or a live/tooling mode whose
+      evidence was gathered on the still-symptomatic target; `partial` or
+      `not-reproduced` does not qualify — otherwise
       the publish feedback task must be blocked_by the reconfirmation task
       that would earn it.
 
@@ -528,7 +539,8 @@ tasks:
               citations:
                 type: array
                 items: *evidence_item_schema
-              next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | rerun with more evidence | no issue reproduced }
+              feedback: { type: object, description: "Embedded follow-up queue, identical to the sibling feedback output — shape owned by the feedback-queue runbook" }
+              next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | experiment triage | rerun with more evidence | no issue reproduced }
             required: [summary, root_cause, reproduction, trace_verdict, review_verdict, next_action]
         feedback:
           required: true
@@ -545,7 +557,7 @@ tasks:
                   type: object
                   properties:
                     id: { type: string }
-                    kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | manual-review | publish | no-op }
+                    kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | experiment-triage | manual-review | publish | no-op }
                     reason: { type: string }
                     priority: { type: string, description: high | medium | low }
                     inputs: { type: object, description: Handles and query params only }
@@ -561,6 +573,10 @@ outputs:
       required: true
       schema: *report_schema
       value: "${{ tasks.report.outputs.values.report }}"
+    canonical_issue:
+      required: true
+      schema: *issue_schema
+      value: "${{ tasks.intake.outputs.values.canonical_issue }}"
     root_cause_claim:
       required: true
       schema: { type: string }

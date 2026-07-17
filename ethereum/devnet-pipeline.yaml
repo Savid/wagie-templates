@@ -66,6 +66,8 @@ tasks:
           value: "${{ inputs.values.?watch_epochs.orValue(5) }}"
         sandbox_ttl:
           value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
+        launch_requirements:
+          value: "${{ tasks.config.outputs.values.launch_requirements }}"
       artifacts:
         config:
           ref: tasks.config.outputs.artifacts.config
@@ -75,10 +77,31 @@ outputs:
       required: true
       schema: { type: string }
       value: "${{ tasks.config.outputs.values.summary }}"
+    config_assumptions:
+      required: true
+      schema: { type: array, items: { type: string }, description: "Assumptions or unresolved gaps from config synthesis, including source inconsistencies" }
+      value: "${{ tasks.config.outputs.values.assumptions }}"
+    config_deviations:
+      required: true
+      schema: { type: array, items: { type: string }, description: "Steering-driven deviations from the hosted network — config-fidelity context for judging downstream issues" }
+      value: "${{ tasks.config.outputs.values.deviations }}"
+    config_dry_run:
+      required: true
+      schema:
+        type: object
+        properties:
+          attempted: { type: boolean }
+          command: { type: string }
+          passed: { type: boolean }
+        required: [attempted]
+      value: "${{ tasks.config.outputs.values.dry_run }}"
     base_snapshot_id:
       required: true
       schema: { type: string, description: "Snapshot of the freshly launched network, restorable into new sandboxes" }
       value: "${{ tasks.run.outputs.values.base_snapshot_id }}"
+    genesis_time:
+      schema: { type: string, description: "Source network genesis time (sandbox clock) from the snapshot stage — thread into feedback-loop investigations for the reproduction-fidelity check" }
+      value: "${{ tasks.run.outputs.values.?genesis_time.orValue('') }}"
     snapshots:
       required: true
       schema: &snapshot_catalog_schema
@@ -88,6 +111,7 @@ outputs:
           properties:
             epoch: { type: number }
             snapshot_id: { type: string }
+            captured_at: { type: string, description: "Capture time on the sandbox clock — carried on the epoch-0 base entry (a mid-epoch capture); the root-cause runbook reads it for pre-first_bad restores" }
           required: [epoch, snapshot_id]
       value: "${{ tasks.run.outputs.values.snapshots }}"
     issues:
@@ -163,6 +187,10 @@ outputs:
       required: true
       schema: { type: string, description: "One paragraph instead of issues when the watch window was healthy, else empty" }
       value: "${{ tasks.run.outputs.values.healthy_window_summary }}"
+    watch_notes:
+      required: true
+      schema: { type: string, description: "Reach/coverage caveats for the watch window, empty when none" }
+      value: "${{ tasks.run.outputs.values.watch_notes }}"
     final_snapshot:
       required: true
       schema:
@@ -187,7 +215,7 @@ outputs:
               type: object
               properties:
                 id: { type: string }
-                kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | manual-review | publish | no-op }
+                kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | experiment-triage | manual-review | publish | no-op }
                 reason: { type: string }
                 priority: { type: string, description: high | medium | low }
                 inputs: { type: object, description: Handles and query params only }
@@ -216,7 +244,7 @@ outputs:
             reproduction:
               type: object
               properties:
-                status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | historical-only }
+                status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | tooling-live | historical-only }
                 recipe: { type: array, items: { type: string } }
               required: [status]
             timeline:
@@ -240,7 +268,8 @@ outputs:
             citations:
               type: array
               items: *evidence_item_schema
-            next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | rerun with more evidence | no issue reproduced }
+            feedback: { type: object, description: "Embedded follow-up queue, identical to the sibling feedback output — shape owned by the feedback-queue runbook" }
+            next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | experiment triage | rerun with more evidence | no issue reproduced }
           required: [summary, root_cause, reproduction, trace_verdict, review_verdict, next_action]
       value: "${{ tasks.run.outputs.values.investigations }}"
     feedback:
@@ -250,3 +279,10 @@ outputs:
         description: Follow-up queue per investigated issue, parallel to investigations — shape owned by the feedback-queue runbook
         items: *feedback_schema
       value: "${{ tasks.run.outputs.values.feedback }}"
+    investigated_issues:
+      required: true
+      schema:
+        type: array
+        description: The canonical issue record each investigation ran on, parallel to investigations
+        items: *issue_item_schema
+      value: "${{ tasks.run.outputs.values.investigated_issues }}"

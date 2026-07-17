@@ -47,6 +47,8 @@ tasks:
       values:
         package_ref:
           value: "${{ inputs.values.?package_ref.orValue('') }}"
+        launch_requirements:
+          value: "${{ tasks.config.outputs.values.launch_requirements }}"
       artifacts:
         config:
           ref: tasks.config.outputs.artifacts.config
@@ -70,10 +72,10 @@ tasks:
           schema: &network_target_schema
             type: object
             properties:
-              kind: { type: string, description: local | compute | public — owned by the runbook that owns debugging an Ethereum network }
+              kind: { type: string, description: local | compute | public — owned by the runbook that owns debugging an Ethereum network (its tooling kind never reaches a watch) }
               enclave: { type: string }
               sandbox_id: { type: string }
-              network_id: { type: string, description: Source or public network id }
+              network_id: { type: string, description: "Public network id, when known" }
             required: [kind]
           value: "${{ tasks.watch.outputs.values.network_target }}"
     matrix:
@@ -145,7 +147,9 @@ tasks:
                       description: Watch setup_summary copied whole — reproduction and reachability judge against it
                 confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
               required: [title, summary]
-          value: "${{ tasks.watch.outputs.values.issues }}"
+          # duplicates are surfaced in the issues output but not re-investigated
+          # (fingerprint-before-expensive-work, per the root-cause runbook)
+          value: "${{ tasks.watch.outputs.values.issues.filter(i, i.?fingerprint.?decision.orValue('') != 'duplicate') }}"
     tasks:
       one:
         uses: dev.wagie/devnet-issue-investigate@1.0.0
@@ -175,7 +179,7 @@ tasks:
                 reproduction:
                   type: object
                   properties:
-                    status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | historical-only }
+                    status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | tooling-live | historical-only }
                     recipe: { type: array, items: { type: string } }
                   required: [status]
                 timeline:
@@ -199,7 +203,8 @@ tasks:
                 citations:
                   type: array
                   items: *evidence_item_schema
-                next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | rerun with more evidence | no issue reproduced }
+                feedback: { type: object, description: "Embedded follow-up queue, identical to the sibling feedback output — shape owned by the feedback-queue runbook" }
+                next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | experiment triage | rerun with more evidence | no issue reproduced }
               required: [summary, root_cause, reproduction, trace_verdict, review_verdict, next_action]
           value: "${{ tasks.one.outputs.values.report }}"
         feedback:
@@ -219,7 +224,7 @@ tasks:
                     type: object
                     properties:
                       id: { type: string }
-                      kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | manual-review | publish | no-op }
+                      kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | experiment-triage | manual-review | publish | no-op }
                       reason: { type: string }
                       priority: { type: string, description: high | medium | low }
                       inputs: { type: object, description: Handles and query params only }
@@ -230,12 +235,37 @@ tasks:
                     required: [kind, reason, success_condition, stop_condition]
               required: [tasks]
           value: "${{ tasks.one.outputs.values.feedback }}"
+        investigated_issues:
+          required: true
+          schema:
+            type: array
+            description: The canonical issue record each investigation ran on, parallel to investigations — pairs reports back to issues across the duplicate filter
+            items: *issue_item_schema
+          value: "${{ tasks.one.outputs.values.canonical_issue }}"
 outputs:
   values:
     config_summary:
       required: true
       schema: { type: string }
       value: "${{ tasks.config.outputs.values.summary }}"
+    config_assumptions:
+      required: true
+      schema: { type: array, items: { type: string }, description: "Assumptions or unresolved gaps from config synthesis, including source inconsistencies" }
+      value: "${{ tasks.config.outputs.values.assumptions }}"
+    config_deviations:
+      required: true
+      schema: { type: array, items: { type: string }, description: "Steering-driven deviations from the hosted network — config-fidelity context for judging downstream issues" }
+      value: "${{ tasks.config.outputs.values.deviations }}"
+    config_dry_run:
+      required: true
+      schema:
+        type: object
+        properties:
+          attempted: { type: boolean }
+          command: { type: string }
+          passed: { type: boolean }
+        required: [attempted]
+      value: "${{ tasks.config.outputs.values.dry_run }}"
     network_target:
       required: true
       schema: *network_target_schema
@@ -250,6 +280,10 @@ outputs:
       required: true
       schema: { type: string, description: "One paragraph instead of issues when the watch window was healthy, else empty" }
       value: "${{ tasks.watch.outputs.values.healthy_window_summary }}"
+    watch_notes:
+      required: true
+      schema: { type: string, description: "Reach/coverage caveats for the watch window, empty when none" }
+      value: "${{ tasks.watch.outputs.values.notes }}"
     watch_feedback:
       required: true
       schema: *feedback_schema
@@ -264,3 +298,10 @@ outputs:
       required: true
       schema: *feedback_matrix_schema
       value: "${{ tasks.investigate.outputs.values.feedback }}"
+    investigated_issues:
+      required: true
+      schema:
+        type: array
+        description: The canonical issue record each investigation ran on, parallel to investigations
+        items: *issue_item_schema
+      value: "${{ tasks.investigate.outputs.values.investigated_issues }}"

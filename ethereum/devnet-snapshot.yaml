@@ -33,6 +33,9 @@ inputs:
     sandbox_ttl:
       description: Optional sandbox TTL (e.g. 2h) to bound each VM's lifetime
       schema: { type: string }
+    launch_requirements:
+      description: "Flags the config requires the launch to pass (e.g. --privileged), as emitted by config synthesis; the lifecycle runbook owns their semantics"
+      schema: { type: array, items: { type: string } }
   artifacts:
     config:
       required: true
@@ -47,17 +50,28 @@ tasks:
       network once it reaches genesis and is producing blocks, then tear the
       sandbox down fully so no compute is left running. The base snapshot — not
       the sandbox — is the handoff to the next task, and it is also the epoch-0
-      capture: the fresh network before it advances.
+      capture, per the lifecycle runbook's epoch-0 carve-out to its
+      snapshot-alignment rule: early in epoch 0, before the first epoch
+      boundary.
 
       Follow the runbook that owns the panda-compute devnet lifecycle (find it via
       `panda search runbooks "compute sandbox snapshot lifecycle"`). It owns the
       capability check, choosing a snapshot/restore-capable compute template
       (unless `compute_template` is supplied), launching from the config, async
-      polling, snapshotting, and teardown. Pass `sandbox_ttl` when given and honor
-      a `package_ref` override when supplied. Deleting the source sandbox after the
-      base snapshot is captured is an explicit instruction of this task.
+      polling, snapshotting, and teardown. Pass `sandbox_ttl` when given, honor
+      a `package_ref` override when supplied, and pass every flag in
+      `launch_requirements` to the launch — config synthesis recorded them as
+      mandatory. Deleting the source sandbox after the base snapshot is captured
+      is an explicit instruction of this task.
 
-      Return the base snapshot id, and the genesis time for provenance.
+      Return the base snapshot id, the genesis time for provenance, and the
+      base capture time (`captured_at`, on the sandbox clock) — the lifecycle
+      runbook requires it on the epoch-0 catalog entry, since the base is a
+      mid-epoch capture. A network that never produces blocks before the
+      first epoch boundary is a failed launch for THIS template: report
+      network_ready=false and let the gate fail the run — the lifecycle
+      runbook's boundary-capture fallback serves investigations, not this
+      catalog.
     inputs:
       values:
         compute_template:
@@ -69,6 +83,9 @@ tasks:
         sandbox_ttl:
           schema: { type: string }
           value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
+        launch_requirements:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?launch_requirements.orValue([]) }}"
         devnet:
           schema: { type: string }
           value: "${{ inputs.values.devnet }}"
@@ -85,6 +102,8 @@ tasks:
           schema: { type: string, description: "Snapshot of the freshly launched network, restorable into a new sandbox" }
         genesis_time:
           schema: { type: string, description: "Network genesis time recorded at launch, in the sandbox clock frame (not wall-clock), for epoch-timing provenance" }
+        captured_at:
+          schema: { type: string, description: "Base-snapshot capture time on the sandbox clock — a mid-epoch-0 capture; carried on the epoch-0 catalog entry" }
   restore_and_snapshot:
     needs: [provision_and_base]
     quality-gate: "${{ has(outputs.values.sandbox_id) && size(outputs.values.sandbox_id) > 0 && size(outputs.values.snapshots) > 0 }}"
@@ -96,25 +115,33 @@ tasks:
 
       Epoch 0 is already captured — it IS the base snapshot. When 0 is a target,
       record it as the epoch-0 entry using `base_snapshot_id` directly; do NOT
-      take a second snapshot of the freshly restored network — that would be a
-      byte-identical duplicate of the base and waste a capture. For every epoch
-      greater than 0, pre-compute its snapshot time before the network advances so
-      it is not missed, let the network run forward to that target, and snapshot.
+      take a second snapshot of the freshly restored network for epoch 0. For
+      every epoch greater than 0, let the network run forward to the target and
+      snapshot.
 
       Follow the runbook that owns the panda-compute devnet lifecycle (via
       `panda search runbooks "epoch aligned snapshot restore"`): it owns restoring
       the snapshot into a fresh sandbox, boot flavor, re-establishing epoch/slot
-      timing, epoch alignment, async polling, and snapshotting. Pass `sandbox_ttl`
-      when given.
+      timing from `genesis_time`, computing each target's snapshot time, epoch
+      alignment, async polling, and snapshotting. Pass `sandbox_ttl` when given.
 
-      Record one `{ epoch, snapshot_id }` per target, in ascending order, and
-      return the restored sandbox id.
+      Record one `{ epoch, snapshot_id }` per target, in ascending order —
+      the epoch-0 entry additionally carries `captured_at` (the base capture
+      time input): it is a mid-epoch capture the root-cause runbook checks
+      before treating it as a pre-first_bad restore point — and return the
+      restored sandbox id.
     inputs:
       values:
         base_snapshot_id:
           required: true
           schema: { type: string }
           value: "${{ tasks.provision_and_base.outputs.values.base_snapshot_id }}"
+        genesis_time:
+          schema: { type: string }
+          value: "${{ tasks.provision_and_base.outputs.values.?genesis_time.orValue('') }}"
+        captured_at:
+          schema: { type: string, description: "Base-snapshot capture time, carried on the epoch-0 catalog entry" }
+          value: "${{ tasks.provision_and_base.outputs.values.?captured_at.orValue('') }}"
         snapshot_epochs:
           required: true
           schema: { type: array, items: { type: number } }
@@ -134,19 +161,24 @@ tasks:
           required: true
           schema:
             type: array
+            minItems: 1
             items:
               type: object
               properties:
                 epoch: { type: number }
                 snapshot_id: { type: string }
+                captured_at: { type: string, description: "Capture time on the sandbox clock — required on the epoch-0 base entry (a mid-epoch capture)" }
               required: [epoch, snapshot_id]
-            description: Snapshot id at each target epoch, in order; the epoch-0 entry is the base snapshot, later epochs are captured by running forward
+            description: Snapshot id at each target epoch, in order; the epoch-0 entry is the base snapshot (carrying captured_at), later epochs are captured by running forward
 outputs:
   values:
     base_snapshot_id:
       required: true
       schema: { type: string }
       value: "${{ tasks.provision_and_base.outputs.values.base_snapshot_id }}"
+    genesis_time:
+      schema: { type: string, description: "Network genesis time recorded at launch, in the sandbox clock frame, for epoch-timing provenance" }
+      value: "${{ tasks.provision_and_base.outputs.values.?genesis_time.orValue('') }}"
     sandbox_id:
       required: true
       schema: { type: string }
@@ -155,10 +187,12 @@ outputs:
       required: true
       schema:
         type: array
+        minItems: 1
         items:
           type: object
           properties:
             epoch: { type: number }
             snapshot_id: { type: string }
+            captured_at: { type: string, description: "Capture time on the sandbox clock — required on the epoch-0 base entry (a mid-epoch capture)" }
           required: [epoch, snapshot_id]
       value: "${{ tasks.restore_and_snapshot.outputs.values.snapshots }}"

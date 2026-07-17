@@ -7,7 +7,7 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when a devnet watch, scan, or pipeline run left feedback queues or un-investigated issue records and the investigate-kind follow-ups should actually be executed: seeds one queue from the incoming queues and issues, then drains it round by round — triage the actionable investigate tasks, fan each out to its own root-cause investigation (restoring snapshots from the catalog when handles allow), merge the resulting queues — until the queue is terminal, empty of investigate work, or max_rounds is spent. Non-investigate task kinds (watch, config, snapshot, source-trace, manual-review, publish) pass through to the final queue untouched. A continuation stage: feed it the feedback and issues another devnet template produced, not a raw symptom.
+  Use when a devnet watch, scan, or pipeline run left feedback queues or un-investigated issue records and the investigate-kind follow-ups should actually be executed: seeds one queue from the incoming queues and issues, then drains it round by round — triage the actionable investigate tasks, fan each out to its own root-cause investigation (restoring snapshots from the catalog when handles allow), merge the resulting queues — until the queue is terminal, empty of investigate work, or max_rounds is spent. Non-investigate task kinds (watch, config, snapshot, source-trace, reachability-trace, experiment-triage, manual-review, publish, no-op) pass through to the final queue untouched — hand experiment-triage tasks to dev.wagie/devnet-issue-to-experiment, pairing each with its investigation's report and issue record plus your repo_map; launching is the caller's decision. A continuation stage: feed it the feedback and issues another devnet template produced, not a raw symptom.
 tags: ["ethereum", "devnet", "feedback", "loop", "investigate", "follow-up", "queue", "drain", "root-cause"]
 examples:
   - "drain the feedback queue from the devnet pipeline"
@@ -35,7 +35,7 @@ inputs:
                 type: object
                 properties:
                   id: { type: string }
-                  kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | manual-review | publish | no-op }
+                  kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | experiment-triage | manual-review | publish | no-op }
                   reason: { type: string }
                   priority: { type: string, description: high | medium | low }
                   inputs: { type: object, description: Handles and query params only }
@@ -122,7 +122,11 @@ inputs:
           properties:
             epoch: { type: number }
             snapshot_id: { type: string }
+            captured_at: { type: string, description: "Capture time on the sandbox clock — carried on the epoch-0 base entry (a mid-epoch capture); the root-cause runbook reads it for pre-first_bad restores" }
           required: [epoch, snapshot_id]
+    genesis_time:
+      description: Source network genesis time (sandbox clock frame) from the snapshot stage, threaded to every investigation for the root-cause runbook's reproduction-fidelity check
+      schema: { type: string }
     max_rounds:
       description: Maximum drain rounds before returning the remaining queue
       schema: { type: number, default: 3 }
@@ -135,11 +139,17 @@ tasks:
       shaping investigation follow-ups (resolve it via
       `panda search runbooks "shaping investigation follow-ups"`).
 
-      Each issue whose fingerprint decision is not duplicate becomes one
-      investigate-kind task carrying the issue record in its inputs; a
-      duplicate gets no task. Dedupe tasks that close the same named gap,
-      keep every non-investigate task as-is, and set terminal only when the
-      merged queue is terminal by the runbook's own rules.
+      Inside this loop the queue IS the dispatch route: no orchestrator
+      dispatches these issues directly, so the runbook's collation-round
+      no-task carve-outs do not apply here — every incoming un-investigated
+      issue takes the runbook's no-other-route mapping (one investigate task;
+      a duplicate gets occurrence-attachment, not re-investigation). As this
+      loop's transport, each such task carries the full issue record under a
+      named inputs key alongside its handles — an orchestration-layer
+      extension of the runbook's handles-only rule, so triage can hand the
+      record onward without reconstruction. Dedupe tasks that close the same
+      named gap, keep every non-investigate task as-is, and set terminal only
+      when the merged queue is terminal by the runbook's own rules.
     inputs:
       values:
         feedback_queues:
@@ -175,6 +185,9 @@ tasks:
           required: true
           schema: *snapshot_catalog_schema
           value: "${{ inputs.values.?snapshots.orValue([]) }}"
+        genesis_time:
+          schema: { type: string }
+          value: "${{ inputs.values.?genesis_time.orValue('') }}"
     tasks:
       triage:
         quality-gate: "${{ has(outputs.values.investigate_items) }}"
@@ -208,6 +221,9 @@ tasks:
               required: true
               schema: *snapshot_catalog_schema
               value: "${{ inputs.values.snapshots }}"
+            genesis_time:
+              schema: { type: string }
+              value: "${{ inputs.values.?genesis_time.orValue('') }}"
         matrix:
           axes:
             item:
@@ -226,6 +242,8 @@ tasks:
                   value: "${{ matrix.item.?handles.snapshot_id.orValue('') }}"
                 snapshots:
                   value: "${{ inputs.values.snapshots }}"
+                genesis_time:
+                  value: "${{ inputs.values.?genesis_time.orValue('') }}"
         outputs:
           values:
             reports:
@@ -246,7 +264,7 @@ tasks:
                     reproduction:
                       type: object
                       properties:
-                        status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | historical-only }
+                        status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | tooling-live | historical-only }
                         recipe: { type: array, items: { type: string } }
                       required: [status]
                     timeline:
@@ -270,7 +288,8 @@ tasks:
                     citations:
                       type: array
                       items: *evidence_item_schema
-                    next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | rerun with more evidence | no issue reproduced }
+                    feedback: { type: object, description: "Embedded follow-up queue, identical to the sibling feedback output — shape owned by the feedback-queue runbook" }
+                    next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | experiment triage | rerun with more evidence | no issue reproduced }
                   required: [summary, root_cause, reproduction, trace_verdict, review_verdict, next_action]
               value: "${{ tasks.one.outputs.values.report }}"
             feedbacks:
@@ -279,6 +298,12 @@ tasks:
                 type: array
                 items: *feedback_schema
               value: "${{ tasks.one.outputs.values.feedback }}"
+            issues:
+              required: true
+              schema:
+                type: array
+                items: *issue_schema
+              value: "${{ tasks.one.outputs.values.canonical_issue }}"
       merge:
         needs: [triage, investigate_round]
         quality-gate: "${{ has(outputs.values.queue) && outputs.values.remaining_investigate >= 0.0 }}"
@@ -333,6 +358,12 @@ tasks:
             type: array
             items: *report_schema
           value: "${{ loop.investigations.orValue([]) + tasks.investigate_round.outputs.values.reports }}"
+        investigated_issues:
+          required: true
+          schema:
+            type: array
+            items: *issue_schema
+          value: "${{ loop.investigated_issues.orValue([]) + tasks.investigate_round.outputs.values.issues }}"
 outputs:
   values:
     investigations:
@@ -342,6 +373,13 @@ outputs:
         items: *report_schema
         description: Root-cause reports from every drain round, in round order
       value: "${{ tasks.drain.outputs.values.investigations }}"
+    investigated_issues:
+      required: true
+      schema:
+        type: array
+        items: *issue_schema
+        description: The canonical issue record each investigation ran on, parallel to investigations
+      value: "${{ tasks.drain.outputs.values.investigated_issues }}"
     queue:
       required: true
       schema: *feedback_schema

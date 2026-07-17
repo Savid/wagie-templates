@@ -7,7 +7,7 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when you already have a runnable Kurtosis ethereum-package args-file and want the remote reproduce-and-analyze pipeline run on it end to end: launch and snapshot it on panda-compute at chosen epochs, watch a restored snapshot forward for a window, then root-cause every issue it surfaces. The watch restores the earliest epoch snapshot by default — an observed replay of the whole captured window; set watch_from_epoch to a later captured epoch to skip the replay and watch only fresh epochs beyond it. Each investigation restores its own sandbox from the broken-state snapshot and receives the epoch-snapshot catalog to pick an earlier restore point. Config-first entry point; devnet-pipeline wraps this when only a hosted devnet name exists.
+  Use when you already have a runnable Kurtosis ethereum-package args-file and want the remote reproduce-and-analyze pipeline run on it end to end: launch and snapshot it on panda-compute at chosen epochs, watch a restored snapshot forward for a window, then root-cause every issue it surfaces. The watch restores the earliest epoch snapshot by default — an observed replay of the whole captured window; set watch_from_epoch to a later captured epoch to skip the replay and watch only fresh epochs beyond it. Each investigation restores its own sandbox from the broken-state snapshot and receives the epoch-snapshot catalog to pick an earlier restore point; duplicate-fingerprint issues are surfaced but not re-investigated. Config-first entry point; devnet-pipeline wraps this when only a hosted devnet name exists.
 tags: ["ethereum", "devnet", "kurtosis", "pipeline", "config", "args-file", "snapshot", "watch", "investigate", "panda-compute"]
 examples:
   - "run the devnet pipeline on this kurtosis config"
@@ -36,6 +36,9 @@ inputs:
     sandbox_ttl:
       description: Optional sandbox TTL (e.g. 2h) to bound each VM's lifetime
       schema: { type: string }
+    launch_requirements:
+      description: "Flags the config requires the launch to pass (e.g. --privileged), as emitted by config synthesis; threaded to the compute launch"
+      schema: { type: array, items: { type: string } }
   artifacts:
     config:
       required: true
@@ -54,6 +57,8 @@ tasks:
           value: "${{ inputs.values.?snapshot_epochs.orValue([0]) }}"
         sandbox_ttl:
           value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
+        launch_requirements:
+          value: "${{ inputs.values.?launch_requirements.orValue([]) }}"
       artifacts:
         config:
           ref: inputs.artifacts.config
@@ -66,16 +71,20 @@ tasks:
           value: "${{ inputs.values.devnet }}"
         snapshot_id:
           # the watch restores the watch_from_epoch snapshot when set, else the
-          # earliest captured snapshot, and runs forward
-          value: "${{ inputs.values.?watch_from_epoch.orValue(-1.0) < 0.0 ? tasks.snapshot.outputs.values.snapshots[?0].orValue({'epoch': 0, 'snapshot_id': ''}).snapshot_id : tasks.snapshot.outputs.values.snapshots.filter(s, s.epoch == inputs.values.watch_from_epoch)[?0].orValue({'epoch': 0, 'snapshot_id': ''}).snapshot_id }}"
+          # earliest captured snapshot, and runs forward. A watch_from_epoch that
+          # matches no captured epoch fails this binding (index on an empty
+          # filter) instead of degrading into an empty snapshot_id downstream.
+          value: "${{ inputs.values.?watch_from_epoch.orValue(-1.0) < 0.0 ? tasks.snapshot.outputs.values.snapshots[0].snapshot_id : tasks.snapshot.outputs.values.snapshots.filter(s, s.epoch == inputs.values.watch_from_epoch)[0].snapshot_id }}"
         watch_epochs:
           value: "${{ inputs.values.?watch_epochs.orValue(5) }}"
         sandbox_ttl:
           value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
   investigate:
-    # Deliberately passes NO network_target: each investigation restores its own
-    # sandbox from the broken-state snapshot instead of sharing the watch sandbox,
-    # so parallel issue hunts stay isolated.
+    # Deliberately passes NO network_target so investigations default to their
+    # own restores from the broken-state snapshot. Isolation is best-effort:
+    # issues carry the watch sandbox in handles.sandbox_id, and the root-cause
+    # runbook's live-handle disqualifier may attach hunts to it (read-only,
+    # under shared-sandbox etiquette) while its evidence is reachable.
     needs: [snapshot, watch]
     inputs:
       values:
@@ -83,6 +92,9 @@ tasks:
           required: true
           schema: { type: string, description: "Final broken-state snapshot from the watch, empty when none" }
           value: "${{ tasks.watch.outputs.values.final_snapshot.?snapshot_id.orValue('') }}"
+        genesis_time:
+          schema: { type: string, description: "Source network genesis time for the reproduction-fidelity check" }
+          value: "${{ tasks.snapshot.outputs.values.?genesis_time.orValue('') }}"
         snapshots:
           required: true
           schema: &snapshot_catalog_schema
@@ -92,6 +104,7 @@ tasks:
               properties:
                 epoch: { type: number }
                 snapshot_id: { type: string }
+                captured_at: { type: string, description: "Capture time on the sandbox clock — carried on the epoch-0 base entry (a mid-epoch capture); the root-cause runbook reads it for pre-first_bad restores" }
               required: [epoch, snapshot_id]
           value: "${{ tasks.snapshot.outputs.values.snapshots }}"
     matrix:
@@ -163,7 +176,9 @@ tasks:
                       description: Watch setup_summary copied whole — reproduction and reachability judge against it
                 confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
               required: [title, summary]
-          value: "${{ tasks.watch.outputs.values.issues }}"
+          # duplicates are surfaced in the issues output but not re-investigated
+          # (fingerprint-before-expensive-work, per the root-cause runbook)
+          value: "${{ tasks.watch.outputs.values.issues.filter(i, i.?fingerprint.?decision.orValue('') != 'duplicate') }}"
     tasks:
       one:
         uses: dev.wagie/devnet-issue-investigate@1.0.0
@@ -175,6 +190,8 @@ tasks:
               value: "${{ inputs.values.snapshot_id }}"
             snapshots:
               value: "${{ inputs.values.snapshots }}"
+            genesis_time:
+              value: "${{ inputs.values.?genesis_time.orValue('') }}"
     outputs:
       values:
         investigations:
@@ -195,7 +212,7 @@ tasks:
                 reproduction:
                   type: object
                   properties:
-                    status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | historical-only }
+                    status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | tooling-live | historical-only }
                     recipe: { type: array, items: { type: string } }
                   required: [status]
                 timeline:
@@ -219,7 +236,8 @@ tasks:
                 citations:
                   type: array
                   items: *evidence_item_schema
-                next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | rerun with more evidence | no issue reproduced }
+                feedback: { type: object, description: "Embedded follow-up queue, identical to the sibling feedback output — shape owned by the feedback-queue runbook" }
+                next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | experiment triage | rerun with more evidence | no issue reproduced }
               required: [summary, root_cause, reproduction, trace_verdict, review_verdict, next_action]
           value: "${{ tasks.one.outputs.values.report }}"
         feedback:
@@ -239,7 +257,7 @@ tasks:
                     type: object
                     properties:
                       id: { type: string }
-                      kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | manual-review | publish | no-op }
+                      kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | experiment-triage | manual-review | publish | no-op }
                       reason: { type: string }
                       priority: { type: string, description: high | medium | low }
                       inputs: { type: object, description: Handles and query params only }
@@ -250,12 +268,22 @@ tasks:
                     required: [kind, reason, success_condition, stop_condition]
               required: [tasks]
           value: "${{ tasks.one.outputs.values.feedback }}"
+        investigated_issues:
+          required: true
+          schema:
+            type: array
+            description: The canonical issue record each investigation ran on, parallel to investigations — pairs reports back to issues across the duplicate filter
+            items: *issue_item_schema
+          value: "${{ tasks.one.outputs.values.canonical_issue }}"
 outputs:
   values:
     base_snapshot_id:
       required: true
       schema: { type: string, description: "Snapshot of the freshly launched network, restorable into new sandboxes" }
       value: "${{ tasks.snapshot.outputs.values.base_snapshot_id }}"
+    genesis_time:
+      schema: { type: string, description: "Source network genesis time (sandbox clock) from the snapshot stage — thread into feedback-loop investigations for the reproduction-fidelity check" }
+      value: "${{ tasks.snapshot.outputs.values.?genesis_time.orValue('') }}"
     snapshots:
       required: true
       schema: *snapshot_catalog_schema
@@ -270,6 +298,10 @@ outputs:
       required: true
       schema: { type: string, description: "One paragraph instead of issues when the watch window was healthy, else empty" }
       value: "${{ tasks.watch.outputs.values.healthy_window_summary }}"
+    watch_notes:
+      required: true
+      schema: { type: string, description: "Reach/coverage caveats for the watch window, empty when none" }
+      value: "${{ tasks.watch.outputs.values.notes }}"
     final_snapshot:
       required: true
       schema:
@@ -293,3 +325,10 @@ outputs:
       required: true
       schema: *feedback_matrix_schema
       value: "${{ tasks.investigate.outputs.values.feedback }}"
+    investigated_issues:
+      required: true
+      schema:
+        type: array
+        description: The canonical issue record each investigation ran on, parallel to investigations
+        items: *issue_item_schema
+      value: "${{ tasks.investigate.outputs.values.investigated_issues }}"

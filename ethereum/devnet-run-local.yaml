@@ -22,6 +22,9 @@ inputs:
     enclave_name:
       description: Attach to this already-running local enclave instead of launching, if set
       schema: { type: string }
+    launch_requirements:
+      description: "Flags the config requires the launch to pass (e.g. --privileged), as emitted by config synthesis; the Kurtosis runbook owns their semantics"
+      schema: { type: array, items: { type: string } }
   artifacts:
     config:
       required: true
@@ -35,7 +38,9 @@ tasks:
       panda-compute), or attach to the named running enclave, per the runbook
       that owns running and reaching a Kurtosis devnet (find it via
       `panda search runbooks "run a devnet locally with kurtosis"`). Honor a
-      `package_ref` override when supplied. Shape the handle per the
+      `package_ref` override when supplied, and pass every flag in
+      `launch_requirements` to the launch — config synthesis recorded them as
+      mandatory and that runbook owns their semantics. Shape the handle per the
       network_target contract in the runbook that owns debugging an Ethereum
       network.
 
@@ -48,6 +53,9 @@ tasks:
         enclave_name:
           schema: { type: string }
           value: "${{ inputs.values.?enclave_name.orValue('') }}"
+        launch_requirements:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?launch_requirements.orValue([]) }}"
       artifacts:
         config:
           ref: inputs.artifacts.config
@@ -61,7 +69,7 @@ tasks:
               kind: { type: string, description: local — owned by the runbook that owns debugging an Ethereum network }
               enclave: { type: string }
               sandbox_id: { type: string }
-              network_id: { type: string, description: "Source hosted network id, when known" }
+              network_id: { type: string, description: "Public network id, when known" }
             required: [kind]
         enclave:
           required: true

@@ -41,7 +41,7 @@ inputs:
       schema: { type: number }
 tasks:
   frame:
-    quality-gate: "${{ has(outputs.values.scan_target) && size(outputs.values.scan_target) > 0 && has(outputs.values.objective) && size(outputs.values.objective) > 0 && has(outputs.values.window) && has(outputs.values.window.resolved) && outputs.values.window.resolved && has(outputs.values.window.start) && size(outputs.values.window.start) > 0 && has(outputs.values.window.end) && size(outputs.values.window.end) > 0 }}"
+    quality-gate: "${{ has(outputs.values.scan_target) && size(outputs.values.scan_target) > 0 && has(outputs.values.objective) && size(outputs.values.objective) > 0 && has(outputs.values.window) && has(outputs.values.window.resolved) && outputs.values.window.resolved && has(outputs.values.window.start_time) && size(outputs.values.window.start_time) > 0 && has(outputs.values.window.end_time) && size(outputs.values.window.end_time) > 0 && has(outputs.values.window.start_slot) && has(outputs.values.window.end_slot) && outputs.values.window.end_slot >= outputs.values.window.start_slot }}"
     instructions: |-
       Resolve the retained-data access and the concrete time window for the scan.
       Do not query for issues yet — just frame the target.
@@ -59,19 +59,21 @@ tasks:
       range (a block range only when one is honestly derivable — the ClickHouse
       runbook owns when it is not), the concrete data coordinates (query surface, resolved
       cluster, the network's own database, dataset), and explicit pointers to the
-      runbook that owns ClickHouse query discipline (placement, partition and
-      force_primary_key rules, coverage-before-absence) and the one that owns the
-      fork model and health thresholds — spelled as runnable commands
-      (`panda read runbooks://<stem>`), not bare refs: a probe has only the
+      runbook that owns ClickHouse query discipline, the one that owns the fork
+      model and health thresholds, and the one that owns evidence discipline —
+      probes must keep the exact query behind each fact so collate can emit
+      re-runnable evidence refs. Spell each pointer as a runnable command
+      (`panda read runbooks://<stem>`), not a bare ref: a probe has only the
       terminal and skips a pointer it cannot resolve. A probe must be able to
       begin querying from `scan_target` alone.
 
       Pin the window so a re-run is reproducible: resolve it to a concrete, closed
-      range — never a relative expression — and record BOTH wall-clock timestamps
-      and the slot range in `window.start`/`window.end`, with
-      `window.resolved: true`. When only `lookback` is given, floor `end` to the
-      last completed epoch boundary and set `start` to `end` minus `lookback` on
-      that same boundary, so the edges are re-derivable. Runs meant to be compared
+      range — never a relative expression — recording the wall-clock timestamps
+      in `window.start_time`/`window.end_time` and the slot range in
+      `window.start_slot`/`window.end_slot`, with `window.resolved: true`. When
+      only `lookback` is given, floor the window's end to the last completed
+      epoch boundary and set its start to that end minus `lookback` on the same
+      boundary, so the edges are re-derivable. Runs meant to be compared
       MUST share explicit `start_time`/`end_time`: a bare `lookback` drifts with
       wall-clock time and makes two scans diverge for reasons that are not about
       the network.
@@ -106,13 +108,15 @@ tasks:
           schema: { type: string, description: One-line scan objective }
         window:
           required: true
-          schema:
+          schema: &window_schema
             type: object
             properties:
-              start: { type: string }
-              end: { type: string }
+              start_time: { type: string, description: "Wall-clock window start, concrete ISO timestamp" }
+              end_time: { type: string, description: "Wall-clock window end, concrete ISO timestamp" }
+              start_slot: { type: number }
+              end_slot: { type: number }
               resolved: { type: boolean }
-            required: [resolved, start, end]
+            required: [resolved, start_time, end_time, start_slot, end_slot]
   scan:
     needs: [frame]
     uses: dev.wagie/scoped-discovery@1.0.0
@@ -164,13 +168,7 @@ tasks:
           schema: { type: boolean }
           value: "${{ tasks.scan.outputs.values.converged }}"
         window:
-          schema:
-            type: object
-            properties:
-              start: { type: string }
-              end: { type: string }
-              resolved: { type: boolean }
-            required: [resolved, start, end]
+          schema: *window_schema
           value: "${{ tasks.frame.outputs.values.window }}"
         findings:
           schema:
@@ -272,7 +270,7 @@ tasks:
                   type: object
                   properties:
                     id: { type: string }
-                    kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | manual-review | publish | no-op }
+                    kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | experiment-triage | manual-review | publish | no-op }
                     reason: { type: string }
                     priority: { type: string, description: high | medium | low }
                     inputs: { type: object, description: Handles and query params only }
@@ -298,13 +296,7 @@ outputs:
       value: "${{ tasks.collate.outputs.values.feedback }}"
     window:
       required: true
-      schema:
-        type: object
-        properties:
-          start: { type: string }
-          end: { type: string }
-          resolved: { type: boolean }
-        required: [resolved, start, end]
+      schema: *window_schema
       value: "${{ tasks.frame.outputs.values.window }}"
     findings:
       required: true

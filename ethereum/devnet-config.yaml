@@ -29,21 +29,25 @@ inputs:
       schema: { type: string }
 tasks:
   assemble_config:
-    quality-gate: "${{ has(outputs.values.summary) && size(outputs.values.summary) > 0 }}"
+    quality-gate: "${{ has(outputs.values.summary) && size(outputs.values.summary) > 0 && (!outputs.values.dry_run.attempted || outputs.values.dry_run.?passed.orValue(false)) }}"
     instructions: |-
       Produce ONE runnable ethereum-package Kurtosis args-file that models the
       named devnet, and write it as the `config` artifact.
 
-      Resolve runbooks by meaning via `panda search runbooks "<need>"`. Ground
-      the devnet with the runbook that owns hosted devnet context intake, then
-      synthesize the args-file per the runbook that owns building a Kurtosis
-      config from a hosted devnet — it owns source authority, `steering`,
-      fidelity, and dry-run validation. Honor a `package_ref` override when
-      supplied.
+      Ground the devnet with the runbook found via
+      `panda search runbooks "hosted devnet context intake"`, then synthesize
+      the args-file per the runbook found via
+      `panda search runbooks "build a kurtosis config from a public devnet"` —
+      it owns source authority, `steering`, fidelity, dry-run validation, and
+      the trigger list for launch requirements. Honor a `package_ref` override
+      when supplied.
 
       Emit the config artifact, a short summary of the key choices, the
-      assumptions or unresolved gaps, and every steering deviation from the
-      hosted network.
+      assumptions or unresolved gaps, every steering deviation from the hosted
+      network, the flags the launch must pass, and the dry-run status —
+      explicit even when kurtosis was unavailable. A config whose dry-run
+      failed is not a valid result: fix the args-file and re-validate instead
+      of returning it.
     inputs:
       values:
         devnet:
@@ -73,6 +77,22 @@ tasks:
             type: array
             items: { type: string }
             description: Every steering-driven deviation from the hosted network, empty when unsteered
+        launch_requirements:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: "Flags the launch must pass (e.g. --privileged for privileged services), empty when none — trigger list owned by the config-synthesis runbook"
+        dry_run:
+          required: true
+          schema:
+            type: object
+            description: "Dry-run validation status, explicit even when not attempted — shape owned by the config-synthesis runbook"
+            properties:
+              attempted: { type: boolean }
+              command: { type: string }
+              passed: { type: boolean }
+            required: [attempted]
       artifacts:
         config:
           required: true
@@ -92,6 +112,20 @@ outputs:
       required: true
       schema: { type: array, items: { type: string } }
       value: "${{ tasks.assemble_config.outputs.values.deviations }}"
+    launch_requirements:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.assemble_config.outputs.values.launch_requirements }}"
+    dry_run:
+      required: true
+      schema:
+        type: object
+        properties:
+          attempted: { type: boolean }
+          command: { type: string }
+          passed: { type: boolean }
+        required: [attempted]
+      value: "${{ tasks.assemble_config.outputs.values.dry_run }}"
   artifacts:
     config:
       ref: tasks.assemble_config.outputs.artifacts.config
