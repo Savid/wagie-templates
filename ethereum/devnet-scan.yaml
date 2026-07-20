@@ -360,7 +360,7 @@ outputs:
           required: [id, angle, summary]
       value: "${{ tasks.scan.outputs.values.findings }}"
   artifacts:
-    issues:
+    issues_full:
       ref: tasks.collate.outputs.artifacts.issues
     scan_findings:
       ref: tasks.scan.outputs.artifacts.findings

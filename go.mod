@@ -3,7 +3,7 @@ module github.com/savid/wagie-templates
 go 1.26.5
 
 require (
-	github.com/savid/wagie v0.0.14
+	github.com/savid/wagie v0.0.20
 	gopkg.in/yaml.v3 v3.0.1
 )
 
