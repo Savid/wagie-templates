@@ -180,6 +180,17 @@ outputs:
                 setup_summary:
                   type: object
                   description: Watch setup_summary copied whole — reproduction and reachability judge against it
+                  properties:
+                    fork_schedule:
+                      type: object
+                      description: Fork name to activation epoch
+                      additionalProperties: { type: number }
+                    blob_schedule:
+                      type: object
+                      description: Max blobs per block by fork name
+                      additionalProperties: { type: number }
+                    load: { type: array, items: { type: string }, description: Load generators or applied transaction load }
+                    builders: { type: array, items: { type: string } }
             confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
           required: [title, summary]
       value: "${{ tasks.run.outputs.values.issues }}"
@@ -218,7 +229,7 @@ outputs:
                 kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | experiment-triage | manual-review | publish | no-op }
                 reason: { type: string }
                 priority: { type: string, description: high | medium | low }
-                inputs: { type: object, description: Handles and query params only }
+                inputs: { type: object, description: "Handles and query params only, values stringified", additionalProperties: { type: string } }
                 success_condition: { type: string }
                 stop_condition: { type: string }
                 runbook_refs: { type: array, items: { type: string } }

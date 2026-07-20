@@ -1782,7 +1782,7 @@ outputs:
       value: "${{ inputs.values.metric_name }}"
     metric_direction:
       required: true
-      schema: { type: string, description: "Echoed metric direction (minimize|maximize), named to bind verbatim to the report's input of the same name" }
+      schema: { type: string, enum: [minimize, maximize], description: "Echoed metric direction, named to bind verbatim to the report's input of the same name" }
       value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
     metric_limit_set:
       required: true
