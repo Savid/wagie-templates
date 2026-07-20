@@ -41,7 +41,7 @@ inputs:
       schema: { type: number }
 tasks:
   frame:
-    quality-gate: "${{ has(outputs.values.scan_target) && size(outputs.values.scan_target) > 0 && has(outputs.values.objective) && size(outputs.values.objective) > 0 && has(outputs.values.window) && has(outputs.values.window.resolved) && outputs.values.window.resolved && has(outputs.values.window.start_time) && size(outputs.values.window.start_time) > 0 && has(outputs.values.window.end_time) && size(outputs.values.window.end_time) > 0 && has(outputs.values.window.start_slot) && has(outputs.values.window.end_slot) && outputs.values.window.end_slot >= outputs.values.window.start_slot }}"
+    quality-gate: "${{ has(outputs.values.scan_target) && size(outputs.values.scan_target) > 0 && outputs.values.scan_target.contains('runbooks://') && has(outputs.values.objective) && size(outputs.values.objective) > 0 && has(outputs.values.window) && has(outputs.values.window.resolved) && outputs.values.window.resolved && has(outputs.values.window.start_time) && size(outputs.values.window.start_time) > 0 && has(outputs.values.window.end_time) && size(outputs.values.window.end_time) > 0 && has(outputs.values.window.start_slot) && has(outputs.values.window.end_slot) && outputs.values.window.end_slot >= outputs.values.window.start_slot }}"
     instructions: |-
       Resolve the retained-data access and the concrete time window for the scan.
       Do not query for issues yet — just frame the target.
@@ -59,8 +59,9 @@ tasks:
       range (a block range only when one is honestly derivable — the ClickHouse
       runbook owns when it is not), the concrete data coordinates (query surface, resolved
       cluster, the network's own database, dataset), and explicit pointers to the
-      runbook that owns ClickHouse query discipline, the one that owns the fork
-      model and health thresholds, and the one that owns evidence discipline —
+      runbook that owns ClickHouse query discipline, the one that owns querying
+      the devnet's observability APIs over a past window, the one that owns the
+      fork model and health thresholds, and the one that owns evidence discipline —
       probes must keep the exact query behind each fact so collate can emit
       re-runnable evidence refs. Spell each pointer as a runnable command
       (`panda read runbooks://<stem>`), not a bare ref: a probe has only the
@@ -73,7 +74,10 @@ tasks:
       `window.start_slot`/`window.end_slot`, with `window.resolved: true`. When
       only `lookback` is given, floor the window's end to the last completed
       epoch boundary and set its start to that end minus `lookback` on the same
-      boundary, so the edges are re-derivable. Runs meant to be compared
+      boundary, so the edges are re-derivable. State the slot range as a closed
+      inclusive interval and derive any epoch range in the recipe from those same
+      slots — probes re-deriving their own edges disagree about coverage. Runs
+      meant to be compared
       MUST share explicit `start_time`/`end_time`: a bare `lookback` drifts with
       wall-clock time and makes two scans diverge for reasons that are not about
       the network.
