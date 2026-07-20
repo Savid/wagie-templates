@@ -309,6 +309,11 @@ tasks:
       output — coverage limitations are context for the reader, not issues.
       Emit handoff gaps in the feedback queue (the runbook that owns shaping
       investigation follow-ups), never embedded in issues.
+
+      The structured output has a hard size budget: keep each evidence item's
+      `detail` to a tight verbatim excerpt — its `ref` stays the exact
+      re-runnable command. Never emit placeholder or diagnostic values to get
+      a failing call through; report the problem honestly in `notes` instead.
     inputs:
       values:
         setup_summary:

@@ -140,8 +140,13 @@ tasks:
     instructions: |-
       Turn the scan findings into self-contained issue records over the window —
       judge here; the scan gathered facts. Outputs are the structured values
-      declared below, never an HTML page or bug board, even if a retrieved
-      runbook offers to build one.
+      declared below plus the full-detail issues artifact, never an HTML page
+      or bug board, even if a retrieved runbook offers to build one.
+
+      The structured `findings` input is only an index; the scan's full
+      evidence — exact queries and verbatim excerpts per finding id — is in
+      the `scan_findings` artifact file. Read it and judge from the full
+      detail, not the summaries.
 
       Resolve runbooks by meaning via `panda search runbooks "<need>"`: the
       runbook that owns collating watch issues for the judgment rules, the
@@ -151,6 +156,19 @@ tasks:
       and the one that owns evidence discipline. Handles carry the devnet's
       network id only — a retained-data scan has no enclave, sandbox, or
       snapshot.
+
+      Write the issue records at two depths:
+      - The `issues` artifact is the record of record — go deep, no size
+        budget: every issue in the issue-contract shape with unabridged
+        evidence (complete queries, verbatim excerpts) and the finding ids
+        it was built from. One JSON object: `issues`, `window`,
+        `scan_summary`.
+      - The structured `issues` values carry the same records with each
+        evidence item's `detail` cut to a tight excerpt (its `ref` stays the
+        exact re-runnable command) — depth belongs in the artifact. Never
+        emit placeholder or diagnostic values to get a failing call through;
+        if the report cannot be produced, say so in `scan_summary` and
+        return the issues you have.
 
       Emit handoff gaps in the feedback queue (the runbook that owns shaping
       investigation follow-ups), never embedded in issues.
@@ -177,15 +195,19 @@ tasks:
         findings:
           schema:
             type: array
+            description: Compact index into the scan_findings artifact
             items:
               type: object
               properties:
+                id: { type: string, description: Matches the finding's id in the scan_findings artifact }
                 angle: { type: string }
                 summary: { type: string }
-                evidence: { type: string }
                 severity: { type: string }
-              required: [angle, summary]
+              required: [id, angle, summary]
           value: "${{ tasks.scan.outputs.values.findings }}"
+      artifacts:
+        scan_findings:
+          ref: tasks.scan.outputs.artifacts.findings
     outputs:
       values:
         issues:
@@ -295,6 +317,16 @@ tasks:
                     blocked_by: { type: string }
                   required: [kind, reason, success_condition, stop_condition]
             required: [tasks]
+      artifacts:
+        issues:
+          required: true
+          contentType: application/json
+          description: >-
+            Full-detail issue records over the window — every issue in the
+            issue-contract shape with unabridged evidence (complete queries and
+            verbatim excerpts) and the scan finding ids each was built from.
+            The structured issues values are the same records with evidence
+            details cut to excerpts.
 outputs:
   values:
     issues:
@@ -317,12 +349,18 @@ outputs:
       required: true
       schema:
         type: array
+        description: Compact index into the scan_findings artifact — summaries only
         items:
           type: object
           properties:
+            id: { type: string, description: Matches the finding's id in the scan_findings artifact }
             angle: { type: string }
             summary: { type: string }
-            evidence: { type: string }
             severity: { type: string }
-          required: [angle, summary]
+          required: [id, angle, summary]
       value: "${{ tasks.scan.outputs.values.findings }}"
+  artifacts:
+    issues:
+      ref: tasks.collate.outputs.artifacts.issues
+    scan_findings:
+      ref: tasks.scan.outputs.artifacts.findings

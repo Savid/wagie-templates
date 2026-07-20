@@ -337,6 +337,12 @@ tasks:
       From the scoped hunt findings, state the single leading first-cause as one
       clear claim and assemble the evidence for it.
 
+      The structured `findings` input is only an index; the hunt's full
+      evidence — exact commands/queries and verbatim excerpts per finding id —
+      is in the `hunt_findings` artifact file. Read it and build the claim's
+      evidence from that full detail, carrying the re-runnable refs and
+      verbatim values forward, not the index summaries.
+
       Follow the runbook that owns root-causing a devnet issue for the claim
       and the one that owns evidence discipline for citations (resolve both via
       `panda search runbooks "<need>"`). If the findings do not support a
@@ -350,14 +356,15 @@ tasks:
         findings:
           schema:
             type: array
+            description: Compact index into the hunt_findings artifact
             items: &finding_schema
               type: object
               properties:
+                id: { type: string, description: Matches the finding's id in the hunt_findings artifact }
                 angle: { type: string }
-                summary: { type: string }
-                evidence: { type: string }
+                summary: { type: string, description: One to three sentences }
                 severity: { type: string }
-              required: [angle, summary]
+              required: [id, angle, summary]
           value: "${{ tasks.investigate.outputs.values.findings }}"
         coverage_summary:
           schema: { type: string }
@@ -365,6 +372,9 @@ tasks:
         reproduction:
           schema: *reproduction_schema
           value: "${{ tasks.reproduce.outputs.values.reproduction }}"
+      artifacts:
+        hunt_findings:
+          ref: tasks.investigate.outputs.artifacts.findings
     outputs:
       values:
         root_cause_claim:
@@ -442,6 +452,12 @@ tasks:
       bug board, or other rendered artifact, even if a retrieved runbook
       offers to build one.
 
+      The `hunt_findings` artifact file holds the hunt's full evidence —
+      exact commands/queries and verbatim excerpts per finding id. Draw
+      citations from it verbatim; keep each citation's `detail` to the
+      load-bearing excerpt (the `ref` stays the exact re-runnable command),
+      and never let the structured report balloon into an evidence dump.
+
       Assemble the report in the shape owned by the runbook that owns
       root-causing a devnet issue (via
       `panda search runbooks "root-cause a devnet issue"`), with the follow-up
@@ -513,6 +529,9 @@ tasks:
         source_findings:
           schema: { type: string }
           value: "${{ tasks.trace.outputs.values.source_findings }}"
+      artifacts:
+        hunt_findings:
+          ref: tasks.investigate.outputs.artifacts.findings
     outputs:
       values:
         report:
@@ -602,9 +621,15 @@ outputs:
       value: "${{ tasks.trace.outputs.values.reachability }}"
     findings:
       required: true
-      schema: { type: array, items: *finding_schema }
+      schema:
+        type: array
+        description: Compact index into the hunt_findings artifact — summaries only
+        items: *finding_schema
       value: "${{ tasks.investigate.outputs.values.findings }}"
     feedback:
       required: true
       schema: *feedback_schema
       value: "${{ tasks.report.outputs.values.feedback }}"
+  artifacts:
+    hunt_findings:
+      ref: tasks.investigate.outputs.artifacts.findings

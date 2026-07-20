@@ -258,14 +258,15 @@ require (
 	github.com/prometheus/sigv4 v0.4.1 // indirect
 	github.com/puzpuzpuz/xsync/v4 v4.5.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
-	github.com/savid/acp-go-amp v0.0.0-20260714020307-6c1308abbb94 // indirect
-	github.com/savid/acp-go-claude v0.0.0-20260713011902-02c4e741d7ab // indirect
-	github.com/savid/acp-go-codex v0.0.0-20260713011843-00fc151c9cbd // indirect
-	github.com/savid/acp-go-hermes v0.0.0-20260713014812-96c9b2d72713 // indirect
-	github.com/savid/acp-go-opencode v0.0.0-20260713031851-261cabaadb4a // indirect
-	github.com/savid/acp-go-pi v0.0.0-20260713012356-6aef2354c215 // indirect
+	github.com/savid/acp-go-amp v0.0.0-20260718144242-d4b37bf97027 // indirect
+	github.com/savid/acp-go-claude v0.0.0-20260718144242-74d18e5c2b93 // indirect
+	github.com/savid/acp-go-codex v0.0.0-20260718144309-59395ed0240a // indirect
+	github.com/savid/acp-go-hermes v0.0.0-20260718144329-800293e8adbc // indirect
+	github.com/savid/acp-go-opencode v0.0.0-20260718144242-9f6aca29c573 // indirect
+	github.com/savid/acp-go-pi v0.0.0-20260718144242-a8548ea4a4cb // indirect
 	github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
@@ -432,3 +433,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/savid/wagie => ../wagie-temp2

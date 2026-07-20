@@ -283,7 +283,7 @@ tasks:
             description: Human-readable note on any bench or test files that were scaffolded
   optimize:
     needs: [setup]
-    uses: dev.wagie/optimize-loop@2.0.0
+    uses: dev.wagie/optimize-loop@1.0.0
     inputs:
       values:
         objective:

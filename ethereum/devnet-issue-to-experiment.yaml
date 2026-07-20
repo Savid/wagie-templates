@@ -104,18 +104,18 @@ inputs:
       description: The investigation's validation verdict on that claim — vocabulary owned by the devnet adversarial-review runbook
       schema: { type: string }
     findings:
-      description: Hypothesis-hunt findings from the investigation, for triage context
+      description: Hypothesis-hunt finding summaries from the investigation, for triage context — an index of the investigation's hunt_findings artifact
       schema:
         type: array
         default: []
         items:
           type: object
           properties:
+            id: { type: string, description: Matches the finding's id in the investigation's hunt_findings artifact }
             angle: { type: string }
             summary: { type: string }
-            evidence: { type: string }
             severity: { type: string }
-          required: [angle, summary]
+          required: [id, angle, summary]
     repo_map:
       required: true
       description: >-
@@ -176,11 +176,11 @@ tasks:
             items:
               type: object
               properties:
+                id: { type: string }
                 angle: { type: string }
                 summary: { type: string }
-                evidence: { type: string }
                 severity: { type: string }
-              required: [angle, summary]
+              required: [id, angle, summary]
           value: "${{ inputs.values.?findings.orValue([]) }}"
     outputs:
       values:
