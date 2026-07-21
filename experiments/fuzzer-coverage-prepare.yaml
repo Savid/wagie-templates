@@ -1,0 +1,340 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/fuzzer-coverage-prepare
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a coverage-guided fuzzer should be tuned through snapshot lineage but no
+  measurement harness is baked yet: given the fuzzer repo, a toolchain-ready base
+  snapshot, and the runbook owning the fuzzer's coverage procedure, an agent clones
+  and builds the fuzzer in an ephemeral sandbox, authors a budgeted
+  generate-and-replay coverage benchmark plus a build-and-test correctness gate,
+  verifies the harness with executed probes (measurement sensitivity, frozen
+  denominator, corpus safety), snapshots the prepared state, and emits the baked
+  harness inputs dev.wagie/fuzzer-coverage-snapshot-loop consumes (snapshot_id,
+  workdir, target_files, frozen_files, experiment_command, correctness_command,
+  bench_seed_env — the caller still supplies coverage_scope and runbook). Bails
+  cleanly with `prepared` false rather than hand off a harness it does not trust;
+  downstream tasks must gate on `if: prepared`.
+tags: ["fuzzing", "coverage", "prepare", "harness", "benchmark", "snapshot", "corpus", "generator", "fuzzer", "experiment"]
+examples:
+  - "bake a coverage benchmark for fuzzyvm into a compute snapshot"
+  - "prepare a fuzzer coverage experiment from a repo and a runbook"
+  - "build the scoring surface for a snapshot coverage hillclimb"
+  - "author a budgeted generate and replay coverage harness"
+  - "turn a fuzzer repo into a measurable coverage experiment"
+inputs:
+  values:
+    gh_repo:
+      required: true
+      description: "Fuzzer repository to prepare, as `org/repo` or a clone URL. Must be reachable from inside the sandbox; private repos need credentials already present in the base snapshot."
+      schema: { type: string }
+    base_snapshot_id:
+      required: true
+      description: Panda-compute snapshot of a toolchain-ready base (language toolchain, git, panda-relevant CLIs). The prepared snapshot is derived from it; the base is never mutated. Pre-warmed module/build caches turn the cold first build into seconds.
+      schema: { type: string }
+    coverage_scope:
+      required: true
+      description: "Coverage denominator the benchmark replays against, in the fuzzer toolchain's terms (e.g. a Go coverpkg pattern like `github.com/ethereum/go-ethereum/core/vm/...`). Baked into the benchmark and held fixed."
+      schema: { type: string }
+    runbook:
+      required: true
+      description: "How to locate the runbook owning this fuzzer's coverage-improvement procedure — a `panda search runbooks \"<need>\"` query or a document URL. It carries the fuzzer's operational facts (corpus locking, cache resets, replay flags, generator layout) that this template does not restate."
+      schema: { type: string }
+    ref:
+      description: Branch, tag, or commit SHA to check out. Empty uses the repository's default branch.
+      schema: { type: string, default: "" }
+    generation_budget:
+      description: Fixed wall-clock corpus-generation budget one benchmark invocation spends before replaying for coverage. The baked benchmark enforces it; every downstream measurement inherits it.
+      schema: { type: string, default: 30m }
+    target_hint:
+      description: Optional guidance on where the generator surface lives when the repo layout is unusual (paths, package names). Empty means derive it from the runbook and repo conventions.
+      schema: { type: string, default: "" }
+    compute_commands:
+      description: Optional pre-verified panda-compute CLI cheatsheet from a prior run. When supplied the agent spot-checks one pattern and adopts it; the verified cheatsheet is echoed on output. Empty derives fresh from the runbook that owns the sandbox lifecycle.
+      schema: { type: string, default: "" }
+    sandbox_ttl:
+      description: Lease for the ephemeral preparation sandbox. Must cover clone, build, harness authoring, and the guard battery — several budgeted measurements at full generation budget.
+      schema: { type: string, default: 6h }
+    prepared_snapshot_ttl:
+      description: TTL for the prepared snapshot handed to the loop. Only needs to outlive the downstream run's setup; the loop re-pins its own durable result at finalize.
+      schema: { type: string, default: 24h }
+tasks:
+  prepare:
+    quality-gate: "${{ has(outputs.values.prepared) && has(outputs.values.harness_report) && size(outputs.values.harness_report) > 0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && (outputs.values.prepared == false || (has(outputs.values.snapshot_id) && size(outputs.values.snapshot_id) > 0 && has(outputs.values.workdir) && size(outputs.values.workdir) > 0 && has(outputs.values.target_files) && size(outputs.values.target_files) > 0 && has(outputs.values.frozen_files) && size(outputs.values.frozen_files) > 0 && has(outputs.values.experiment_command) && size(outputs.values.experiment_command) > 0 && has(outputs.values.correctness_command) && size(outputs.values.correctness_command) > 0)) }}"
+    instructions: |-
+      Turn a fuzzer repository into a snapshot with a trustworthy coverage
+      measurement harness baked in, and emit exactly the inputs the snapshot
+      coverage loop consumes. You are building the frozen scoring surface an
+      untrusted optimizer will later be measured against; a benchmark that can
+      be gamed or a gate that does not pin health silently corrupts every
+      downstream round. When you cannot establish a trustworthy harness, stop
+      and return `prepared` false with the concrete blocker in
+      `harness_report` — never hand off a harness you do not trust.
+
+      Establish the sandbox command patterns first. If
+      `provided_compute_commands` is non-empty, spot-check one cheap read-only
+      pattern and adopt the set; otherwise derive the patterns from the runbook
+      that owns the panda-compute sandbox lifecycle (find it via
+      `panda search runbooks "compute sandbox snapshot lifecycle"`). Whatever
+      you end up trusting, echo it verbatim on the `compute_commands` output so
+      the downstream loop reuses it, and use only those patterns for every
+      sandbox operation below.
+
+      Step 1 — Read the domain runbook. Locate it via `runbook_ref` and read
+      it before touching the repo. It owns the fuzzer's operational facts you
+      must not rediscover by trial and error: how the corpus store locks, how
+      generation and replay are sequenced, which caches bias repeat
+      measurements and how to reset them, which flags drive replay-under-
+      coverage, and where the generator surface lives. Everything below is the
+      generic contract; the runbook supplies the fuzzer-specific bindings.
+
+      Step 2 — Boot and build. Create a sandbox from `base_snapshot_id` with
+      `sandbox_ttl` (recognisable name, deterministic idempotency key derived
+      from `gh_repo` + `ref` so a retry recomputes the same key and reclaims an
+      orphan, never a random suffix). Clone `gh_repo` at `ref` (default branch
+      when empty) into a fresh workdir, fetch dependencies, and reach a green
+      build. If the repo cannot be cloned or built, bail with the reason.
+
+      Step 3 — Resolve the generator surface. From the runbook, the repo, and
+      `target_hint`, list the workdir-relative files or directories the
+      optimizer may edit — the program generator and its input builders.
+      These become `target_files`; keep them tight. Anything the scoring
+      reads as input never appears there.
+
+      Step 4 — Author the benchmark. Write one script (committed to the repo,
+      part of the frozen surface) that performs a single self-contained
+      measurement:
+      - reset any coverage-guided fuzzing cache the runbook names, so every
+        invocation starts from the same guided state; verify the reset in Step
+        7's cache-reset guard rather than trusting the runbook named them all;
+      - read the generation seed from an environment variable (choose a name,
+        e.g. `FUZZ_SEED`, and report it as `bench_seed_env`), falling back to a
+        fixed default when unset so the script stays runnable by hand. The loop
+        rotates this seed per round and shares it across the candidate and
+        incumbent arms, so the generation RNG cancels in the paired difference
+        instead of masquerading as a code effect; a benchmark with no seed
+        input hands every measurement that variance. The generator itself is
+        frozen — only the seed varies;
+      - create a fresh scratch corpus in a location of its own choosing —
+        never a pre-existing corpus store; treat any persistent corpus the
+        runbook names as read-only and out of bounds;
+      - run generation for exactly `generation_budget` of wall-clock and
+        terminate at the budget even if generation blocks (the equal budget per
+        invocation is what makes two coverage numbers comparable, and a change
+        that stalls generation must not stretch the window into more coverage —
+        enforce both in the script, not by convention);
+      - replay the scratch corpus under coverage instrumentation against
+        `coverage_scope` as the denominator;
+      - print the total statement coverage as exactly one final
+        `coverage_pct: <number>` line — if the harness can print a second
+        metric line, it can lie;
+      - remove its scratch corpus and any profiles it wrote, and exit
+        non-zero on any internal failure rather than emitting a number it
+        does not trust.
+      Sequence generation and replay per the runbook's locking rules. The
+      script must be runnable back-to-back from a clean checkout with no
+      manual state.
+
+      Step 5 — Author the correctness gate. `correctness_command` runs the
+      language's build plus the repo's own tests covering the generator, and
+      a smoke check that a small generation batch produces valid programs
+      (the runbook says what valid means for this fuzzer). Non-zero exit on
+      any failure, bounded runtime, caches disabled so a stale PASS proves
+      nothing.
+
+      Step 6 — Partition frozen vs target. `frozen_files` is everything that
+      defines or feeds the score: the benchmark script, dependency manifests
+      and lockfiles (the coverage denominator is pinned there — a candidate
+      that bumps the measured codebase's pin changes the denominator and
+      fakes a delta), fixtures, and any config the scoring reads. The
+      invariant: nothing in `frozen_files` appears in `target_files`, and
+      anything either command reads as input is frozen.
+
+      Step 7 — Verify the harness with executed probes. Every guard is a run
+      command and a comparison, not a judgement. Author all probes first,
+      then run the timing-sensitive ones as one interleaved campaign with a
+      single results file. The rule: every guard whose verdict is a coverage
+      comparison (baseline, no-op, A/A, sensitivity) runs at the real
+      generation budget, interleaved, because they certify the acceptance rule
+      the loop will apply. The remaining guards (build, timeout, denominator,
+      corpus-safety, budget-enforcement, stale-lock, cache-reset) have a
+      non-coverage verdict and fail fast — a broken build, a tripped integrity
+      check, or a killed run resolves without a full generation window — so
+      their cost is incidental and they need no budget override.
+      Waiting happens only inside execs — chain short in-guest wait loops
+      (each bounded by the sync-exec ceiling the sandbox-lifecycle runbook
+      states) and schedule the next poll at the campaign's own ETA, not on a
+      fixed interval. If any guard fails, bail naming it.
+      - Baseline measures: the benchmark emits a clean, parseable
+        `coverage_pct` line exactly once, from the untouched checkout, on
+        back-to-back runs; record the observed spread in `harness_report`.
+      - Baseline is healthy: `correctness_command` exits zero on the
+        untouched code.
+      - Build guard: a syntax error in a target file makes both commands
+        fail — a harness that scores a stale binary scores nothing.
+      - Timeout guard: an infinite loop planted in the generator makes
+        `correctness_command` terminate non-zero within its bound.
+      - Budget-enforcement guard: plant a generator change that blocks or
+        loops mid-generation and confirm `experiment_command` still terminates
+        near `generation_budget` with a non-zero exit — a benchmark that lets a
+        hang stretch the generation window turns a stall into free coverage.
+      - Stale-lock / crash-recovery guard: kill `experiment_command` mid-run,
+        then run it again immediately and require success — a leftover corpus
+        lock or half-written state from a killed round must not wedge the next
+        one (a fresh scratch path per invocation is the usual fix).
+      - Cache-reset guard: confirm the coverage-guided fuzzing cache Step 4
+        resets is actually absent or recreated per invocation (an A/A variant
+        that primes the cache between arms must not shift coverage) — a cache
+        the runbook under-named would otherwise bias every repeat measurement.
+      - No-op guard: a semantically neutral edit to a target file does not
+        move coverage beyond the observed spread (run at the real budget).
+      - A/A guard: measure the untouched baseline against an identical copy
+        of itself, interleaved, and apply an acceptance rule of the same form
+        the loop uses (paired mean difference against a noise threshold derived
+        from the A/A spread — you approximate the loop's rule here, you do not
+        share its exact epsilon). Identical code must not beat itself; if it
+        can, the loop will promote noise.
+      - Sensitivity control (the one probe that proves the harness measures
+        anything): disable or zero-weight one generator pathway the runbook
+        says is exercised — coverage must drop detectably under the
+        acceptance rule, and restoring it must recover the number. The
+        threshold this drop had to clear is the harness's minimum detectable
+        effect; report it. If a deliberate generator lobotomy is invisible,
+        a real improvement will be too — bail.
+      - Denominator guard: in a scratch copy, alter the dependency pin of
+        the measured codebase and confirm the change is caught — the
+        benchmark refuses to run or the frozen manifests make the edit an
+        integrity violation. A silent denominator change is the cheapest
+        fake win available.
+      - Corpus-safety guard: point the environment's persistent corpus
+        location (as the runbook defines it) at a canary copy, run the
+        benchmark, and confirm the canary is byte-identical after — the
+        benchmark must be provably incapable of eating the user's corpus.
+      Revert every probe edit and verify the checkout is clean with the VCS
+      (empty diff), not from memory.
+
+      Step 8 — Snapshot and emit. Snapshot the clean prepared sandbox with
+      `prepared_snapshot_ttl` (deterministic idempotency key; on a key
+      conflict resolve the existing snapshot id and reuse it). Resolve the
+      concrete id as `snapshot_id`, fire-and-forget delete the sandbox, and
+      return every loop input (`snapshot_id`, `workdir`, `target_files`,
+      `frozen_files`, `experiment_command`, `correctness_command`,
+      `bench_seed_env`), the forwarded `compute_commands`, `prepared` true, and
+      a `harness_report` recording what was built, every guard result, the
+      observed baseline spread, and the measured minimum detectable effect — a
+      reader must be able to tell from the report alone whether this harness can
+      see the win it will be asked to find.
+
+      Requires a worker with shell access to the panda CLI, compute
+      datasource credentials, and the ability to reach and clone the
+      repository.
+    inputs:
+      values:
+        gh_repo:
+          schema: { type: string }
+          value: "${{ inputs.values.gh_repo }}"
+        base_snapshot_id:
+          schema: { type: string }
+          value: "${{ inputs.values.base_snapshot_id }}"
+        coverage_scope:
+          schema: { type: string }
+          value: "${{ inputs.values.coverage_scope }}"
+        runbook_ref:
+          schema: { type: string, description: How to locate the runbook owning the fuzzer's coverage procedure }
+          value: "${{ inputs.values.runbook }}"
+        ref:
+          schema: { type: string }
+          value: "${{ inputs.values.?ref.orValue('') }}"
+        generation_budget:
+          schema: { type: string }
+          value: "${{ inputs.values.?generation_budget.orValue('30m') }}"
+        target_hint:
+          schema: { type: string, description: Optional guidance on where the generator surface lives (empty means derive it) }
+          value: "${{ inputs.values.?target_hint.orValue('') }}"
+        provided_compute_commands:
+          schema: { type: string, description: Pre-verified cheatsheet from a previous run (empty means discover fresh) }
+          value: "${{ inputs.values.?compute_commands.orValue('') }}"
+        sandbox_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('6h') }}"
+        prepared_snapshot_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?prepared_snapshot_ttl.orValue('24h') }}"
+    outputs:
+      values:
+        prepared:
+          required: true
+          schema: { type: boolean, description: Whether a trustworthy harness was produced; false means the agent bailed and harness_report holds the blocker }
+        snapshot_id:
+          required: true
+          schema: { type: string, description: "Snapshot with the fuzzer and harness baked, ready for the coverage loop (empty when prepared is false)" }
+        workdir:
+          required: true
+          schema: { type: string, description: Absolute in-guest path to the fuzzer repo root }
+        target_files:
+          required: true
+          schema: { type: array, minItems: 1, items: { type: string }, description: "Workdir-relative generator surface the optimizer may edit (only consumed downstream when prepared is true; the run is if:prepared-gated)" }
+        frozen_files:
+          required: true
+          schema: { type: array, items: { type: string }, description: "Workdir-relative scoring surface (benchmark script, dependency manifests, fixtures)" }
+        experiment_command:
+          required: true
+          schema: { type: string, description: "In-guest command run from workdir performing one budgeted generate-and-replay measurement, emitting a final coverage_pct line" }
+        correctness_command:
+          required: true
+          schema: { type: string, description: In-guest gate command exiting non-zero when the fuzzer is unhealthy or the generator emits invalid programs }
+        bench_seed_env:
+          required: true
+          schema: { type: string, description: "Environment variable the baked benchmark reads its generation seed from (empty when the benchmark takes no seed); bind verbatim to the loop's bench_seed_env" }
+        compute_commands:
+          required: true
+          schema: { type: string, description: Verified panda-compute CLI cheatsheet for the downstream loop to reuse verbatim }
+        harness_report:
+          required: true
+          schema: { type: string, description: "Markdown record of what was built and every guard result, including baseline spread and the measured minimum detectable effect (or the bail reason)" }
+outputs:
+  values:
+    prepared:
+      required: true
+      schema: { type: boolean, description: "Whether a trustworthy harness was produced. Every downstream task consuming these outputs must gate on it (if: prepared) — when false the loop inputs are empty sentinels and harness_report holds the blocker" }
+      value: "${{ tasks.prepare.outputs.values.prepared }}"
+    snapshot_id:
+      required: true
+      schema: { type: string, description: "Snapshot ready to bind verbatim to dev.wagie/fuzzer-coverage-snapshot-loop's snapshot_id (empty when prepared is false)" }
+      value: "${{ tasks.prepare.outputs.values.snapshot_id }}"
+    workdir:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.workdir }}"
+    target_files:
+      required: true
+      schema: { type: array, minItems: 1, items: { type: string } }
+      value: "${{ tasks.prepare.outputs.values.target_files }}"
+    frozen_files:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.prepare.outputs.values.frozen_files }}"
+    experiment_command:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.experiment_command }}"
+    correctness_command:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.correctness_command }}"
+    bench_seed_env:
+      required: true
+      schema: { type: string, description: "Environment variable the baked benchmark reads its generation seed from (empty when it takes none); binds verbatim to fuzzer-coverage-snapshot-loop's bench_seed_env" }
+      value: "${{ tasks.prepare.outputs.values.bench_seed_env }}"
+    compute_commands:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.compute_commands }}"
+    harness_report:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.harness_report }}"

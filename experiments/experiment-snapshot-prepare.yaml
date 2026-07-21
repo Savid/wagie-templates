@@ -1,6 +1,6 @@
 kind: Template
 schemaVersion: wagie/v1
-id: dev.wagie/experiment-prepare
+id: dev.wagie/experiment-snapshot-prepare
 version: "1.0.0"
 license: MIT
 authors: [savid]

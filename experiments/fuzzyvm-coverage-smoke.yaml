@@ -1,0 +1,120 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/fuzzyvm-coverage-smoke
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use to smoke-test the fuzzer coverage workflow end to end against FuzzyVM with
+  zero required inputs: every knob defaults to the FuzzyVM repo, the geth core/vm
+  coverage scope, the FuzzyVM coverage-improvement runbook, and deliberately tiny
+  budgets (short generation window, two rounds) so a full loop → verify → report
+  pass completes cheaply. Validates wiring, not science — the tiny budgets are
+  below any statistical floor, and a low-coverage sanity-reject at setup is an
+  acceptable smoke outcome. A defaults-baked convenience wrapper around
+  dev.wagie/fuzzer-coverage-loop for sanity runs — real campaigns call that
+  template (git path) or fuzzer-coverage-snapshot-pipeline (snapshot path)
+  directly with honest budgets; this wrapper is disposable.
+tags: ["fuzzyvm", "fuzzing", "coverage", "evm", "smoke-test", "experiment"]
+examples:
+  - "smoke test the fuzzyvm coverage loop end to end"
+  - "run the fuzzer coverage pipeline with all defaults"
+  - "sanity check coverage experiment wiring against fuzzyvm"
+  - "cheap end to end fuzzyvm coverage run with tiny budgets"
+inputs:
+  values:
+    repo_url:
+      description: FuzzyVM repository (or a fork) to tune. Worker must have fetch and push credentials.
+      schema: { type: string, default: "https://github.com/MariusVanDerWijden/FuzzyVM" }
+    base_branch:
+      description: Branch to start from.
+      schema: { type: string, default: master }
+    result_branch:
+      description: Branch the kept generator changes are pushed to.
+      schema: { type: string, default: "autoresearch/fuzzyvm-coverage-smoke" }
+    coverage_scope:
+      description: Coverage denominator the corpus is replayed against, held fixed all run.
+      schema: { type: string, default: "github.com/ethereum/go-ethereum/core/vm/..." }
+    runbook:
+      description: Where the FuzzyVM coverage-improvement runbook lives (URL or a `panda search runbooks` query).
+      schema: { type: string, default: "https://docmost.indenwolken.xyz/s/pandalabs/p/fuzzy-vm-self-improvement-workflow-VmXzZhNtqB" }
+    generation_budget:
+      description: Wall-clock corpus-generation budget per benchmark invocation. Smoke-sized by default; a real campaign wants 30m or more.
+      schema: { type: string, default: 5m }
+    max_iterations:
+      description: Round cap. Smoke-sized by default.
+      schema: { type: number, default: 2 }
+    measurement_runs:
+      description: Coverage measurements per candidate (median scored). Smoke-sized by default.
+      schema: { type: number, default: 2 }
+    replication_runs:
+      description: Verification measurements per side. Smoke-sized by default.
+      schema: { type: number, default: 2 }
+tasks:
+  run:
+    uses: dev.wagie/fuzzer-coverage-loop@1.0.0
+    inputs:
+      values:
+        repo_url:
+          value: "${{ inputs.values.?repo_url.orValue('https://github.com/MariusVanDerWijden/FuzzyVM') }}"
+        base_branch:
+          value: "${{ inputs.values.?base_branch.orValue('master') }}"
+        result_branch:
+          value: "${{ inputs.values.?result_branch.orValue('autoresearch/fuzzyvm-coverage-smoke') }}"
+        coverage_scope:
+          value: "${{ inputs.values.?coverage_scope.orValue('github.com/ethereum/go-ethereum/core/vm/...') }}"
+        runbook:
+          value: "${{ inputs.values.?runbook.orValue('https://docmost.indenwolken.xyz/s/pandalabs/p/fuzzy-vm-self-improvement-workflow-VmXzZhNtqB') }}"
+        generation_budget:
+          value: "${{ inputs.values.?generation_budget.orValue('5m') }}"
+        max_iterations:
+          value: "${{ inputs.values.?max_iterations.orValue(2.0) }}"
+        patience:
+          value: "${{ 1.0 }}"
+        measurement_runs:
+          value: "${{ inputs.values.?measurement_runs.orValue(2.0) }}"
+        replication_runs:
+          value: "${{ inputs.values.?replication_runs.orValue(2.0) }}"
+outputs:
+  values:
+    verdict:
+      required: true
+      schema: { type: string, enum: [accept, reject, suspicious] }
+      value: "${{ tasks.run.outputs.values.verdict }}"
+    headline:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.headline }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.summary }}"
+    baseline_metric:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.run.outputs.values.baseline_metric }}"
+    best_metric:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.run.outputs.values.best_metric }}"
+    improvement_pct:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.run.outputs.values.improvement_pct }}"
+    measured_improvement_pct:
+      required: true
+      schema: { type: number, description: Improvement measured by independent replication (the honest figure) }
+      value: "${{ tasks.run.outputs.values.measured_improvement_pct }}"
+    exit_reason:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.exit_reason }}"
+    result_branch_url:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.run.outputs.values.result_branch_url }}"
+  artifacts:
+    report:
+      ref: tasks.run.outputs.artifacts.report

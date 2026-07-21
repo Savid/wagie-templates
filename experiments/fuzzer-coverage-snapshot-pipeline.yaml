@@ -1,0 +1,211 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/fuzzer-coverage-snapshot-pipeline
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use to run the snapshot-lineage fuzzer coverage workflow end to end from just a
+  repo, a base snapshot, and a runbook: bakes the coverage harness into a prepared
+  snapshot (dev.wagie/fuzzer-coverage-prepare), then hillclimbs the generator
+  through snapshot lineage and renders the report
+  (dev.wagie/fuzzer-coverage-snapshot-loop). When preparation bails, the run is
+  skipped and every result output falls back to an empty sentinel with the blocker
+  in harness_report — check `prepared` first, and expect no report artifact on a
+  bail. A repo-first convenience chain; callers who already hold a prepared
+  snapshot should use the snapshot loop directly.
+tags: ["fuzzing", "coverage", "pipeline", "snapshot", "corpus", "generator", "fuzzer", "evm", "fuzzyvm", "experiment"]
+examples:
+  - "prepare a fuzzer coverage snapshot then hillclimb it end to end"
+  - "repo to coverage report through snapshot lineage"
+  - "bake the harness and run the fuzzyvm coverage loop in one shot"
+  - "full snapshot coverage pipeline from a fuzzer repo and runbook"
+inputs:
+  values:
+    gh_repo:
+      required: true
+      description: "Fuzzer repository to prepare and tune, as `org/repo` or a clone URL."
+      schema: { type: string }
+    base_snapshot_id:
+      required: true
+      description: Toolchain-ready panda-compute base snapshot the fuzzer is cloned into during preparation.
+      schema: { type: string }
+    coverage_scope:
+      required: true
+      description: Coverage denominator baked into the benchmark and held fixed all run.
+      schema: { type: string }
+    runbook:
+      required: true
+      description: "How workers locate the runbook owning this fuzzer's coverage-improvement procedure (a `panda search runbooks` query or a document URL)."
+      schema: { type: string }
+    ref:
+      description: Branch, tag, or commit SHA to check out during preparation. Empty uses the default branch.
+      schema: { type: string, default: "" }
+    generation_budget:
+      description: Fixed wall-clock corpus-generation budget per benchmark invocation, enforced by the baked benchmark.
+      schema: { type: string, default: 30m }
+    target_hint:
+      description: Optional guidance on where the generator surface lives when the repo layout is unusual. Empty derives it from the runbook and repo.
+      schema: { type: string, default: "" }
+    strategy_bias:
+      description: Optional free-text proposal bias for the loop (e.g. `focus on precompile input vectors`). Empty adds nothing.
+      schema: { type: string, default: "" }
+    max_iterations:
+      description: Hard cap on loop rounds.
+      schema: { type: number, default: 10 }
+    patience:
+      description: Stop after this many consecutive rounds with no accepted improvement.
+      schema: { type: number, default: 3 }
+    measurement_runs:
+      description: "Candidate/incumbent pairs measured per round. The default matches the loop's statistical floor (paired-difference stderr is unreliable below 5); to save wall-clock, shrink generation_budget rather than this."
+      schema: { type: number, default: 5 }
+    sandbox_ttl:
+      description: Lease for each of the loop's ephemeral sandboxes; must cover one full round of paired budgeted measurements.
+      schema: { type: string, default: 6h }
+    compute_commands:
+      description: Optional pre-verified panda-compute CLI cheatsheet; preparation verifies it and the loop reuses the verified copy.
+      schema: { type: string, default: "" }
+tasks:
+  prepare:
+    uses: dev.wagie/fuzzer-coverage-prepare@1.0.0
+    inputs:
+      values:
+        gh_repo:
+          value: "${{ inputs.values.gh_repo }}"
+        base_snapshot_id:
+          value: "${{ inputs.values.base_snapshot_id }}"
+        coverage_scope:
+          value: "${{ inputs.values.coverage_scope }}"
+        runbook:
+          value: "${{ inputs.values.runbook }}"
+        ref:
+          value: "${{ inputs.values.?ref.orValue('') }}"
+        generation_budget:
+          value: "${{ inputs.values.?generation_budget.orValue('30m') }}"
+        target_hint:
+          value: "${{ inputs.values.?target_hint.orValue('') }}"
+        compute_commands:
+          value: "${{ inputs.values.?compute_commands.orValue('') }}"
+  run:
+    needs: [prepare]
+    if: "${{ tasks.prepare.outputs.values.prepared }}"
+    uses: dev.wagie/fuzzer-coverage-snapshot-loop@1.0.0
+    inputs:
+      values:
+        snapshot_id:
+          value: "${{ tasks.prepare.outputs.values.snapshot_id }}"
+        workdir:
+          value: "${{ tasks.prepare.outputs.values.workdir }}"
+        target_files:
+          value: "${{ tasks.prepare.outputs.values.target_files }}"
+        experiment_command:
+          value: "${{ tasks.prepare.outputs.values.experiment_command }}"
+        coverage_scope:
+          value: "${{ inputs.values.coverage_scope }}"
+        runbook:
+          value: "${{ inputs.values.runbook }}"
+        frozen_files:
+          value: "${{ tasks.prepare.outputs.values.frozen_files }}"
+        correctness_command:
+          value: "${{ tasks.prepare.outputs.values.correctness_command }}"
+        bench_seed_env:
+          value: "${{ tasks.prepare.outputs.values.bench_seed_env }}"
+        strategy_bias:
+          value: "${{ inputs.values.?strategy_bias.orValue('') }}"
+        max_iterations:
+          value: "${{ inputs.values.?max_iterations.orValue(10.0) }}"
+        patience:
+          value: "${{ inputs.values.?patience.orValue(3.0) }}"
+        measurement_runs:
+          value: "${{ inputs.values.?measurement_runs.orValue(5.0) }}"
+        sandbox_ttl:
+          value: "${{ inputs.values.?sandbox_ttl.orValue('6h') }}"
+        compute_commands:
+          value: "${{ tasks.prepare.outputs.values.compute_commands }}"
+outputs:
+  values:
+    prepared:
+      required: true
+      schema: { type: boolean, description: Whether preparation produced a trustworthy harness; when false the run was skipped and every result below is an empty sentinel }
+      value: "${{ tasks.prepare.outputs.values.prepared }}"
+    harness_report:
+      required: true
+      schema: { type: string, description: "Preparation record — every guard result and the measured minimum detectable effect, or the bail blocker" }
+      value: "${{ tasks.prepare.outputs.values.harness_report }}"
+    headline:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.headline : 'UNPREPARED: harness preparation bailed; see harness_report' }}"
+    result_snapshot_id:
+      required: true
+      schema: { type: string, description: Durably pinned snapshot of the best generator state (empty when preparation bailed) }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.result_snapshot_id : '' }}"
+    confirmed:
+      required: true
+      schema: { type: boolean, description: Whether the winning coverage reproduced on a cold boot (meaningful only when prepared) }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.confirmed : false }}"
+    reconciled:
+      required: true
+      schema: { type: boolean, description: Whether accepted gains add up to the shipped result (meaningful only when prepared) }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.reconciled : false }}"
+    baseline_metric:
+      required: true
+      schema: { type: number, description: Coverage percentage of the untouched generator's corpus (0 when preparation bailed) }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.baseline_metric : 0.0 }}"
+    best_metric:
+      required: true
+      schema: { type: number, description: Best coverage percentage the loop accepted (0 when preparation bailed) }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.best_metric : 0.0 }}"
+    improvement_pct:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.improvement_pct : 0.0 }}"
+    improved:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.improved : false }}"
+    exit_reason:
+      required: true
+      schema: { type: string, description: "One of saturated, plateau, patience, improvement, max_iterations (empty when preparation bailed)" }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.exit_reason : '' }}"
+    rounds_completed:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.rounds_completed : 0.0 }}"
+    accepted_count:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.accepted_count : 0.0 }}"
+    trials:
+      required: true
+      schema:
+        type: array
+        description: Typed trial ledger, one record per round in run order (empty when preparation bailed)
+        items:
+          type: object
+          properties:
+            round: { type: number }
+            hypothesis: { type: string }
+            commit: { type: string }
+            snapshot_id: { type: string }
+            status: { type: string, enum: [pass, fail, invalid, suspicious] }
+            metric: { type: number }
+            spread: { type: number }
+            paired_gain: { type: number }
+            paired_gain_stderr: { type: number }
+            best_after: { type: number }
+            decision_source: { type: string, enum: [auto, agent] }
+            measurement_note: { type: string }
+            interpretation: { type: string }
+            next_action: { type: string }
+          required: [round, hypothesis, status, interpretation]
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.trials : [] }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.prepare.outputs.values.prepared ? tasks.run.outputs.values.summary : '' }}"
+  artifacts:
+    report:
+      ref: tasks.run.outputs.artifacts.report

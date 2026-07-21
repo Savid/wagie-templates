@@ -31,6 +31,7 @@ inputs:
               category: { type: string, description: Failure mode — enum owned by the issue-contract runbook }
               layer: { type: string, description: consensus | execution | network | tooling | cross-layer }
               spread: { type: string, description: single-client | subset | all-clients | network-wide | unknown }
+              severity: { type: string, description: "Impact rank critical | major | minor — distinct from confidence; scale owned by the issue-contract runbook" }
           first_bad:
             type: object
             description: Earliest artifact that explains later symptoms
@@ -374,7 +375,7 @@ tasks:
           value: "${{ tasks.reproduce.outputs.values.reproduction }}"
       artifacts:
         hunt_findings:
-          ref: tasks.investigate.outputs.artifacts.findings
+          ref: tasks.investigate.outputs.artifacts.findings_full
     outputs:
       values:
         root_cause_claim:
@@ -531,7 +532,7 @@ tasks:
           value: "${{ tasks.trace.outputs.values.source_findings }}"
       artifacts:
         hunt_findings:
-          ref: tasks.investigate.outputs.artifacts.findings
+          ref: tasks.investigate.outputs.artifacts.findings_full
     outputs:
       values:
         report:
@@ -632,4 +633,4 @@ outputs:
       value: "${{ tasks.report.outputs.values.feedback }}"
   artifacts:
     hunt_findings:
-      ref: tasks.investigate.outputs.artifacts.findings
+      ref: tasks.investigate.outputs.artifacts.findings_full

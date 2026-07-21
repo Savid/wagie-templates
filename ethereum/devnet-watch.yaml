@@ -368,6 +368,7 @@ tasks:
                     category: { type: string, description: Failure mode — enum owned by the issue-contract runbook }
                     layer: { type: string, description: consensus | execution | network | tooling | cross-layer }
                     spread: { type: string, description: single-client | subset | all-clients | network-wide | unknown }
+                    severity: { type: string, description: "Impact rank critical | major | minor — distinct from confidence; scale owned by the issue-contract runbook" }
                 first_bad:
                   type: object
                   description: Earliest artifact that explains later symptoms
