@@ -127,6 +127,10 @@ tasks:
         blocks — equal budget per invocation is what makes two numbers
         comparable, and a stall must not buy coverage. The loop leaves this env
         unset (full budget); Step 7 sets it short;
+      - pin generation and replay parallelism to a FIXED absolute value (the
+        runbook names it), never a machine-relative expression like NumCPU-2 —
+        wall-clock-budgeted coverage tracks program count, so variable
+        parallelism makes the number depend on the box, not the code;
       - replay the scratch corpus under coverage instrumentation against
         `coverage_scope` as the denominator;
       - print the total statement coverage as exactly one final
