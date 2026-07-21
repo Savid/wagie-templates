@@ -158,72 +158,64 @@ tasks:
       invariant: nothing in `frozen_files` appears in `target_files`, and
       anything either command reads as input is frozen.
 
-      Step 7 — Verify the harness with executed probes. Every guard is a run
-      command and a comparison, not a judgement. Author all probes first,
-      then run the timing-sensitive ones as one interleaved campaign with a
-      single results file. Coverage-verdict guards (baseline, no-op, A/A,
-      sensitivity) run interleaved at a SHORT verification budget via Step 4's
-      env (~1/6 of `generation_budget`, floor ~3-5m) — a shorter budget is only
-      noisier, so passing there conservatively certifies the rule and keeps the
-      battery to minutes, not a full generation window per pass. Hold the seed
-      fixed and identical across the A/A arms so the guard tests the rule, not
-      RNG. The loop still measures at full `generation_budget`. The remaining
-      guards (build, timeout, denominator,
-      corpus-safety, budget-enforcement, stale-lock, cache-reset) have a
-      non-coverage verdict and fail fast — a broken build, a tripped integrity
-      check, or a killed run resolves without a full generation window — so
-      their cost is incidental and they need no budget override.
-      Waiting happens only inside execs — chain short in-guest wait loops
-      (each bounded by the sync-exec ceiling the sandbox-lifecycle runbook
-      states) and schedule the next poll at the campaign's own ETA, not on a
-      fixed interval. If any guard fails, bail naming it.
-      - Baseline measures: the benchmark emits a clean, parseable
-        `coverage_pct` line exactly once, from the untouched checkout, on
-        back-to-back runs; record the observed spread in `harness_report`.
-      - Baseline is healthy: `correctness_command` exits zero on the
-        untouched code.
-      - Build guard: a syntax error in a target file makes both commands
-        fail — a harness that scores a stale binary scores nothing.
-      - Timeout guard: an infinite loop planted in the generator makes
-        `correctness_command` terminate non-zero within its bound.
-      - Budget-enforcement guard: plant a generator change that blocks or
-        loops mid-generation and confirm `experiment_command` still terminates
-        near `generation_budget` with a non-zero exit — a benchmark that lets a
-        hang stretch the generation window turns a stall into free coverage.
-      - Stale-lock / crash-recovery guard: kill `experiment_command` mid-run,
-        then run it again immediately and require success — a leftover corpus
-        lock or half-written state from a killed round must not wedge the next
-        one (a fresh scratch path per invocation is the usual fix).
-      - Cache-reset guard: confirm the coverage-guided fuzzing cache Step 4
-        resets is actually absent or recreated per invocation (an A/A variant
-        that primes the cache between arms must not shift coverage) — a cache
-        the runbook under-named would otherwise bias every repeat measurement.
-      - No-op guard: a semantically neutral edit to a target file does not
-        move coverage beyond the observed spread (run at the short verification
-        budget, same as the other coverage-verdict guards).
-      - A/A guard: baseline vs an identical copy, interleaved, SAME fixed seed
-        on both arms, under a rule of the loop's form (paired mean diff vs a
-        threshold from the A/A spread). Identical code must not beat itself. If
-        it does even with a fixed seed, the benchmark isn't seed-honoring — fix
-        that, don't widen the band.
-      - Sensitivity control (the one probe that proves the harness measures
-        anything): disable or zero-weight one generator pathway the runbook
-        says is exercised — coverage must drop detectably under the
-        acceptance rule, and restoring it must recover the number. The
-        threshold this drop had to clear is the harness's minimum detectable
-        effect; report it. If a deliberate generator lobotomy is invisible,
-        a real improvement will be too — bail.
-      - Denominator guard: in a scratch copy, alter the dependency pin of
-        the measured codebase and confirm the change is caught — the
-        benchmark refuses to run or the frozen manifests make the edit an
-        integrity violation. A silent denominator change is the cheapest
-        fake win available.
-      - Corpus-safety guard: point the environment's persistent corpus
-        location (as the runbook defines it) at a canary copy, run the
-        benchmark, and confirm the canary is byte-identical after — the
-        benchmark must be provably incapable of eating the user's corpus.
-      Revert every probe edit and verify the checkout is clean with the VCS
-      (empty diff), not from memory.
+      Step 7 — Verify the harness. Author the WHOLE battery as one script that
+      runs unattended, so this step is a few cheap round-trips regardless of
+      machine size: the script builds every probe variant, runs each guard under
+      a per-guard timeout (with an overall cap on the battery), computes its own
+      PASS/FAIL, redirects all subprocess output to files, and writes one compact
+      results table — a line per guard: name, verdict, key number, and on a
+      failure the last few lines of that guard's log only. Launch it detached,
+      poll a single status line (done + pass count), then read the results table
+      once. Never run guards one at a time and never read raw generate/replay
+      logs: on a failure read only the failed guard's tail from the table, and
+      if the status line never reaches done within the cap read the
+      table-so-far, not the logs — a worker that streams fuzz logs into its
+      context or round-trips per probe will exhaust itself before it finishes.
+
+      The acceptance rule the script applies (the same one the loop uses): a
+      paired mean difference counts as real only when it clears BOTH a relative
+      noise band and a few standard errors of the paired differences; anything
+      smaller is noise. A guard failure the script can fix in place (a stale
+      lock, a benchmark that ignores its seed) gets ONE bounded fix-and-rerun of
+      the battery; bail, naming the guard, only when the failure is unfixable or
+      survives that rerun.
+
+      Coverage-verdict guards (baseline, no-op, A/A, sensitivity) run at a SHORT
+      verification budget via Step 4's env (~1/6 of `generation_budget`, floor
+      5m) with a fixed seed identical across the A/A arms; a shorter budget is
+      only noisier, so passing there conservatively certifies the rule. The loop
+      still measures at full `generation_budget`. The rest fail fast and need no
+      budget. Each guard is an executed probe, not a judgement:
+      - Baseline: one clean `coverage_pct` from the untouched checkout, stable
+        across >=3 back-to-back runs; record the spread (it sets the no-op band).
+      - Correctness: `correctness_command` exits zero on untouched code.
+      - Build: a syntax error in a target file fails both commands.
+      - Timeout: an infinite loop in the generator makes `correctness_command`
+        exit non-zero within its bound.
+      - Budget: a generator that blocks mid-generation still terminates near
+        budget, non-zero — a stall must not buy coverage.
+      - Stale-lock: kill the benchmark mid-run, rerun immediately, require
+        success (a fresh scratch path per invocation is the usual fix).
+      - Cache-reset: the coverage-guided fuzz cache is absent/recreated per
+        invocation.
+      - Seed-liveness: two DIFFERENT seeds produce observably different
+        generation output — proves the benchmark honors `bench_seed_env`, not
+        just that it is deterministic.
+      - No-op: a neutral edit to a target file does not move coverage beyond
+        the spread.
+      - A/A: baseline vs an identical copy, same fixed seed on both arms, under
+        the acceptance rule above — identical code must not beat itself.
+      - Sensitivity: disable one generator pathway the runbook exercises —
+        coverage must drop detectably and recover on restore; the clearing
+        threshold is the minimum detectable effect, report it. If a lobotomy is
+        invisible, bail.
+      - Denominator: altering the measured codebase's pin is caught by an
+        executed check — the benchmark refuses to run, or a diff-check against
+        the frozen manifests fires and exits non-zero.
+      - Corpus-safety: with the persistent corpus pointed at a canary, the
+        benchmark leaves it byte-identical.
+
+      Revert every probe edit; confirm a clean VCS diff, not from memory.
 
       Step 8 — Snapshot and emit. Snapshot the clean prepared sandbox with
       `prepared_snapshot_ttl` (deterministic idempotency key; on a key
