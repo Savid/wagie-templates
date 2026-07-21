@@ -122,11 +122,11 @@ tasks:
       - create a fresh scratch corpus in a location of its own choosing —
         never a pre-existing corpus store; treat any persistent corpus the
         runbook names as read-only and out of bounds;
-      - run generation for exactly `generation_budget` of wall-clock and
-        terminate at the budget even if generation blocks (the equal budget per
-        invocation is what makes two coverage numbers comparable, and a change
-        that stalls generation must not stretch the window into more coverage —
-        enforce both in the script, not by convention);
+      - run generation for a budget read from an env var (fallback
+        `generation_budget`), terminating at the budget even if generation
+        blocks — equal budget per invocation is what makes two numbers
+        comparable, and a stall must not buy coverage. The loop leaves this env
+        unset (full budget); Step 7 sets it short;
       - replay the scratch corpus under coverage instrumentation against
         `coverage_scope` as the denominator;
       - print the total statement coverage as exactly one final
@@ -157,10 +157,14 @@ tasks:
       Step 7 — Verify the harness with executed probes. Every guard is a run
       command and a comparison, not a judgement. Author all probes first,
       then run the timing-sensitive ones as one interleaved campaign with a
-      single results file. The rule: every guard whose verdict is a coverage
-      comparison (baseline, no-op, A/A, sensitivity) runs at the real
-      generation budget, interleaved, because they certify the acceptance rule
-      the loop will apply. The remaining guards (build, timeout, denominator,
+      single results file. Coverage-verdict guards (baseline, no-op, A/A,
+      sensitivity) run interleaved at a SHORT verification budget via Step 4's
+      env (~1/6 of `generation_budget`, floor ~3-5m) — a shorter budget is only
+      noisier, so passing there conservatively certifies the rule and keeps the
+      battery to minutes, not a full generation window per pass. Hold the seed
+      fixed and identical across the A/A arms so the guard tests the rule, not
+      RNG. The loop still measures at full `generation_budget`. The remaining
+      guards (build, timeout, denominator,
       corpus-safety, budget-enforcement, stale-lock, cache-reset) have a
       non-coverage verdict and fail fast — a broken build, a tripped integrity
       check, or a killed run resolves without a full generation window — so
@@ -191,13 +195,13 @@ tasks:
         that primes the cache between arms must not shift coverage) — a cache
         the runbook under-named would otherwise bias every repeat measurement.
       - No-op guard: a semantically neutral edit to a target file does not
-        move coverage beyond the observed spread (run at the real budget).
-      - A/A guard: measure the untouched baseline against an identical copy
-        of itself, interleaved, and apply an acceptance rule of the same form
-        the loop uses (paired mean difference against a noise threshold derived
-        from the A/A spread — you approximate the loop's rule here, you do not
-        share its exact epsilon). Identical code must not beat itself; if it
-        can, the loop will promote noise.
+        move coverage beyond the observed spread (run at the short verification
+        budget, same as the other coverage-verdict guards).
+      - A/A guard: baseline vs an identical copy, interleaved, SAME fixed seed
+        on both arms, under a rule of the loop's form (paired mean diff vs a
+        threshold from the A/A spread). Identical code must not beat itself. If
+        it does even with a fixed seed, the benchmark isn't seed-honoring — fix
+        that, don't widen the band.
       - Sensitivity control (the one probe that proves the harness measures
         anything): disable or zero-weight one generator pathway the runbook
         says is exercised — coverage must drop detectably under the
