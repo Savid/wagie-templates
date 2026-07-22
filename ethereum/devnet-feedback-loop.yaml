@@ -139,6 +139,12 @@ inputs:
     genesis_time:
       description: Source network genesis time (sandbox clock frame) from the snapshot stage, threaded to every investigation for the root-cause runbook's reproduction-fidelity check
       schema: { type: string }
+    fidelity_notes:
+      description: Known deviations and assumptions the network behind the snapshot catalog carries relative to its source (e.g. config synthesis deviations), threaded to every investigation's fidelity check
+      schema: { type: array, items: { type: string } }
+    sandbox_ttl:
+      description: Optional sandbox TTL (e.g. 2h) bounding any compute sandbox the investigations restore
+      schema: { type: string }
     max_rounds:
       description: Maximum drain rounds before returning the remaining queue
       schema: { type: number, default: 3 }
@@ -200,6 +206,12 @@ tasks:
         genesis_time:
           schema: { type: string }
           value: "${{ inputs.values.?genesis_time.orValue('') }}"
+        fidelity_notes:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?fidelity_notes.orValue([]) }}"
+        sandbox_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
     tasks:
       triage:
         quality-gate: "${{ has(outputs.values.investigate_items) }}"
@@ -236,6 +248,12 @@ tasks:
             genesis_time:
               schema: { type: string }
               value: "${{ inputs.values.?genesis_time.orValue('') }}"
+            fidelity_notes:
+              schema: { type: array, items: { type: string } }
+              value: "${{ inputs.values.?fidelity_notes.orValue([]) }}"
+            sandbox_ttl:
+              schema: { type: string }
+              value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
         matrix:
           axes:
             item:
@@ -256,6 +274,10 @@ tasks:
                   value: "${{ inputs.values.snapshots }}"
                 genesis_time:
                   value: "${{ inputs.values.?genesis_time.orValue('') }}"
+                fidelity_notes:
+                  value: "${{ inputs.values.?fidelity_notes.orValue([]) }}"
+                sandbox_ttl:
+                  value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
         outputs:
           values:
             reports:
@@ -278,6 +300,7 @@ tasks:
                       properties:
                         status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | tooling-live | historical-only }
                         recipe: { type: array, items: { type: string } }
+                        fidelity_notes: { type: array, items: { type: string }, description: "Known deviations that materially bear on fidelity, carried from the fidelity check into reporting" }
                       required: [status]
                     timeline:
                       type: array

@@ -64,9 +64,13 @@ tasks:
         watch_epochs:
           value: "${{ inputs.values.?watch_epochs.orValue(5) }}"
   investigate:
-    needs: [watch]
+    needs: [config, watch]
     inputs:
       values:
+        fidelity_notes:
+          required: true
+          schema: { type: array, items: { type: string }, description: "Config deviations and assumptions the local network carries — each investigation's fidelity check weighs them" }
+          value: "${{ tasks.config.outputs.values.deviations + tasks.config.outputs.values.assumptions }}"
         network_target:
           required: true
           schema: &network_target_schema
@@ -171,6 +175,8 @@ tasks:
               value: "${{ matrix.issue }}"
             network_target:
               value: "${{ inputs.values.network_target }}"
+            fidelity_notes:
+              value: "${{ inputs.values.fidelity_notes }}"
     outputs:
       values:
         investigations:
@@ -193,6 +199,7 @@ tasks:
                   properties:
                     status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | tooling-live | historical-only }
                     recipe: { type: array, items: { type: string } }
+                    fidelity_notes: { type: array, items: { type: string }, description: "Known deviations that materially bear on fidelity, carried from the fidelity check into reporting" }
                   required: [status]
                 timeline:
                   type: array

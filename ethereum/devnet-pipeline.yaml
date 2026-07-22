@@ -66,6 +66,8 @@ tasks:
           value: "${{ inputs.values.?watch_epochs.orValue(5) }}"
         sandbox_ttl:
           value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
+        fidelity_notes:
+          value: "${{ tasks.config.outputs.values.deviations + tasks.config.outputs.values.assumptions }}"
         launch_requirements:
           value: "${{ tasks.config.outputs.values.launch_requirements }}"
       artifacts:
@@ -100,7 +102,8 @@ outputs:
       schema: { type: string, description: "Snapshot of the freshly launched network, restorable into new sandboxes" }
       value: "${{ tasks.run.outputs.values.base_snapshot_id }}"
     genesis_time:
-      schema: { type: string, description: "Source network genesis time (sandbox clock) from the snapshot stage — thread into feedback-loop investigations for the reproduction-fidelity check" }
+      required: true
+      schema: { type: string, description: "Source network genesis time (sandbox clock) from the snapshot stage — thread into feedback-loop investigations for the reproduction-fidelity check; empty when unrecorded" }
       value: "${{ tasks.run.outputs.values.?genesis_time.orValue('') }}"
     snapshots:
       required: true
@@ -258,6 +261,7 @@ outputs:
               properties:
                 status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | tooling-live | historical-only }
                 recipe: { type: array, items: { type: string } }
+                fidelity_notes: { type: array, items: { type: string }, description: "Known deviations that materially bear on fidelity, carried from the fidelity check into reporting" }
               required: [status]
             timeline:
               type: array

@@ -767,8 +767,8 @@ github.com/savid/acp-go-codex v0.0.0-20260718144309-59395ed0240a h1:aF8vWWScxRy5
 github.com/savid/acp-go-codex v0.0.0-20260718144309-59395ed0240a/go.mod h1:OCFIrGV/44IwXupC2TJz3jTt49gCL5+ryNedXfMAA/c=
 github.com/savid/acp-go-hermes v0.0.0-20260718144329-800293e8adbc h1:TI85bmHFIf8rLXUILEgiuDbYBT4Y4aU9Fstrp57PayI=
 github.com/savid/acp-go-hermes v0.0.0-20260718144329-800293e8adbc/go.mod h1:Pwrm5kBlZ7TFGkp+l7kXxavwoL9EOytRjY1RUbvcWOc=
-github.com/savid/acp-go-opencode v0.0.0-20260718144242-9f6aca29c573 h1:3A/tNsEIDPx2+gIP5kjEKaN4trlRsk1k6cvjIjLLCNU=
-github.com/savid/acp-go-opencode v0.0.0-20260718144242-9f6aca29c573/go.mod h1:CwCDRqfiC5taeWMNMHQDwYBIx4vwZD/fVtTKpdZWQGs=
+github.com/savid/acp-go-opencode v0.0.0-20260722021837-534d60af61dd h1:+gZOkTWbv3JeMFgr/Msq2oiPwbiBIftXlxJQMTZKEbE=
+github.com/savid/acp-go-opencode v0.0.0-20260722021837-534d60af61dd/go.mod h1:CwCDRqfiC5taeWMNMHQDwYBIx4vwZD/fVtTKpdZWQGs=
 github.com/savid/acp-go-pi v0.0.0-20260718144242-a8548ea4a4cb h1:Bx6Gxn9RNyoUhwNujSpgT3U5xMi8L2G16QsWkvdHick=
 github.com/savid/acp-go-pi v0.0.0-20260718144242-a8548ea4a4cb/go.mod h1:1vPjJztybkLknELt0/nuwK27RdkrAstty+8Tv60HSjw=
 github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36 h1:ObX9hZmK+VmijreZO/8x9pQ8/P/ToHD/bdSb4Eg4tUo=

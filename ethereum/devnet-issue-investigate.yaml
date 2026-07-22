@@ -123,6 +123,12 @@ inputs:
     genesis_time:
       description: The source network's genesis time (sandbox clock frame), when known — the reproduce task's fidelity check compares the target against it
       schema: { type: string }
+    fidelity_notes:
+      description: Known deviations and assumptions the investigable network carries relative to the source (e.g. steering-driven fork acceleration recorded by config synthesis) — the reproduce task's fidelity check weighs them
+      schema: { type: array, items: { type: string } }
+    sandbox_ttl:
+      description: Optional sandbox TTL (e.g. 2h) bounding any compute sandbox this investigation restores
+      schema: { type: string }
     max_investigation_rounds:
       description: Gap-filling rounds for the scoped hypothesis hunt
       schema: { type: number, default: 2 }
@@ -187,7 +193,11 @@ tasks:
       that owns root-causing a devnet issue, record the recipe that reaches
       the state, and apply that runbook's reproduction-fidelity check before
       claiming reproduction — the `genesis_time` input, when set, is the
-      source value that check compares against. Never label `reproduced` on
+      source value that check compares against, and `fidelity_notes` lists
+      deviations the target is already known to carry: weigh them in the same
+      check and carry the material ones forward in the reproduction record's
+      `fidelity_notes`. Pass
+      `sandbox_ttl` to any compute restore when given. Never label `reproduced` on
       evidence the target itself did not produce, and point network_target at
       the surface where the recipe's verifying commands actually run. If no
       target can re-exhibit or reach the state, label the mode honestly per
@@ -224,6 +234,12 @@ tasks:
         genesis_time:
           schema: { type: string, description: "Source network genesis time for the fidelity check, when known" }
           value: "${{ inputs.values.?genesis_time.orValue('') }}"
+        fidelity_notes:
+          schema: { type: array, items: { type: string }, description: "Deviations the target is known to carry, weighed by the fidelity check" }
+          value: "${{ inputs.values.?fidelity_notes.orValue([]) }}"
+        sandbox_ttl:
+          schema: { type: string, description: "TTL bound for any compute sandbox this task restores" }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
     outputs:
       values:
         network_target:
@@ -239,6 +255,7 @@ tasks:
             properties:
               status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | tooling-live | historical-only }
               recipe: { type: array, items: { type: string } }
+              fidelity_notes: { type: array, items: { type: string }, description: "Known deviations that materially bear on fidelity, carried from the fidelity check into reporting" }
             required: [status]
   plan:
     needs: [intake, reproduce]

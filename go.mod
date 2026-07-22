@@ -265,7 +265,7 @@ require (
 	github.com/savid/acp-go-claude v0.0.0-20260718144242-74d18e5c2b93 // indirect
 	github.com/savid/acp-go-codex v0.0.0-20260718144309-59395ed0240a // indirect
 	github.com/savid/acp-go-hermes v0.0.0-20260718144329-800293e8adbc // indirect
-	github.com/savid/acp-go-opencode v0.0.0-20260718144242-9f6aca29c573 // indirect
+	github.com/savid/acp-go-opencode v0.0.0-20260722021837-534d60af61dd // indirect
 	github.com/savid/acp-go-pi v0.0.0-20260718144242-a8548ea4a4cb // indirect
 	github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
