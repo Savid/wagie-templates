@@ -9,16 +9,17 @@ repository: https://github.com/savid/wagie-templates
 description: >-
   Use when a coverage-guided fuzzer should be tuned through snapshot lineage but no
   measurement harness is baked yet: given the fuzzer repo, a toolchain-ready base
-  snapshot, and the runbook owning the fuzzer's coverage procedure, an agent clones
-  and builds the fuzzer in an ephemeral sandbox, authors a budgeted
-  generate-and-replay coverage benchmark plus a build-and-test correctness gate,
-  verifies the harness with executed probes (measurement sensitivity, frozen
-  denominator, corpus safety), snapshots the prepared state, and emits the baked
-  harness inputs dev.wagie/fuzzer-coverage-snapshot-loop consumes (snapshot_id,
-  workdir, target_files, frozen_files, experiment_command, correctness_command,
-  bench_seed_env — the caller still supplies coverage_scope and runbook). Bails
-  cleanly with `prepared` false rather than hand off a harness it does not trust;
-  downstream tasks must gate on `if: prepared`.
+  snapshot, and the runbook owning the fuzzer's coverage procedure, an authoring agent
+  clones and builds the fuzzer in an ephemeral sandbox, authors a budgeted
+  generate-and-replay coverage benchmark plus a build-and-test correctness gate, proves
+  the fast guards (frozen denominator, corpus safety, seed liveness), and snapshots the
+  candidate harness; the statistical guards (baseline spread, A/A, no-op, sensitivity)
+  then fan out in parallel onto disposable sandboxes restored from that snapshot, and a
+  finalize step applies the acceptance rule and emits the baked harness inputs
+  dev.wagie/fuzzer-coverage-snapshot-loop consumes (snapshot_id, workdir, target_files,
+  frozen_files, experiment_command, correctness_command, bench_seed_env — the caller
+  still supplies coverage_scope and runbook). Bails cleanly with `prepared` false rather
+  than hand off a harness it does not trust; downstream tasks must gate on `if: prepared`.
 tags: ["fuzzing", "coverage", "prepare", "harness", "benchmark", "snapshot", "corpus", "generator", "fuzzer", "experiment"]
 examples:
   - "bake a coverage benchmark for fuzzyvm into a compute snapshot"
@@ -48,7 +49,7 @@ inputs:
       description: Branch, tag, or commit SHA to check out. Empty uses the repository's default branch.
       schema: { type: string, default: "" }
     generation_budget:
-      description: Fixed wall-clock corpus-generation budget one benchmark invocation spends before replaying for coverage. The baked benchmark enforces it; every downstream measurement inherits it.
+      description: Fixed wall-clock corpus-generation budget one benchmark invocation spends before replaying for coverage. The baked benchmark enforces it; every downstream measurement inherits it. Verification probes run at a shorter derived budget.
       schema: { type: string, default: 30m }
     target_hint:
       description: Optional guidance on where the generator surface lives when the repo layout is unusual (paths, package names). Empty means derive it from the runbook and repo conventions.
@@ -57,23 +58,25 @@ inputs:
       description: Optional pre-verified panda-compute CLI cheatsheet from a prior run. When supplied the agent spot-checks one pattern and adopts it; the verified cheatsheet is echoed on output. Empty derives fresh from the runbook that owns the sandbox lifecycle.
       schema: { type: string, default: "" }
     sandbox_ttl:
-      description: Lease for the ephemeral preparation sandbox. Must cover clone, build, harness authoring, and the guard battery — several budgeted measurements at full generation budget.
+      description: Lease for each ephemeral sandbox this template creates — the authoring sandbox (clone, build, harness authoring, fast guards) and each parallel verification sandbox (a handful of short-budget measurements).
       schema: { type: string, default: 6h }
     prepared_snapshot_ttl:
-      description: TTL for the prepared snapshot handed to the loop. Only needs to outlive the downstream run's setup; the loop re-pins its own durable result at finalize.
-      schema: { type: string, default: 24h }
+      description: TTL for the prepared snapshot handed to the loop. Must cover the verification fan-out, the downstream run's setup, and a salvage window in case the handoff fails after the work is done; the loop re-pins its own durable result at finalize.
+      schema: { type: string, default: 72h }
 tasks:
-  prepare:
-    quality-gate: "${{ has(outputs.values.prepared) && has(outputs.values.harness_report) && size(outputs.values.harness_report) > 0 && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && (outputs.values.prepared == false || (has(outputs.values.snapshot_id) && size(outputs.values.snapshot_id) > 0 && has(outputs.values.workdir) && size(outputs.values.workdir) > 0 && has(outputs.values.target_files) && size(outputs.values.target_files) > 0 && has(outputs.values.frozen_files) && size(outputs.values.frozen_files) > 0 && has(outputs.values.experiment_command) && size(outputs.values.experiment_command) > 0 && has(outputs.values.correctness_command) && size(outputs.values.correctness_command) > 0)) }}"
+  author:
+    quality-gate: "${{ has(outputs.values.authored) && has(outputs.values.compute_commands) && size(outputs.values.compute_commands) > 0 && has(outputs.values.author_report) && size(outputs.values.author_report) > 0 && (outputs.values.authored == true || size(outputs.values.blocker) > 0) && (outputs.values.authored == false || (has(outputs.values.snapshot_id) && size(outputs.values.snapshot_id) > 0 && has(outputs.values.workdir) && size(outputs.values.workdir) > 0 && has(outputs.values.target_files) && size(outputs.values.target_files) > 0 && has(outputs.values.frozen_files) && size(outputs.values.frozen_files) > 0 && has(outputs.values.experiment_command) && size(outputs.values.experiment_command) > 0 && has(outputs.values.correctness_command) && size(outputs.values.correctness_command) > 0 && has(outputs.values.bench_budget_env) && size(outputs.values.bench_budget_env) > 0 && has(outputs.values.bench_seed_env) && size(outputs.values.bench_seed_env) > 0)) }}"
     instructions: |-
-      Turn a fuzzer repository into a snapshot with a trustworthy coverage
-      measurement harness baked in, and emit exactly the inputs the snapshot
-      coverage loop consumes. You are building the frozen scoring surface an
-      untrusted optimizer will later be measured against; a benchmark that can
-      be gamed or a gate that does not pin health silently corrupts every
-      downstream round. When you cannot establish a trustworthy harness, stop
-      and return `prepared` false with the concrete blocker in
-      `harness_report` — never hand off a harness you do not trust.
+      Turn a fuzzer repository into a candidate snapshot with a coverage
+      measurement harness baked in. You are building the frozen scoring surface
+      an untrusted optimizer will later be measured against; a benchmark that
+      can be gamed or a gate that does not pin health silently corrupts every
+      downstream round. You prove the fast guards here; the expensive
+      statistical guards run afterwards, in parallel, on disposable sandboxes
+      restored from your snapshot — so the snapshot you take must already be
+      clean and complete. When you cannot establish a trustworthy harness,
+      stop and return `authored` false with the concrete blocker in `blocker` —
+      never hand off a harness you do not trust.
 
       Establish the sandbox command patterns first. If
       `provided_compute_commands` is non-empty, spot-check one cheap read-only
@@ -81,8 +84,16 @@ tasks:
       that owns the panda-compute sandbox lifecycle (find it via
       `panda search runbooks "compute sandbox snapshot lifecycle"`). Whatever
       you end up trusting, echo it verbatim on the `compute_commands` output so
-      the downstream loop reuses it, and use only those patterns for every
-      sandbox operation below.
+      the verification probes and the downstream loop reuse it, and use only
+      those patterns for every sandbox operation below. Two rules of in-guest
+      execution, regardless of what the cheatsheet says: any guest command that
+      can outlive the exec transport window (minutes) runs detached — started
+      with its own process group, writing a status file you poll with cheap
+      read-only execs — because a foreground exec that outlives the transport
+      returns a spurious failure and orphans the process tree; and process
+      trees are killed by process group or a ps-based reaper with a separate
+      read-only exec verifying the kill, because parent-only kills leave
+      orphans that poison later measurements.
 
       Step 1 — Read the domain runbook. Locate it via `runbook_ref` and read
       it before touching the repo. It owns the fuzzer's operational facts you
@@ -117,22 +128,28 @@ tasks:
         rotates this seed per round and shares it across the candidate and
         incumbent arms, so the generation RNG cancels in the paired difference
         instead of masquerading as a code effect; a benchmark with no seed
-        input hands every measurement that variance. The generator itself is
-        frozen — only the seed varies;
+        input hands every measurement that variance. The benchmark never
+        edits the generator — the seed is the only knob the benchmark itself
+        varies (the loop, not the benchmark, is what changes generator code
+        between rounds);
       - create a fresh scratch corpus in a location of its own choosing —
         never a pre-existing corpus store; treat any persistent corpus the
         runbook names as read-only and out of bounds;
-      - run generation for a budget read from an env var (fallback
-        `generation_budget`), terminating at the budget even if generation
-        blocks — equal budget per invocation is what makes two numbers
-        comparable, and a stall must not buy coverage. The loop leaves this env
-        unset (full budget); Step 7 sets it short;
+      - run generation for a budget read from an env var (choose a name,
+        e.g. `FUZZ_BUDGET`, report it as `bench_budget_env`; fallback
+        `generation_budget` when unset), terminating at the budget even if
+        generation blocks — equal budget per invocation is what makes two
+        numbers comparable, and a stall must not buy coverage. The loop
+        leaves this env unset (full budget); the guards and the verification
+        probes set it short;
       - pin generation and replay parallelism to a FIXED absolute value (the
         runbook names it), never a machine-relative expression like NumCPU-2 —
         wall-clock-budgeted coverage tracks program count, so variable
         parallelism makes the number depend on the box, not the code;
       - replay the scratch corpus under coverage instrumentation against
-        `coverage_scope` as the denominator;
+        `coverage_scope` as the denominator, bounding replay's total runtime
+        and killing it by process group on the bound — a pathological corpus
+        must fail the measurement, not hang it;
       - print the total statement coverage as exactly one final
         `coverage_pct: <number>` line — if the harness can print a second
         metric line, it can lie;
@@ -156,38 +173,18 @@ tasks:
       that bumps the measured codebase's pin changes the denominator and
       fakes a delta), fixtures, and any config the scoring reads. The
       invariant: nothing in `frozen_files` appears in `target_files`, and
-      anything either command reads as input is frozen.
+      any input DATA either command reads (fixtures, manifests, config) is
+      frozen — the generator source in `target_files` is the code under
+      test, not an input, and must stay editable.
 
-      Step 7 — Verify the harness. Author the WHOLE battery as one script that
-      runs unattended, so this step is a few cheap round-trips regardless of
-      machine size: the script builds every probe variant, runs each guard under
-      a per-guard timeout (with an overall cap on the battery), computes its own
-      PASS/FAIL, redirects all subprocess output to files, and writes one compact
-      results table — a line per guard: name, verdict, key number, and on a
-      failure the last few lines of that guard's log only. Launch it detached,
-      poll a single status line (done + pass count), then read the results table
-      once. Never run guards one at a time and never read raw generate/replay
-      logs: on a failure read only the failed guard's tail from the table, and
-      if the status line never reaches done within the cap read the
-      table-so-far, not the logs — a worker that streams fuzz logs into its
-      context or round-trips per probe will exhaust itself before it finishes.
-
-      The acceptance rule the script applies (the same one the loop uses): a
-      paired mean difference counts as real only when it clears BOTH a relative
-      noise band and a few standard errors of the paired differences; anything
-      smaller is noise. A guard failure the script can fix in place (a stale
-      lock, a benchmark that ignores its seed) gets ONE bounded fix-and-rerun of
-      the battery; bail, naming the guard, only when the failure is unfixable or
-      survives that rerun.
-
-      Coverage-verdict guards (baseline, no-op, A/A, sensitivity) run at a SHORT
-      verification budget via Step 4's env (~1/6 of `generation_budget`, floor
-      5m) with a fixed seed identical across the A/A arms; a shorter budget is
-      only noisier, so passing there conservatively certifies the rule. The loop
-      still measures at full `generation_budget`. The rest fail fast and need no
-      budget. Each guard is an executed probe, not a judgement:
-      - Baseline: one clean `coverage_pct` from the untouched checkout, stable
-        across >=3 back-to-back runs; record the spread (it sets the no-op band).
+      Step 7 — Run the fast guards. Author them as one script that runs
+      unattended: each guard under a per-guard timeout, all subprocess output
+      to files, one compact results table — a line per guard: name, verdict,
+      key number, and on a failure the last few lines of that guard's log
+      only. Launch it detached, poll a single status line, read the table
+      once; never run guards one at a time and never read raw generate/replay
+      logs. Each guard is an executed probe, not a judgement, and each is
+      cheap — short generation budgets only, no full-budget measurement:
       - Correctness: `correctness_command` exits zero on untouched code.
       - Build: a syntax error in a target file fails both commands.
       - Timeout: an infinite loop in the generator makes `correctness_command`
@@ -199,35 +196,37 @@ tasks:
       - Cache-reset: the coverage-guided fuzz cache is absent/recreated per
         invocation.
       - Seed-liveness: two DIFFERENT seeds produce observably different
-        generation output — proves the benchmark honors `bench_seed_env`, not
-        just that it is deterministic.
-      - No-op: a neutral edit to a target file does not move coverage beyond
-        the spread.
-      - A/A: baseline vs an identical copy, same fixed seed on both arms, under
-        the acceptance rule above — identical code must not beat itself.
-      - Sensitivity: disable one generator pathway the runbook exercises —
-        coverage must drop detectably and recover on restore; the clearing
-        threshold is the minimum detectable effect, report it. If a lobotomy is
-        invisible, bail.
+        generation output (compare generated-corpus content, at enough
+        parallelism for a stable signal) — proves the benchmark honors
+        `bench_seed_env`, not just that it is deterministic.
       - Denominator: altering the measured codebase's pin is caught by an
         executed check — the benchmark refuses to run, or a diff-check against
         the frozen manifests fires and exits non-zero.
       - Corpus-safety: with the persistent corpus pointed at a canary, the
         benchmark leaves it byte-identical.
+      A guard failure you can fix in place (a stale lock, a benchmark that
+      ignores its seed) gets ONE bounded fix-and-rerun of the fast guards;
+      bail, naming the guard, only when the failure is unfixable or survives
+      that rerun.
 
-      Revert every probe edit; confirm a clean VCS diff, not from memory.
+      Step 8 — Snapshot the candidate. Revert every probe edit and confirm a
+      clean VCS diff, not from memory; reap every process the guards started
+      and verify the box is idle — whatever you snapshot is what every
+      verification probe and every loop round boots into. Snapshot the clean
+      sandbox with `prepared_snapshot_ttl` (deterministic idempotency key; on
+      a key conflict resolve the existing snapshot id and reuse it), resolve
+      the concrete id as `snapshot_id`, and fire-and-forget delete the
+      sandbox.
 
-      Step 8 — Snapshot and emit. Snapshot the clean prepared sandbox with
-      `prepared_snapshot_ttl` (deterministic idempotency key; on a key
-      conflict resolve the existing snapshot id and reuse it). Resolve the
-      concrete id as `snapshot_id`, fire-and-forget delete the sandbox, and
-      return every loop input (`snapshot_id`, `workdir`, `target_files`,
-      `frozen_files`, `experiment_command`, `correctness_command`,
-      `bench_seed_env`), the forwarded `compute_commands`, `prepared` true, and
-      a `harness_report` recording what was built, every guard result, the
-      observed baseline spread, and the measured minimum detectable effect — a
-      reader must be able to tell from the report alone whether this harness can
-      see the win it will be asked to find.
+      Return `authored` true, every handoff value, and an `author_report`
+      recording what was built — the benchmark design, seed lever, denominator
+      pin, the frozen/target partition rationale — and the fast-guard results
+      table. The statistical verdict is not yours: baseline spread, A/A,
+      no-op, and sensitivity run downstream on sandboxes restored from your
+      snapshot. On a bail return `authored` false, empty handoff values (empty
+      arrays for the file lists) — but still the verified `compute_commands`,
+      which stays valid for a retry — the blocker in `blocker`, and whatever
+      was learned in `author_report`.
 
       Requires a worker with shell access to the panda CLI, compute
       datasource credentials, and the ability to reach and clone the
@@ -263,21 +262,24 @@ tasks:
           value: "${{ inputs.values.?sandbox_ttl.orValue('6h') }}"
         prepared_snapshot_ttl:
           schema: { type: string }
-          value: "${{ inputs.values.?prepared_snapshot_ttl.orValue('24h') }}"
+          value: "${{ inputs.values.?prepared_snapshot_ttl.orValue('72h') }}"
     outputs:
       values:
-        prepared:
+        authored:
           required: true
-          schema: { type: boolean, description: Whether a trustworthy harness was produced; false means the agent bailed and harness_report holds the blocker }
+          schema: { type: boolean, description: "Whether a candidate harness was authored, passed the fast guards, and was snapshotted; false means blocker holds the reason" }
+        blocker:
+          required: true
+          schema: { type: string, description: Concrete blocker when authored is false; empty otherwise }
         snapshot_id:
           required: true
-          schema: { type: string, description: "Snapshot with the fuzzer and harness baked, ready for the coverage loop (empty when prepared is false)" }
+          schema: { type: string, description: "Candidate snapshot with the fuzzer and harness baked, clean and idle (empty when authored is false)" }
         workdir:
           required: true
           schema: { type: string, description: Absolute in-guest path to the fuzzer repo root }
         target_files:
           required: true
-          schema: { type: array, minItems: 1, items: { type: string }, description: "Workdir-relative generator surface the optimizer may edit (only consumed downstream when prepared is true; the run is if:prepared-gated)" }
+          schema: { type: array, items: { type: string }, description: "Workdir-relative generator surface the optimizer may edit (empty when authored is false)" }
         frozen_files:
           required: true
           schema: { type: array, items: { type: string }, description: "Workdir-relative scoring surface (benchmark script, dependency manifests, fixtures)" }
@@ -289,10 +291,349 @@ tasks:
           schema: { type: string, description: In-guest gate command exiting non-zero when the fuzzer is unhealthy or the generator emits invalid programs }
         bench_seed_env:
           required: true
-          schema: { type: string, description: "Environment variable the baked benchmark reads its generation seed from (empty when the benchmark takes no seed); bind verbatim to the loop's bench_seed_env" }
+          schema: { type: string, description: "Environment variable the baked benchmark reads its generation seed from; Step 4 mandates the seed lever, so this is non-empty whenever authored is true (empty only on a bail)" }
+        bench_budget_env:
+          required: true
+          schema: { type: string, description: "Environment variable the baked benchmark reads its generation-budget override from; the verification probes set it short (empty when authored is false)" }
         compute_commands:
           required: true
-          schema: { type: string, description: Verified panda-compute CLI cheatsheet for the downstream loop to reuse verbatim }
+          schema: { type: string, description: Verified panda-compute CLI cheatsheet for the probes and the downstream loop to reuse verbatim }
+        author_report:
+          required: true
+          schema: { type: string, description: "Markdown record of what was built (benchmark design, seed lever, denominator pin, partition rationale) and the fast-guard results table (or the bail context)" }
+  verify:
+    needs: [author]
+    inputs:
+      values:
+        authored:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.author.outputs.values.authored }}"
+        snapshot_id:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.author.outputs.values.snapshot_id }}"
+        workdir:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.author.outputs.values.workdir }}"
+        experiment_command:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.author.outputs.values.experiment_command }}"
+        correctness_command:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.author.outputs.values.correctness_command }}"
+        bench_seed_env:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.author.outputs.values.bench_seed_env }}"
+        bench_budget_env:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.author.outputs.values.bench_budget_env }}"
+        compute_commands:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.author.outputs.values.compute_commands }}"
+        target_files:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.author.outputs.values.target_files }}"
+        runbook_ref:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.runbook }}"
+        generation_budget:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?generation_budget.orValue('30m') }}"
+        sandbox_ttl:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('6h') }}"
+    matrix:
+      axes:
+        group:
+          schema: { type: array, items: { type: string } }
+          value: "${{ ['baseline', 'aa-noop', 'sensitivity'] }}"
+    tasks:
+      probe:
+        quality-gate: "${{ has(outputs.values.group) && size(outputs.values.group) > 0 && has(outputs.values.skipped) && has(outputs.values.passed) && has(outputs.values.guards) && has(outputs.values.report) && (outputs.values.skipped == true || size(outputs.values.guards) > 0) }}"
+        instructions: |-
+          Run one group of statistical harness guards on a disposable sandbox.
+          You are one of several parallel probes; each boots its own sandbox
+          from the candidate snapshot, so nothing you do here can contaminate
+          the other groups or the snapshot itself. Your job is to execute
+          measurements and report honest numbers — the acceptance verdict is
+          computed downstream from all groups together, so never soften a
+          number to make the group "pass".
+
+          If `authored` is false there is nothing to verify: return `skipped`
+          true, `passed` false, an empty `guards` list, and a one-line
+          `report`.
+
+          Otherwise create a sandbox from `snapshot_id` with `sandbox_ttl`
+          using the `compute_commands` patterns verbatim (recognisable name
+          including the group, deterministic idempotency key derived from
+          `snapshot_id` + the group so a retry reclaims an orphan). Work in
+          `workdir`. Every run — warm-up included — uses a SHORT
+          verification budget set via `bench_budget_env`: about one sixth of
+          `generation_budget`, floored at five minutes and then capped at
+          `generation_budget` (so a sub-five-minute budget verifies at the
+          full budget, never above it); the resulting
+          noise floor describes this short campaign (the loop measures at
+          full budget). Before recording anything, run one untouched
+          warm-up measurement in EVERY execution context your group
+          measures (for `aa-noop`, both arms) and DISCARD it — the first
+          run after a snapshot restore is cold (caches, page-in) and sits
+          well off steady state. Author the group's runs as one detached script writing
+          a status file and a compact results table, poll the status with
+          cheap read-only execs, and read the table once — never stream fuzz
+          logs into your context. Kill anything that overruns by process
+          group and verify the kill with a separate read-only exec.
+
+          The groups (run only yours, named by `group`):
+          - `baseline`: at least four back-to-back `experiment_command` runs
+            of the untouched checkout at a fixed seed. Emit one guard record
+            `baseline` — pass iff every run produced a coverage number —
+            with `value` = spread (max - min, coverage points) and the
+            samples and mean in `detail`.
+          - `aa-noop`: A/A plus no-op. A/A: at least five same-seed paired
+            runs of two arms with identical code (the checkout vs an
+            untouched copy), alternating arms so drift hits both equally —
+            paired-difference stderr is unreliable below five samples.
+            Emit guard `aa-mean` (`value` = mean of paired differences) and
+            guard `aa-se` (`value` = standard error of the paired
+            differences), both pass iff every run measured. No-op: one
+            paired same-seed comparison of a neutral edit (e.g. a comment)
+            in a target file against untouched code; emit guard `noop` with
+            `value` = the absolute difference, pass iff both arms measured —
+            whether that difference sits within the baseline spread is
+            judged downstream, where the spread is known. Record every
+            paired difference in `detail`.
+          - `sensitivity`: locate and read the runbook via `runbook_ref`
+            first — it owns the generator layout. Disable one generator
+            pathway it exercises (the lobotomy — pick the pathway the
+            runbook or the generator layout marks as load-bearing), build
+            it, and discard one lobotomized warm-up run too (the untouched
+            warm-up cannot prime a fresh binary). Then run at least two
+            same-seed paired comparisons of lobotomized vs untouched code,
+            restore the code (VCS checkout + rebuild), discard one warm-up
+            on the restored binary (it is fresh too), then run once to
+            confirm recovery. Emit guard `sensitivity` with `value` = the
+            mean absolute drop in coverage points and the recovery number in
+            `detail` — pass iff ALL of: coverage dropped in every pair,
+            `correctness_command` exits zero after the restore rebuild, and
+            the recovery run returns to the untouched level (within the
+            spread of the untouched runs). An invisible lobotomy or a
+            checkout that does not come back healthy both fail the guard.
+
+          A guard that fails because a run produced no measurement still
+          emits a full record: `pass` false, `value` 0 as a placeholder, and
+          the fault in `detail` — a failed guard's number is never data,
+          only the record of the failure is.
+
+          Set `passed` true iff every guard record in the group passed.
+          Write `report` as a compact markdown section: the group, each
+          guard's verdict and numbers, and on any failure the relevant log
+          tail only. Fire-and-forget delete the sandbox before returning,
+          success or failure — it must not outlive the probe.
+
+          Requires a worker with shell access to the panda CLI and compute
+          datasource credentials.
+        inputs:
+          values:
+            group:
+              required: true
+              schema: { type: string, description: Which guard group this probe runs }
+              value: "${{ matrix.group }}"
+            authored:
+              required: true
+              schema: { type: boolean }
+              value: "${{ inputs.values.authored }}"
+            snapshot_id:
+              schema: { type: string }
+              value: "${{ inputs.values.snapshot_id }}"
+            workdir:
+              schema: { type: string }
+              value: "${{ inputs.values.workdir }}"
+            experiment_command:
+              schema: { type: string }
+              value: "${{ inputs.values.experiment_command }}"
+            correctness_command:
+              schema: { type: string }
+              value: "${{ inputs.values.correctness_command }}"
+            bench_seed_env:
+              schema: { type: string }
+              value: "${{ inputs.values.bench_seed_env }}"
+            bench_budget_env:
+              schema: { type: string }
+              value: "${{ inputs.values.bench_budget_env }}"
+            compute_commands:
+              schema: { type: string }
+              value: "${{ inputs.values.compute_commands }}"
+            target_files:
+              schema: { type: array, items: { type: string } }
+              value: "${{ inputs.values.target_files }}"
+            runbook_ref:
+              schema: { type: string }
+              value: "${{ inputs.values.runbook_ref }}"
+            generation_budget:
+              schema: { type: string }
+              value: "${{ inputs.values.generation_budget }}"
+            sandbox_ttl:
+              schema: { type: string }
+              value: "${{ inputs.values.sandbox_ttl }}"
+        outputs:
+          values:
+            group:
+              required: true
+              schema: { type: string, description: The guard group this probe ran (echoed for aggregation order) }
+            skipped:
+              required: true
+              schema: { type: boolean, description: True when verification was skipped because no harness was authored }
+            passed:
+              required: true
+              schema: { type: boolean, description: True iff every guard in the group executed and passed }
+            guards:
+              required: true
+              schema: &guards_schema
+                type: array
+                description: One record per executed guard
+                items:
+                  type: object
+                  properties:
+                    guard: { type: string }
+                    pass: { type: boolean }
+                    value: { type: number }
+                    detail: { type: string }
+                  required: [guard, pass, value, detail]
+            report:
+              required: true
+              schema: { type: string, description: "Compact markdown section for this group — verdicts, numbers, failure tails only" }
+    outputs:
+      values:
+        groups:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.probe.outputs.values.group }}"
+        groups_skipped:
+          required: true
+          schema: { type: array, items: { type: boolean } }
+          value: "${{ tasks.probe.outputs.values.skipped }}"
+        groups_passed:
+          required: true
+          schema: { type: array, items: { type: boolean } }
+          value: "${{ tasks.probe.outputs.values.passed }}"
+        guard_results:
+          required: true
+          schema:
+            type: array
+            description: One guard-record list per group, aligned with `groups`
+            items: *guards_schema
+          value: "${{ tasks.probe.outputs.values.guards }}"
+        group_reports:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.probe.outputs.values.report }}"
+  finalize:
+    needs: [author, verify]
+    quality-gate: "${{ has(outputs.values.prepared) && has(outputs.values.harness_report) && size(outputs.values.harness_report) > 0 }}"
+    instructions: |-
+      Deliver the preparation verdict and the harness report. You compute; you
+      do not measure — every number you need is in the guard records, and a
+      verdict invented beyond them corrupts the downstream loop.
+
+      If `authored` is false, `prepared` is false; the report is the blocker
+      plus the author report.
+
+      Otherwise apply the acceptance rule mechanically from the guard
+      records (find each guard by name across `guard_results`, using
+      `groups` for orientation):
+      - Every group must have run (none skipped) and passed.
+      - Every named guard (`baseline`, `aa-mean`, `aa-se`, `noop`,
+        `sensitivity`) must appear exactly once with a numeric `value`; a
+        missing record or missing number IS that check failing, not a gap to
+        reason around, and a failed guard's `value` is a placeholder — never
+        an input to the arithmetic. When a number the rule needs is
+        unavailable (its guard failed), `prepared` is already false on the
+        passed-groups requirement: skip the dependent arithmetic and report
+        the MDE and its checks as unavailable, naming the failed guard.
+      - Derive the noise floor: the minimum detectable effect (MDE, in
+        coverage points) is the larger of the `baseline` spread and
+        (3 x the `aa-se` value).
+      - Coherence checks, each a hard requirement: |`aa-mean`| must NOT clear
+        the MDE (identical code must not beat itself); the `noop` value must
+        sit within the baseline spread; the `sensitivity` drop MUST clear the
+        MDE — report the ratio (a healthy harness clears it severalfold).
+      `prepared` is true iff all of the above hold. Do not soften the rule:
+      if the numbers say the harness cannot distinguish a real win from
+      noise, the honest verdict is false with the failing check named.
+
+      Compose `harness_report` (markdown) from the author report and the
+      group reports: what was built, the full guard table (fast and
+      statistical), the baseline spread, the MDE, the acceptance rule with
+      the actual numbers substituted, and — when `prepared` is false — the
+      concrete blocker first. When `prepared` is false but a candidate
+      snapshot exists (`snapshot_id` non-empty), record the id and its TTL in
+      the bail section — the authored candidate is the expensive artifact a
+      human will want to inspect, and the blanked public outputs make the
+      report its only remaining reference. Note that verification ran at a
+      reduced budget on parallel sandboxes restored from the candidate
+      snapshot — the MDE describes the short campaign and composes numbers
+      measured on different sandbox instances, and the loop measures at
+      full budget. A reader must be able to tell from the report alone
+      whether this harness can see the win it will be asked to find.
+    inputs:
+      values:
+        authored:
+          required: true
+          schema: { type: boolean }
+          value: "${{ tasks.author.outputs.values.authored }}"
+        blocker:
+          schema: { type: string }
+          value: "${{ tasks.author.outputs.values.blocker }}"
+        snapshot_id:
+          schema: { type: string, description: "Candidate snapshot id, recorded in the report on a bail so the candidate stays salvageable" }
+          value: "${{ tasks.author.outputs.values.snapshot_id }}"
+        prepared_snapshot_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?prepared_snapshot_ttl.orValue('72h') }}"
+        author_report:
+          schema: { type: string }
+          value: "${{ tasks.author.outputs.values.author_report }}"
+        generation_budget:
+          schema: { type: string }
+          value: "${{ inputs.values.?generation_budget.orValue('30m') }}"
+        groups:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.verify.outputs.values.groups }}"
+        groups_skipped:
+          required: true
+          schema: { type: array, items: { type: boolean } }
+          value: "${{ tasks.verify.outputs.values.groups_skipped }}"
+        groups_passed:
+          required: true
+          schema: { type: array, items: { type: boolean } }
+          value: "${{ tasks.verify.outputs.values.groups_passed }}"
+        guard_results:
+          required: true
+          schema:
+            type: array
+            items: *guards_schema
+          value: "${{ tasks.verify.outputs.values.guard_results }}"
+        group_reports:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.verify.outputs.values.group_reports }}"
+    outputs:
+      values:
+        prepared:
+          required: true
+          schema: { type: boolean, description: Whether a trustworthy harness was produced; false means harness_report holds the blocker }
         harness_report:
           required: true
           schema: { type: string, description: "Markdown record of what was built and every guard result, including baseline spread and the measured minimum detectable effect (or the bail reason)" }
@@ -300,41 +641,41 @@ outputs:
   values:
     prepared:
       required: true
-      schema: { type: boolean, description: "Whether a trustworthy harness was produced. Every downstream task consuming these outputs must gate on it (if: prepared) — when false the loop inputs are empty sentinels and harness_report holds the blocker" }
-      value: "${{ tasks.prepare.outputs.values.prepared }}"
+      schema: { type: boolean, description: "Whether a trustworthy harness was produced. Every downstream task consuming these outputs must gate on it (if: prepared) — when false every loop input is a blank sentinel (target_files carries a single placeholder entry) except compute_commands, which stays valid for a retry, and harness_report holds the blocker" }
+      value: "${{ tasks.finalize.outputs.values.prepared }}"
     snapshot_id:
       required: true
       schema: { type: string, description: "Snapshot ready to bind verbatim to dev.wagie/fuzzer-coverage-snapshot-loop's snapshot_id (empty when prepared is false)" }
-      value: "${{ tasks.prepare.outputs.values.snapshot_id }}"
+      value: "${{ tasks.finalize.outputs.values.prepared ? tasks.author.outputs.values.snapshot_id : '' }}"
     workdir:
       required: true
       schema: { type: string }
-      value: "${{ tasks.prepare.outputs.values.workdir }}"
+      value: "${{ tasks.finalize.outputs.values.prepared ? tasks.author.outputs.values.workdir : '' }}"
     target_files:
       required: true
-      schema: { type: array, minItems: 1, items: { type: string } }
-      value: "${{ tasks.prepare.outputs.values.target_files }}"
+      schema: { type: array, minItems: 1, items: { type: string }, description: "Workdir-relative generator surface the optimizer may edit (only consumed downstream when prepared is true; the run is if:prepared-gated — a sentinel entry stands in on a bail)" }
+      value: "${{ tasks.finalize.outputs.values.prepared ? tasks.author.outputs.values.target_files : ['unprepared'] }}"
     frozen_files:
       required: true
       schema: { type: array, items: { type: string } }
-      value: "${{ tasks.prepare.outputs.values.frozen_files }}"
+      value: "${{ tasks.finalize.outputs.values.prepared ? tasks.author.outputs.values.frozen_files : [] }}"
     experiment_command:
       required: true
       schema: { type: string }
-      value: "${{ tasks.prepare.outputs.values.experiment_command }}"
+      value: "${{ tasks.finalize.outputs.values.prepared ? tasks.author.outputs.values.experiment_command : '' }}"
     correctness_command:
       required: true
       schema: { type: string }
-      value: "${{ tasks.prepare.outputs.values.correctness_command }}"
+      value: "${{ tasks.finalize.outputs.values.prepared ? tasks.author.outputs.values.correctness_command : '' }}"
     bench_seed_env:
       required: true
-      schema: { type: string, description: "Environment variable the baked benchmark reads its generation seed from (empty when it takes none); binds verbatim to fuzzer-coverage-snapshot-loop's bench_seed_env" }
-      value: "${{ tasks.prepare.outputs.values.bench_seed_env }}"
+      schema: { type: string, description: "Environment variable the baked benchmark reads its generation seed from (empty only when prepared is false); binds verbatim to fuzzer-coverage-snapshot-loop's bench_seed_env" }
+      value: "${{ tasks.finalize.outputs.values.prepared ? tasks.author.outputs.values.bench_seed_env : '' }}"
     compute_commands:
       required: true
       schema: { type: string }
-      value: "${{ tasks.prepare.outputs.values.compute_commands }}"
+      value: "${{ tasks.author.outputs.values.compute_commands }}"
     harness_report:
       required: true
       schema: { type: string }
-      value: "${{ tasks.prepare.outputs.values.harness_report }}"
+      value: "${{ tasks.finalize.outputs.values.harness_report }}"

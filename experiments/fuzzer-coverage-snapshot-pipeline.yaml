@@ -62,7 +62,7 @@ inputs:
       description: "Candidate/incumbent pairs measured per round. The default matches the loop's statistical floor (paired-difference stderr is unreliable below 5); to save wall-clock, shrink generation_budget rather than this."
       schema: { type: number, default: 5 }
     sandbox_ttl:
-      description: Lease for each of the loop's ephemeral sandboxes; must cover one full round of paired budgeted measurements.
+      description: Lease for each ephemeral sandbox in both stages — preparation's authoring and verification sandboxes and the loop's per-round sandboxes. The binding constraint is one full loop round (2 × measurement_runs measurements at the full generation_budget); preparation's probes run more measurements but each at the short verification budget, so a lease sized for a loop round covers them.
       schema: { type: string, default: 6h }
     compute_commands:
       description: Optional pre-verified panda-compute CLI cheatsheet; preparation verifies it and the loop reuses the verified copy.
@@ -86,6 +86,8 @@ tasks:
           value: "${{ inputs.values.?generation_budget.orValue('30m') }}"
         target_hint:
           value: "${{ inputs.values.?target_hint.orValue('') }}"
+        sandbox_ttl:
+          value: "${{ inputs.values.?sandbox_ttl.orValue('6h') }}"
         compute_commands:
           value: "${{ inputs.values.?compute_commands.orValue('') }}"
   run:
