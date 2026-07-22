@@ -1,0 +1,722 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/experiment-islands
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when one optimization goal deserves parallel independent exploration instead of a single greedy run. Freezes one shared scoring contract up front, fans out isolated experiment-loop cells — each with its own strategy bias and result branch, no cross-talk — then curates the cells' typed trial ledgers by mechanism, and independently verifies the champion with experiment-verify before anything is promoted. Diversity comes from isolation; consensus happens only at the acceptance boundary.
+tags: ["experiment", "islands", "parallel", "fanout", "portfolio", "autoresearch", "optimization", "verification"]
+examples:
+  - "run three competing optimization strategies in parallel"
+  - "explore independent cells and verify the champion"
+  - "freeze one benchmark contract for parallel tuning runs"
+  - "compare micro versus structural optimization branches"
+  - "dedupe mechanisms across parallel experiment ledgers"
+inputs:
+  values:
+    repo_url:
+      required: true
+      description: Git URL of the repo to optimize. Worker must have fetch and push credentials.
+      schema: { type: string }
+    base_branch:
+      description: Branch to start from
+      schema: { type: string, default: main }
+    branch_prefix:
+      required: true
+      description: Prefix for every branch this run pushes. The shared contract goes to `<prefix>-base`; each cell pushes `<prefix>-<cell-name>`.
+      schema: { type: string }
+    goal:
+      required: true
+      description: Natural-language description of what to optimize and why. Every cell receives it plus its own strategy bias.
+      schema: { type: string }
+    cells:
+      description: >-
+        Exploration cells, each an isolated experiment-loop run with a strategy bias. Defaults to three complementary framings (micro, structural, adversarial). Keep names branch-safe (lowercase, hyphens). 3-5 cells is the paying range — returns per added cell are logarithmic while cost is linear, and a wider search inflates the champion's displayed score. Bias strategies toward genuinely different search moves (change size, mechanism class, assumptions questioned); near-duplicate prompt wording buys correlated cells, not coverage.
+      schema:
+        type: array
+        default: []
+        items:
+          type: object
+          properties:
+            name: { type: string }
+            strategy: { type: string }
+          required: [name, strategy]
+    setup_command:
+      description: Optional override for the one-time setup command run after clone. Empty means the contract task discovers or skips based on repo conventions.
+      schema: { type: string, default: "" }
+    target_files:
+      description: Optional override listing files cells may modify. Empty means the contract task infers scope from the goal and repo.
+      schema:
+        type: array
+        default: []
+        items:
+          type: string
+    correctness_command:
+      description: Optional override for the correctness gate command. Empty means the contract task discovers, scaffolds, or disables it.
+      schema: { type: string, default: "" }
+    experiment_command:
+      description: Optional override for the command emitting the scalar metric. Empty means the contract task discovers or scaffolds a benchmark.
+      schema: { type: string, default: "" }
+    metric_name:
+      description: Optional override for the metric label extracted from experiment output. Empty means the contract task derives one.
+      schema: { type: string, default: "" }
+    metric_direction:
+      description: Whether lower or higher metric values are better
+      schema:
+        type: string
+        default: minimize
+        enum: [minimize, maximize]
+    max_iterations:
+      description: Hard cap on experiment rounds per cell
+      schema: { type: number, default: 20 }
+    patience:
+      description: Per-cell stop after this many consecutive rounds with no accepted improvement. Must be strictly less than `max_iterations`.
+      schema: { type: number, default: 5 }
+    plateau_patience:
+      description: Per-cell stop after this many consecutive rounds where the metric does not move outside the noise band.
+      schema: { type: number, default: 3 }
+    noise_epsilon:
+      description: Relative tolerance for acceptance and plateau detection inside each cell. Default 0 means the contract task derives it from the shared baseline's observed jitter; every cell then runs under the same derived value.
+      schema: { type: number, default: 0 }
+    measurement_runs:
+      description: Optional override for measurements per candidate inside each cell. Default 0 means the contract task derives it from observed baseline jitter.
+      schema: { type: number, default: 0 }
+    replication_runs:
+      description: Measurements per side when the champion is verified. Default 0 means auto — 5 plus one per cell, because selecting the best of a wider search inflates the winner's displayed score and demands more replication to trust.
+      schema: { type: number, default: 0 }
+    holdout_command:
+      description: Optional one-shot held-out scoring command for champion verification. Spent at most once per side.
+      schema: { type: string, default: "" }
+    cell_cleanup:
+      description: Whether each cell prunes its scratch workspace after its run. Default on — cell branches are pushed and verification re-clones independently.
+      schema: { type: boolean, default: true }
+tasks:
+  contract:
+    quality-gate: "${{ has(outputs.values.prep_branch) && size(outputs.values.prep_branch) > 0 && has(outputs.values.baseline_commit) && size(outputs.values.baseline_commit) > 0 && has(outputs.values.baseline_metric) && has(outputs.values.effective_target_files) && size(outputs.values.effective_target_files) > 0 && has(outputs.values.effective_experiment_command) && size(outputs.values.effective_experiment_command) > 0 && has(outputs.values.effective_metric_name) && size(outputs.values.effective_metric_name) > 0 && has(outputs.values.effective_noise_epsilon) && outputs.values.effective_noise_epsilon >= 0.0 && has(outputs.values.effective_measurement_runs) && outputs.values.effective_measurement_runs >= 1.0 && has(outputs.values.frozen_files) }}"
+    instructions: |-
+      Freeze ONE scoring contract that every parallel cell will run under. Cells are only comparable if they share the same benchmark, the same mutable surface, and the same starting commit — so the contract is resolved once here, pushed to a prep branch, and handed to the cells as explicit overrides. No cell rediscovers anything.
+
+      Step 1 — Clone and resolve.
+      - Clone `repo_url`, check out `base_branch`.
+      - For each parameter, honour the caller-provided value when non-empty; otherwise derive it from the repo and goal:
+        - `effective_setup_command`: the project's conventional install/build sequence, or `""` when nothing is needed. Run it once and fail this task if it fails.
+        - `effective_target_files`: the narrowest mutable scope that covers the goal. Hard rule: it must not contain any file the benchmark or correctness command reads as scoring input — mutable code and frozen scoring code are disjoint, and no cell may ever edit its own scorer.
+        - `effective_experiment_command` + `effective_metric_name`: an existing benchmark targeting the goal's artifact when one exists, else scaffold one. A scaffolded bench must vary inputs across iterations (no memoization traps), consume results (no dead-code elimination), warm up before timing, measure median-of-N, keep setup outside the timed region, and emit the metric as a single regex-grabbable `metric_name: <number>` line at the end. Read the chosen framework's pitfalls guide before writing it, and self-review against these rules before committing.
+        - `effective_correctness_command`: existing tests covering the target, minimal scaffolded behaviour-pinning tests when the domain warrants a gate, or `""` when a broken artifact naturally produces a bad metric. Scaffolded tests verify correctness, not the solution — pin behaviour the goal must preserve, nothing more.
+
+      Step 2 — Commit and publish.
+      - Commit any scaffolding (message shaped `scaffold: shared autoresearch contract for <target>`).
+      - Push HEAD to `prep_branch` = `branch_prefix` + `-base` on origin. Every cell starts from this branch; return its name and the pushed HEAD sha as `baseline_commit`.
+
+      Step 3 — Baseline, noise calibration, and sanity checks.
+      - Run `effective_experiment_command` three times and extract the scalar labelled `effective_metric_name` from each; return the median as `baseline_metric`.
+      - Calibrate the noise parameters every cell will run under — cells are only comparable if they share these too:
+        - `effective_noise_epsilon`: the caller's `noise_epsilon` when > 0; otherwise the observed relative jitter, `(max - min) / max(|median|, 1)`, padded slightly upward. 0 only when the three runs agree exactly.
+        - `effective_measurement_runs`: the caller's `measurement_runs` when > 0; otherwise 1 when the bench already aggregates internally and its jitter is small relative to plausible gains, else 3.
+      - Reject and revise the scaffold when the baseline is degenerate: exactly 0/NaN/infinity, at or below the measurement's noise floor, or the three runs disagreeing by more than ~30%.
+
+      Step 4 — Tidy.
+      - The prep branch is pushed and cells clone independently, so remove this local clone once everything above succeeded.
+      - Return `frozen_files`: every workspace-relative path the scoring contract reads — benchmark files, fixtures and datasets, eval splits, correctness test files — whether discovered or scaffolded. This is the declared scoring surface champion verification audits the diff against.
+      - Return `contract_notes`: what was discovered vs scaffolded, the baseline value, and a one-sentence measurement-quality assessment.
+
+      This task clones the repo, runs shell commands, and may web-search benchmark docs — a worker with reasoning and tool-use is required.
+    inputs:
+      values:
+        repo_url:
+          schema: { type: string }
+          value: "${{ inputs.values.repo_url }}"
+        base_branch:
+          schema: { type: string }
+          value: "${{ inputs.values.?base_branch.orValue('main') }}"
+        branch_prefix:
+          schema: { type: string }
+          value: "${{ inputs.values.branch_prefix }}"
+        goal:
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        metric_direction:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        setup_command:
+          schema: { type: string }
+          value: "${{ inputs.values.?setup_command.orValue('') }}"
+        target_files:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?target_files.orValue([]) }}"
+        correctness_command:
+          schema: { type: string }
+          value: "${{ inputs.values.?correctness_command.orValue('') }}"
+        experiment_command:
+          schema: { type: string }
+          value: "${{ inputs.values.?experiment_command.orValue('') }}"
+        metric_name:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_name.orValue('') }}"
+        noise_epsilon:
+          schema: { type: number }
+          value: "${{ inputs.values.?noise_epsilon.orValue(0) }}"
+        measurement_runs:
+          schema: { type: number }
+          value: "${{ inputs.values.?measurement_runs.orValue(0) }}"
+    outputs:
+      values:
+        prep_branch:
+          required: true
+          schema:
+            type: string
+            description: Pushed branch every cell starts from (base plus shared scaffolding)
+        baseline_commit:
+          required: true
+          schema:
+            type: string
+            description: Git sha at the head of the prep branch
+        baseline_metric:
+          required: true
+          schema:
+            type: number
+            description: Scalar metric measured on the prep branch before any cell runs
+        effective_setup_command:
+          required: true
+          schema:
+            type: string
+            description: Resolved setup command every cell runs after clone
+        effective_target_files:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Shared mutable scope every cell operates on
+        effective_correctness_command:
+          required: true
+          schema:
+            type: string
+            description: Shared correctness gate; empty means disabled
+        effective_experiment_command:
+          required: true
+          schema:
+            type: string
+            description: Shared frozen scoring command
+        effective_metric_name:
+          required: true
+          schema:
+            type: string
+            description: Shared metric label extracted from experiment output
+        effective_noise_epsilon:
+          required: true
+          schema:
+            type: number
+            description: Shared relative noise tolerance every cell runs under (caller override or derived from baseline jitter)
+        effective_measurement_runs:
+          required: true
+          schema:
+            type: number
+            description: Shared measurements per candidate inside every cell (caller override or derived from baseline jitter)
+        frozen_files:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Declared scoring surface — every workspace-relative path the shared benchmark or correctness gate reads
+        contract_notes:
+          required: true
+          schema:
+            type: string
+            description: What was discovered vs scaffolded, baseline value, measurement quality
+  explore:
+    needs: [contract]
+    inputs:
+      values:
+        cells:
+          required: true
+          schema: &cells_schema
+            type: array
+            items:
+              type: object
+              properties:
+                name: { type: string }
+                strategy: { type: string }
+              required: [name, strategy]
+          value: |-
+            ${{ size(inputs.values.?cells.orValue([])) == 0 ? [
+                  {'name': 'micro', 'strategy': 'Favour small, safe, local optimizations: caching, allocation removal, tighter loops, cheaper primitives. Accumulate many compounding wins.'},
+                  {'name': 'structural', 'strategy': 'Favour structurally different implementations: swap the algorithm or data structure, change the complexity class, restructure the hot path. Take fewer, bigger swings.'},
+                  {'name': 'adversarial', 'strategy': 'Hunt waste the other framings miss: redundant work, dead configuration, unnecessary precision or generality, overlooked build and runtime flags. Question every assumption the current implementation encodes.'}
+                ] : inputs.values.?cells.orValue([]) }}
+        repo_url:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.repo_url }}"
+        branch_prefix:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.branch_prefix }}"
+        goal:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        prep_branch:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.contract.outputs.values.prep_branch }}"
+        setup_command:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.contract.outputs.values.effective_setup_command }}"
+        target_files:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.contract.outputs.values.effective_target_files }}"
+        correctness_command:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.contract.outputs.values.effective_correctness_command }}"
+        experiment_command:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.contract.outputs.values.effective_experiment_command }}"
+        metric_name:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.contract.outputs.values.effective_metric_name }}"
+        metric_direction:
+          required: true
+          schema: { type: string, enum: [minimize, maximize] }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        max_iterations:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?max_iterations.orValue(20) }}"
+        patience:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?patience.orValue(5) }}"
+        plateau_patience:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?plateau_patience.orValue(3) }}"
+        noise_epsilon:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.contract.outputs.values.effective_noise_epsilon }}"
+        measurement_runs:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.contract.outputs.values.effective_measurement_runs }}"
+        cell_cleanup:
+          required: true
+          schema: { type: boolean }
+          value: "${{ inputs.values.?cell_cleanup.orValue(true) }}"
+    matrix:
+      axes:
+        cell:
+          schema: *cells_schema
+          value: "${{ inputs.values.cells }}"
+    tasks:
+      run:
+        uses: dev.wagie/experiment-loop@1.0.0
+        inputs:
+          values:
+            repo_url:
+              value: "${{ inputs.values.repo_url }}"
+            base_branch:
+              value: "${{ inputs.values.prep_branch }}"
+            result_branch:
+              value: "${{ inputs.values.branch_prefix + '-' + matrix.cell.name }}"
+            goal:
+              value: |-
+                ${{ inputs.values.goal + "\n\nCell strategy — bias every proposal this way: " + matrix.cell.strategy }}
+            setup_command:
+              value: "${{ inputs.values.setup_command }}"
+            target_files:
+              value: "${{ inputs.values.target_files }}"
+            correctness_command:
+              value: "${{ inputs.values.correctness_command }}"
+            experiment_command:
+              value: "${{ inputs.values.experiment_command }}"
+            metric_name:
+              value: "${{ inputs.values.metric_name }}"
+            metric_direction:
+              value: "${{ inputs.values.metric_direction }}"
+            max_iterations:
+              value: "${{ inputs.values.max_iterations }}"
+            patience:
+              value: "${{ inputs.values.patience }}"
+            plateau_patience:
+              value: "${{ inputs.values.plateau_patience }}"
+            noise_epsilon:
+              value: "${{ inputs.values.noise_epsilon }}"
+            measurement_runs:
+              value: "${{ inputs.values.measurement_runs }}"
+            auto_cleanup:
+              value: "${{ inputs.values.cell_cleanup }}"
+    outputs:
+      values:
+        cells_used:
+          required: true
+          schema: *cells_schema
+          value: "${{ inputs.values.cells }}"
+        cell_branches:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.run.outputs.values.result_branch }}"
+        cell_metrics:
+          required: true
+          schema: { type: array, items: { type: number } }
+          value: "${{ tasks.run.outputs.values.best_metric }}"
+        cell_commits:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.run.outputs.values.best_commit }}"
+        cell_improved:
+          required: true
+          schema: { type: array, items: { type: boolean } }
+          value: "${{ tasks.run.outputs.values.improved }}"
+        cell_improvement_pcts:
+          required: true
+          schema: { type: array, items: { type: number } }
+          value: "${{ tasks.run.outputs.values.improvement_pct }}"
+        cell_exit_reasons:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.run.outputs.values.exit_reason }}"
+        cell_summaries:
+          required: true
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.run.outputs.values.summary }}"
+        cell_trials:
+          required: true
+          schema:
+            type: array
+            description: One trial ledger per cell, in cell order
+            items: &trials_schema
+              type: array
+              items:
+                type: object
+                properties:
+                  round: { type: number }
+                  hypothesis: { type: string }
+                  commit: { type: string }
+                  snapshot_id: { type: string }
+                  status: { type: string, enum: [pass, fail, invalid, suspicious] }
+                  metric: { type: number }
+                  spread: { type: number }
+                  paired_gain: { type: number }
+                  paired_gain_stderr: { type: number }
+                  best_after: { type: number }
+                  decision_source: { type: string, enum: [auto, agent] }
+                  measurement_note: { type: string }
+                  interpretation: { type: string }
+                  next_action: { type: string }
+                required: [round, hypothesis, status, interpretation]
+          value: "${{ tasks.run.outputs.values.trials }}"
+  curate:
+    needs: [contract, explore]
+    quality-gate: "${{ has(outputs.values.champion_cell) && size(outputs.values.champion_cell) > 0 && has(outputs.values.champion_branch) && size(outputs.values.champion_branch) > 0 && has(outputs.values.champion_commit) && size(outputs.values.champion_commit) > 0 && has(outputs.values.champion_metric) && has(outputs.values.champion_improved) && has(outputs.values.champion_trials) && has(outputs.values.mechanism_summary) && size(outputs.values.mechanism_summary) > 0 }}"
+    instructions: |-
+      Curate the portfolio. The per-cell arrays are parallel and in cell order: index i of `cell_branches`, `cell_metrics`, `cell_commits`, `cell_improved`, `cell_improvement_pcts`, `cell_exit_reasons`, `cell_summaries`, and `cell_trials` all describe `cells[i]`.
+
+      Champion selection is mechanical:
+      - Among cells whose `improved` flag is true, pick the best `metric` in the `metric_direction` sense; break ties toward the cell whose ledger has no suspicious trials, then toward the earlier cell.
+      - If no cell improved, still nominate the direction-best cell and set `champion_improved` false — verification will reject it cleanly and the packet documents a genuine null result.
+      - Return the champion's cell name, branch, commit, metric, improved flag, and its full trial ledger unmodified as `champion_trials`.
+      - Note the selection effect: picking the best of many noisy trials systematically overstates the winner, and the inflation grows with cells × rounds. The champion's search metric is a nomination, not a result — expect the verified medians to come in below it, and say so in `mechanism_summary` rather than presenting the search number as the achievement.
+
+      Mechanism curation is the judgment half. Read every cell's trial ledger and write `mechanism_summary`, citing cell and round for every mechanism claim, covering:
+      - Mechanisms independently tried by more than one cell, and whether their outcomes agree — independent replication of a win (or a failure) is the strongest signal this run produces.
+      - Mechanisms that failed well outside the noise everywhere they were tried — name them so nobody retries them solo. Within-noise losses are weak evidence; do not promote them to bans.
+      - Wins unique to one strategy framing — what the other framings missed.
+      - Search collapse: if the cells converged on substantially the same mechanisms despite different strategy biases, say so plainly — the parallel spend bought no diversity, and a relaunch needs more orthogonal framings, not more cells.
+      - Suspicious trials anywhere in the portfolio, called out with cell and round.
+
+      Write `composition_notes` only when distinct cells hold wins that plausibly compose (they touch different code or different mechanisms): name the branches, mechanisms, and provenance (cell, round) worth combining in a follow-up run seeded from the champion. Compositions are unverified proposals, not accepted facts — a cell's ledger claim earns nothing until a follow-up run re-establishes it under the shared contract and passes verification; say so in the notes. Return "" when there is no real composition candidate — do not invent one.
+    inputs:
+      values:
+        goal:
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        metric_direction:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        baseline_metric:
+          schema: { type: number }
+          value: "${{ tasks.contract.outputs.values.baseline_metric }}"
+        cells:
+          schema: *cells_schema
+          value: "${{ tasks.explore.outputs.values.cells_used }}"
+        cell_branches:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.explore.outputs.values.cell_branches }}"
+        cell_metrics:
+          schema: { type: array, items: { type: number } }
+          value: "${{ tasks.explore.outputs.values.cell_metrics }}"
+        cell_commits:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.explore.outputs.values.cell_commits }}"
+        cell_improved:
+          schema: { type: array, items: { type: boolean } }
+          value: "${{ tasks.explore.outputs.values.cell_improved }}"
+        cell_improvement_pcts:
+          schema: { type: array, items: { type: number } }
+          value: "${{ tasks.explore.outputs.values.cell_improvement_pcts }}"
+        cell_exit_reasons:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.explore.outputs.values.cell_exit_reasons }}"
+        cell_summaries:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.explore.outputs.values.cell_summaries }}"
+        cell_trials:
+          schema:
+            type: array
+            items: *trials_schema
+          value: "${{ tasks.explore.outputs.values.cell_trials }}"
+    outputs:
+      values:
+        champion_cell:
+          required: true
+          schema:
+            type: string
+            description: Name of the nominated cell
+        champion_branch:
+          required: true
+          schema:
+            type: string
+            description: Result branch of the nominated cell
+        champion_commit:
+          required: true
+          schema:
+            type: string
+            description: Best commit of the nominated cell
+        champion_metric:
+          required: true
+          schema:
+            type: number
+            description: Best metric of the nominated cell
+        champion_improved:
+          required: true
+          schema:
+            type: boolean
+            description: Whether the champion actually beat the shared baseline
+        champion_trials:
+          required: true
+          schema: *trials_schema
+        mechanism_summary:
+          required: true
+          schema:
+            type: string
+            description: Cross-cell mechanism curation — replicated wins, universal failures, unique wins, suspicious trials
+        composition_notes:
+          required: true
+          schema:
+            type: string
+            description: Concrete cross-cell combinations worth a follow-up run; empty when none
+  verify:
+    needs: [contract, explore, curate]
+    uses: dev.wagie/experiment-verify@1.0.0
+    inputs:
+      values:
+        repo_url:
+          value: "${{ inputs.values.repo_url }}"
+        result_branch:
+          value: "${{ tasks.curate.outputs.values.champion_branch }}"
+        baseline_commit:
+          value: "${{ tasks.contract.outputs.values.baseline_commit }}"
+        best_commit:
+          value: "${{ tasks.curate.outputs.values.champion_commit }}"
+        goal:
+          value: "${{ inputs.values.goal }}"
+        target_files:
+          value: "${{ tasks.contract.outputs.values.effective_target_files }}"
+        frozen_files:
+          value: "${{ tasks.contract.outputs.values.frozen_files }}"
+        experiment_command:
+          value: "${{ tasks.contract.outputs.values.effective_experiment_command }}"
+        metric_name:
+          value: "${{ tasks.contract.outputs.values.effective_metric_name }}"
+        metric_direction:
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        correctness_command:
+          value: "${{ tasks.contract.outputs.values.effective_correctness_command }}"
+        setup_command:
+          value: "${{ tasks.contract.outputs.values.effective_setup_command }}"
+        replication_runs:
+          value: "${{ inputs.values.?replication_runs.orValue(0.0) > 0.0 ? inputs.values.?replication_runs.orValue(0.0) : 5.0 + double(size(tasks.explore.outputs.values.cells_used)) }}"
+        holdout_command:
+          value: "${{ inputs.values.?holdout_command.orValue('') }}"
+        trials:
+          value: "${{ tasks.curate.outputs.values.champion_trials }}"
+  report:
+    needs: [contract, explore, curate, verify]
+    quality-gate: "${{ has(outputs.values.islands_report) && size(outputs.values.islands_report) > 0 && has(outputs.values.summary) && size(outputs.values.summary) > 0 }}"
+    instructions: |-
+      Render the portfolio decision report. The reader is leadership deciding what to promote and whether the parallel spend was worth it — write for them.
+
+      `islands_report` (markdown):
+      - **Run summary**: goal, metric with direction, shared baseline, number of cells, champion cell and its verified verdict, first.
+      - **Portfolio table**: one row per cell — name, strategy (first clause is enough), exit reason, best metric, improvement percent, branch. The parallel input arrays are in cell order. Mark the champion row.
+      - **Champion verification**: the verdict, the claim, replicated medians and improvement, holdout outcome when spent, and the strongest counterargument from review. State the shrinkage explicitly — champion search metric vs verified median — since selection over many trials inflates the search score; shrinkage within noise is expected, not evidence of foul play. Reference the full decision packet rather than duplicating it.
+      - **Mechanism curation**: the mechanism summary verbatim or lightly edited, plus composition notes when non-empty.
+      - **Spend assessment**: 2-3 sentences on whether the fan-out paid — did the cells cover genuinely different mechanisms (coverage a single loop with the same total round budget would likely have missed), or did they collapse onto one basin? Parallel cells buy exploration coverage; selection plus verification is what converts it into a result.
+      - **Next steps**: exactly one primary recommendation — merge the champion branch (verdict accept), investigate before anyone re-runs (suspicious), or what to change in a relaunch (reject) — followed by the composition follow-up when notes exist.
+
+      `summary`: 6-12 lines for a PR or channel post — goal, cells run, champion and verdict, baseline → verified medians, one-line mechanism insight, link targets (champion branch, prep branch).
+    inputs:
+      values:
+        goal:
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        metric_name:
+          schema: { type: string }
+          value: "${{ tasks.contract.outputs.values.effective_metric_name }}"
+        metric_direction:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        baseline_metric:
+          schema: { type: number }
+          value: "${{ tasks.contract.outputs.values.baseline_metric }}"
+        prep_branch:
+          schema: { type: string }
+          value: "${{ tasks.contract.outputs.values.prep_branch }}"
+        cells:
+          schema: *cells_schema
+          value: "${{ tasks.explore.outputs.values.cells_used }}"
+        cell_branches:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.explore.outputs.values.cell_branches }}"
+        cell_metrics:
+          schema: { type: array, items: { type: number } }
+          value: "${{ tasks.explore.outputs.values.cell_metrics }}"
+        cell_improvement_pcts:
+          schema: { type: array, items: { type: number } }
+          value: "${{ tasks.explore.outputs.values.cell_improvement_pcts }}"
+        cell_exit_reasons:
+          schema: { type: array, items: { type: string } }
+          value: "${{ tasks.explore.outputs.values.cell_exit_reasons }}"
+        champion_cell:
+          schema: { type: string }
+          value: "${{ tasks.curate.outputs.values.champion_cell }}"
+        champion_branch:
+          schema: { type: string }
+          value: "${{ tasks.curate.outputs.values.champion_branch }}"
+        champion_metric:
+          schema: { type: number }
+          value: "${{ tasks.curate.outputs.values.champion_metric }}"
+        mechanism_summary:
+          schema: { type: string }
+          value: "${{ tasks.curate.outputs.values.mechanism_summary }}"
+        composition_notes:
+          schema: { type: string }
+          value: "${{ tasks.curate.outputs.values.composition_notes }}"
+        verdict:
+          schema: { type: string }
+          value: "${{ tasks.verify.outputs.values.verdict }}"
+        claim:
+          schema: { type: string }
+          value: "${{ tasks.verify.outputs.values.claim }}"
+        baseline_median:
+          schema: { type: number }
+          value: "${{ tasks.verify.outputs.values.baseline_median }}"
+        candidate_median:
+          schema: { type: number }
+          value: "${{ tasks.verify.outputs.values.candidate_median }}"
+        measured_improvement_pct:
+          schema: { type: number }
+          value: "${{ tasks.verify.outputs.values.measured_improvement_pct }}"
+        holdout_ran:
+          schema: { type: boolean }
+          value: "${{ tasks.verify.outputs.values.holdout_ran }}"
+        transferred:
+          schema: { type: boolean }
+          value: "${{ tasks.verify.outputs.values.transferred }}"
+        strongest_counterargument:
+          schema: { type: string }
+          value: "${{ tasks.verify.outputs.values.strongest_counterargument }}"
+    outputs:
+      values:
+        islands_report:
+          required: true
+          schema:
+            type: string
+            description: Markdown portfolio report across cells, champion verification, and next steps
+        summary:
+          required: true
+          schema:
+            type: string
+            description: Executive summary suitable for a PR description or channel post
+outputs:
+  values:
+    verdict:
+      required: true
+      schema: { type: string, enum: [accept, reject, suspicious] }
+      value: "${{ tasks.verify.outputs.values.verdict }}"
+    decision_packet:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.verify.outputs.values.decision_packet }}"
+    claim:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.verify.outputs.values.claim }}"
+    champion_cell:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.curate.outputs.values.champion_cell }}"
+    champion_branch:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.curate.outputs.values.champion_branch }}"
+    champion_commit:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.curate.outputs.values.champion_commit }}"
+    champion_metric:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.curate.outputs.values.champion_metric }}"
+    champion_improved:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.curate.outputs.values.champion_improved }}"
+    baseline_metric:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.contract.outputs.values.baseline_metric }}"
+    baseline_commit:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.contract.outputs.values.baseline_commit }}"
+    prep_branch:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.contract.outputs.values.prep_branch }}"
+    cell_branches:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.explore.outputs.values.cell_branches }}"
+    cell_metrics:
+      required: true
+      schema: { type: array, items: { type: number } }
+      value: "${{ tasks.explore.outputs.values.cell_metrics }}"
+    cell_exit_reasons:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.explore.outputs.values.cell_exit_reasons }}"
+    mechanism_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.curate.outputs.values.mechanism_summary }}"
+    composition_notes:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.curate.outputs.values.composition_notes }}"
+    islands_report:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.report.outputs.values.islands_report }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.report.outputs.values.summary }}"

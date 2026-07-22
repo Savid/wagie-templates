@@ -28,7 +28,6 @@ func TestTemplatesValidateAgainstCombinedLibrary(t *testing.T) {
 		{path: "code", source: templateSource},
 		{path: "research", source: templateSource},
 		{path: "experiments", source: templateSource},
-		{path: "ci", source: templateSource},
 	}
 
 	files := make([]wagie.TemplateFile, 0, len(coreFiles)+64)

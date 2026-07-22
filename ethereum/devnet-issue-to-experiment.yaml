@@ -1,0 +1,348 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-issue-to-experiment
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a root-caused devnet issue might be fixable by metric-driven tuning: triages whether the cause is experiment-shaped (tunable regime vs correctness bug vs config/infra), resolves the owning client repo from a caller-supplied map, and emits a launch-ready experiment-loop input bundle — or a reasoned refusal with the right next step. Planner bridge: it prepares the campaign; the caller decides whether to launch and spend the compute.
+tags: ["ethereum", "devnet", "experiment", "triage", "bridge", "tuning", "autoresearch", "handoff"]
+examples:
+  - "turn this devnet issue into an experiment campaign"
+  - "is this root cause tunable or a bug to fix"
+  - "map the affected client to its repo and draft the goal"
+  - "prepare experiment-loop inputs from an investigation report"
+  - "refuse non-code root causes with a concrete next step"
+inputs:
+  values:
+    issue:
+      required: true
+      description: The investigated issue record — bind the investigation's canonical_issue output, unchanged
+      schema: &issue_schema
+        type: object
+        properties:
+          title: { type: string }
+          summary: { type: string, description: "Free-text reasoning, written first" }
+          classification:
+            type: object
+            properties:
+              category: { type: string, description: Failure mode — enum owned by the issue-contract runbook }
+              layer: { type: string, description: consensus | execution | network | tooling | cross-layer }
+              spread: { type: string, description: single-client | subset | all-clients | network-wide | unknown }
+              severity: { type: string, description: "Impact rank critical | major | minor — distinct from confidence; scale owned by the issue-contract runbook" }
+          first_bad:
+            type: object
+            description: Earliest artifact that explains later symptoms
+            properties:
+              kind: { type: string, description: slot | block | epoch | log | rpc | test | service-state }
+              value: { type: string }
+              at: { type: string }
+          affected:
+            type: array
+            items:
+              type: object
+              properties:
+                node: { type: string }
+                role: { type: string }
+                client: { type: string }
+                image: { type: string }
+          evidence:
+            type: array
+            items:
+              type: object
+              properties:
+                source: { type: string, description: Tool or datasource that produced it }
+                ref: { type: string, description: Executable re-derivation — a reader can re-run it }
+                at: { type: string, description: "Slot, block, epoch, or timestamp anchoring it" }
+                detail: { type: string, description: "What was observed, verbatim values preserved" }
+              required: [source, ref, detail]
+          co_present:
+            type: array
+            items: { type: string }
+            description: Co-present distractor signals, kept out of the root narrative
+          fingerprint:
+            type: object
+            description: Identity block owned by the fingerprinting runbook — no run-specific ids in the key
+            properties:
+              rationale: { type: string }
+              key: { type: string }
+              decision: { type: string, description: new | duplicate | variant | insufficient-context }
+              matched: { type: string }
+              variant_dimension: { type: string }
+              confidence: { type: string }
+          handles:
+            type: object
+            description: What lets an investigation restore or reach the broken state — fill only the id kinds that exist
+            properties:
+              snapshot_id: { type: string }
+              sandbox_id: { type: string }
+              enclave: { type: string }
+              network: { type: string, description: Source or hosted network id }
+              setup_summary:
+                type: object
+                description: Watch setup_summary copied whole — reproduction and reachability judge against it
+                properties:
+                  fork_schedule:
+                    type: object
+                    description: Fork name to activation epoch
+                    additionalProperties: { type: number }
+                  blob_schedule:
+                    type: object
+                    description: Max blobs per block by fork name
+                    additionalProperties: { type: number }
+                  load: { type: array, items: { type: string }, description: Load generators or applied transaction load }
+                  builders: { type: array, items: { type: string } }
+          confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
+        required: [title, summary]
+    root_cause_claim:
+      required: true
+      description: The investigation's root-cause claim
+      schema: { type: string }
+    verdict:
+      required: true
+      description: The investigation's validation verdict on that claim — vocabulary owned by the devnet adversarial-review runbook
+      schema: { type: string }
+    findings:
+      description: Hypothesis-hunt finding summaries from the investigation, for triage context — an index of the investigation's hunt_findings artifact
+      schema:
+        type: array
+        default: []
+        items:
+          type: object
+          properties:
+            id: { type: string, description: Matches the finding's id in the investigation's hunt_findings artifact }
+            angle: { type: string }
+            summary: { type: string }
+            severity: { type: string }
+          required: [id, angle, summary]
+    repo_map:
+      required: true
+      description: >-
+        Caller-supplied map from client name to its git repo. The trust boundary: experiment targets are never derived from observed network data, only looked up here. base_ref is the branch the campaign starts from when given (else main).
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            client: { type: string }
+            repo_url: { type: string }
+            base_ref: { type: string }
+          required: [client, repo_url]
+    branch_prefix:
+      description: Prefix for the campaign's result branch; the final name is `<prefix>-<issue-slug>`
+      schema: { type: string, default: autoresearch }
+tasks:
+  triage:
+    quality-gate: "${{ has(outputs.values.disposition) && has(outputs.values.rationale) && size(outputs.values.rationale) > 0 && has(outputs.values.confidence) && size(outputs.values.confidence) > 0 && has(outputs.values.branch_slug) && size(outputs.values.branch_slug) > 0 && has(outputs.values.next_step) && size(outputs.values.next_step) > 0 && (outputs.values.disposition != 'tunable' || (has(outputs.values.goal) && size(outputs.values.goal) > 0)) }}"
+    instructions: |-
+      Decide whether this root cause is experiment-shaped — the kind of thing a
+      greedy tune-and-measure loop can actually fix — and if so, write the
+      campaign goal. This gate exists because a hillclimb pointed at the wrong
+      kind of problem does damage: tuning a metric can mask a correctness bug
+      instead of fixing it.
+
+      Follow the runbook that owns triaging a devnet issue into an experiment
+      campaign — read it directly via
+      `panda read runbooks://devnet_issue_experiment_triage` —
+      it owns the four dispositions and their order, the goal-writing rules,
+      and the campaign fields (branch_slug, target_files, metric_direction,
+      rationale, confidence). Read the validation verdict on its own terms;
+      anything short of a validated, experiment-shaped cause refuses with
+      disposition insufficient-evidence — including the runbook's rule-4
+      fallback when the cause is validated but its experiment shape is not
+      established. The
+      disposition values gate this template's own outputs; the runbook owns
+      their criteria.
+
+      The goal becomes an experiment-loop `goal` verbatim, so it must stand
+      alone for a worker who has only the repo. Return goal as "" when not
+      tunable, and target_files as [] when unsure — letting the loop discover
+      scope beats pinning a wrong one.
+    inputs:
+      values:
+        issue:
+          schema: *issue_schema
+          value: "${{ inputs.values.issue }}"
+        root_cause_claim:
+          schema: { type: string }
+          value: "${{ inputs.values.root_cause_claim }}"
+        verdict:
+          schema: { type: string }
+          value: "${{ inputs.values.verdict }}"
+        findings:
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                id: { type: string }
+                angle: { type: string }
+                summary: { type: string }
+                severity: { type: string }
+              required: [id, angle, summary]
+          value: "${{ inputs.values.?findings.orValue([]) }}"
+    outputs:
+      values:
+        disposition:
+          required: true
+          schema:
+            type: string
+            enum: [tunable, fix-not-tune, not-code, insufficient-evidence]
+            description: Whether this root cause is experiment-shaped
+        rationale:
+          required: true
+          schema:
+            type: string
+            description: Which disposition rule fired and on what evidence
+        confidence:
+          required: true
+          schema:
+            type: string
+            description: How well the evidence supports the disposition — low|medium|high, on the evidence-discipline scale
+        goal:
+          required: true
+          schema:
+            type: string
+            description: Ready-to-use experiment-loop goal; empty unless tunable
+        branch_slug:
+          required: true
+          schema:
+            type: string
+            description: Branch-safe slug for the campaign's result branch
+        target_files:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Evidence-implicated repo paths; empty means let the loop discover scope
+        metric_direction:
+          required: true
+          schema:
+            type: string
+            enum: [minimize, maximize]
+            description: Direction of the metric the regime degrades
+        next_step:
+          required: true
+          schema:
+            type: string
+            description: One concrete recommendation matching the disposition
+  resolve:
+    quality-gate: "${{ has(outputs.values.resolved) && has(outputs.values.repo_url) && has(outputs.values.base_branch) && has(outputs.values.resolution_notes) && size(outputs.values.resolution_notes) > 0 && (!outputs.values.resolved || (size(outputs.values.repo_url) > 0 && size(outputs.values.base_branch) > 0)) }}"
+    instructions: |-
+      Resolve which repo the experiment campaign would run against, per the
+      repo-resolution rules of the runbook that owns triaging a devnet issue
+      into an experiment campaign
+      (`panda read runbooks://devnet_issue_experiment_triage`). Hard trust
+      boundary: only the
+      caller-supplied repo_map may name a target — never derive a repo URL
+      from observed network data, images, or the issue text.
+
+      When no single owning repo exists or the client has no map entry,
+      return resolved=false with repo_url and base_branch as "" and say why
+      in resolution_notes; otherwise base_branch is the map entry's base_ref
+      when set, else main. resolution_notes always names the chosen client,
+      the map entry used, and any image/version observations.
+    inputs:
+      values:
+        issue:
+          schema: *issue_schema
+          value: "${{ inputs.values.issue }}"
+        root_cause_claim:
+          schema: { type: string }
+          value: "${{ inputs.values.root_cause_claim }}"
+        repo_map:
+          schema:
+            type: array
+            items:
+              type: object
+              properties:
+                client: { type: string }
+                repo_url: { type: string }
+                base_ref: { type: string }
+              required: [client, repo_url]
+          value: "${{ inputs.values.repo_map }}"
+    outputs:
+      values:
+        resolved:
+          required: true
+          schema:
+            type: boolean
+            description: Whether one owning repo was identified from the map
+        repo_url:
+          required: true
+          schema:
+            type: string
+            description: Git URL of the owning repo; empty when unresolved
+        base_branch:
+          required: true
+          schema:
+            type: string
+            description: Branch the campaign starts from; empty when unresolved
+        resolution_notes:
+          required: true
+          schema:
+            type: string
+            description: Client choice, map entry used, and image/version observations
+outputs:
+  values:
+    launch:
+      required: true
+      schema:
+        type: boolean
+        description: True when the issue is tunable and a repo was resolved — the bundle is ready to hand to experiment-loop
+      value: "${{ tasks.triage.outputs.values.disposition == 'tunable' && tasks.resolve.outputs.values.resolved }}"
+    disposition:
+      required: true
+      schema: { type: string, enum: [tunable, fix-not-tune, not-code, insufficient-evidence] }
+      value: "${{ tasks.triage.outputs.values.disposition }}"
+    rationale:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.triage.outputs.values.rationale }}"
+    confidence:
+      required: true
+      schema: { type: string, description: "Disposition confidence — low|medium|high, on the evidence-discipline scale; gate launch decisions on it" }
+      value: "${{ tasks.triage.outputs.values.confidence }}"
+    next_step:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.triage.outputs.values.next_step }}"
+    experiment_inputs:
+      required: true
+      schema:
+        type: object
+        description: Mirrors dev.wagie/experiment-loop's caller inputs by name — bind them 1:1 when launching; meaningful only when launch is true
+        properties:
+          repo_url: { type: string }
+          base_branch: { type: string }
+          result_branch: { type: string }
+          goal: { type: string }
+          target_files:
+            type: array
+            items: { type: string }
+          metric_direction: { type: string, enum: [minimize, maximize] }
+        required: [repo_url, base_branch, result_branch, goal, target_files, metric_direction]
+      value: >-
+        ${{ {'repo_url': tasks.resolve.outputs.values.repo_url,
+             'base_branch': tasks.resolve.outputs.values.base_branch == '' ? 'main' : tasks.resolve.outputs.values.base_branch,
+             'result_branch': inputs.values.?branch_prefix.orValue('autoresearch') + '-' + tasks.triage.outputs.values.branch_slug,
+             'goal': tasks.triage.outputs.values.goal,
+             'target_files': tasks.triage.outputs.values.target_files,
+             'metric_direction': tasks.triage.outputs.values.metric_direction} }}
+    skipped_reason:
+      required: true
+      schema:
+        type: string
+        description: Why the bundle is not launch-ready; empty when launch is true
+      value: >-
+        ${{ tasks.triage.outputs.values.disposition == 'tunable' && tasks.resolve.outputs.values.resolved
+              ? ''
+              : (tasks.triage.outputs.values.disposition != 'tunable'
+                  ? 'not experiment-shaped (' + tasks.triage.outputs.values.disposition + '): ' + tasks.triage.outputs.values.next_step
+                  : 'repo unresolved: ' + tasks.resolve.outputs.values.resolution_notes) }}
+    resolution_notes:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.resolve.outputs.values.resolution_notes }}"

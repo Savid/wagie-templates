@@ -1,0 +1,86 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-run-local
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when you want to run a Kurtosis ethereum-package config on the LOCAL machine with no panda-compute, or attach to an already-running local enclave. Launches it and returns a local-kind network_target ready to observe or investigate. Snapshot and restore are not available locally — that is a panda-compute capability.
+tags: ["ethereum", "devnet", "kurtosis", "local", "run", "no-compute"]
+examples:
+  - "launch this args file in local Kurtosis"
+  - "attach to an existing local enclave"
+  - "return a local network target for observation"
+  - "start config on my laptop without panda-compute"
+inputs:
+  values:
+    package_ref:
+      description: Optional override for the Kurtosis package reference. When unset, the ethereum-package default from the Kurtosis runbooks applies.
+      schema: { type: string }
+    enclave_name:
+      description: Attach to this already-running local enclave instead of launching, if set
+      schema: { type: string }
+    launch_requirements:
+      description: "Flags the config requires the launch to pass (e.g. --privileged), as emitted by config synthesis; the Kurtosis runbook owns their semantics"
+      schema: { type: array, items: { type: string } }
+  artifacts:
+    config:
+      required: true
+      contentType: text/yaml
+      description: Kurtosis ethereum-package args-file to launch locally
+tasks:
+  launch:
+    quality-gate: "${{ has(outputs.values.network_target) && has(outputs.values.enclave) && size(outputs.values.enclave) > 0 }}"
+    instructions: |-
+      Launch the Kurtosis ethereum devnet on the LOCAL machine (no
+      panda-compute), or attach to the named running enclave, per the runbook
+      that owns running and reaching a Kurtosis devnet (find it via
+      `panda search runbooks "run a devnet locally with kurtosis"`). Honor a
+      `package_ref` override when supplied, and pass every flag in
+      `launch_requirements` to the launch — config synthesis recorded them as
+      mandatory and that runbook owns their semantics. Shape the handle per the
+      network_target contract in the runbook that owns debugging an Ethereum
+      network.
+
+      Emit the network_target (kind: local) and the enclave name.
+    inputs:
+      values:
+        package_ref:
+          schema: { type: string }
+          value: "${{ inputs.values.?package_ref.orValue('') }}"
+        enclave_name:
+          schema: { type: string }
+          value: "${{ inputs.values.?enclave_name.orValue('') }}"
+        launch_requirements:
+          schema: { type: array, items: { type: string } }
+          value: "${{ inputs.values.?launch_requirements.orValue([]) }}"
+      artifacts:
+        config:
+          ref: inputs.artifacts.config
+    outputs:
+      values:
+        network_target:
+          required: true
+          schema: &network_target_schema
+            type: object
+            properties:
+              kind: { type: string, description: local — owned by the runbook that owns debugging an Ethereum network }
+              enclave: { type: string }
+              sandbox_id: { type: string }
+              network_id: { type: string, description: "Public network id, when known" }
+            required: [kind]
+        enclave:
+          required: true
+          schema: { type: string }
+outputs:
+  values:
+    network_target:
+      required: true
+      schema: *network_target_schema
+      value: "${{ tasks.launch.outputs.values.network_target }}"
+    enclave:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.launch.outputs.values.enclave }}"

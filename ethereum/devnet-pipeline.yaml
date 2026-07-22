@@ -1,0 +1,304 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-pipeline
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use to run the full Ethereum devnet reproduce-and-analyze pipeline end to end from a hosted devnet name: build a Kurtosis config, then launch, snapshot, watch, and root-cause every surfaced issue on panda-compute. A name-first convenience wrapper — config synthesis in front of devnet-pipeline-from-config, which owns the launch-to-investigation stages.
+tags: ["ethereum", "devnet", "kurtosis", "pipeline", "reproduce", "watch", "investigate"]
+examples:
+  - "run remote panda-compute devnet pipeline end to end"
+  - "launch remote devnet snapshots then root-cause findings"
+  - "from hosted devnet name to remote RCA reports"
+  - "watch restored compute snapshot and investigate surfaced issues"
+inputs:
+  values:
+    devnet:
+      required: true
+      description: Hosted devnet name to reproduce, e.g. glamsterdam-devnet-6
+      schema: { type: string }
+    steering:
+      description: Optional config steering (client subset, tooling, accelerated forks)
+      schema: { type: string }
+    package_ref:
+      description: Optional override for the Kurtosis package reference, threaded to config synthesis and the compute launch
+      schema: { type: string }
+    snapshot_epochs:
+      description: Epochs to snapshot the launched network at
+      schema: { type: array, items: { type: number }, default: [0] }
+    watch_from_epoch:
+      description: Captured epoch whose snapshot the watch restores and runs forward from; must be one of snapshot_epochs. Unset or negative means the earliest captured epoch (an observed replay of the whole window)
+      schema: { type: number }
+    watch_epochs:
+      description: How many epochs to watch the restored snapshot (default 5)
+      schema: { type: number, default: 5 }
+    sandbox_ttl:
+      description: Optional sandbox TTL (e.g. 2h) to bound each VM's lifetime
+      schema: { type: string }
+tasks:
+  config:
+    uses: dev.wagie/devnet-config@1.0.0
+    inputs:
+      values:
+        devnet:
+          value: "${{ inputs.values.devnet }}"
+        steering:
+          value: "${{ inputs.values.?steering.orValue('') }}"
+        package_ref:
+          value: "${{ inputs.values.?package_ref.orValue('') }}"
+  run:
+    needs: [config]
+    uses: dev.wagie/devnet-pipeline-from-config@1.0.0
+    inputs:
+      values:
+        devnet:
+          value: "${{ inputs.values.devnet }}"
+        package_ref:
+          value: "${{ inputs.values.?package_ref.orValue('') }}"
+        snapshot_epochs:
+          value: "${{ inputs.values.?snapshot_epochs.orValue([0]) }}"
+        watch_from_epoch:
+          value: "${{ inputs.values.?watch_from_epoch.orValue(-1.0) }}"
+        watch_epochs:
+          value: "${{ inputs.values.?watch_epochs.orValue(5) }}"
+        sandbox_ttl:
+          value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
+        fidelity_notes:
+          value: "${{ tasks.config.outputs.values.deviations + tasks.config.outputs.values.assumptions }}"
+        launch_requirements:
+          value: "${{ tasks.config.outputs.values.launch_requirements }}"
+      artifacts:
+        config:
+          ref: tasks.config.outputs.artifacts.config
+outputs:
+  values:
+    config_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.config.outputs.values.summary }}"
+    config_assumptions:
+      required: true
+      schema: { type: array, items: { type: string }, description: "Assumptions or unresolved gaps from config synthesis, including source inconsistencies" }
+      value: "${{ tasks.config.outputs.values.assumptions }}"
+    config_deviations:
+      required: true
+      schema: { type: array, items: { type: string }, description: "Steering-driven deviations from the hosted network — config-fidelity context for judging downstream issues" }
+      value: "${{ tasks.config.outputs.values.deviations }}"
+    config_dry_run:
+      required: true
+      schema:
+        type: object
+        properties:
+          attempted: { type: boolean }
+          command: { type: string }
+          passed: { type: boolean }
+        required: [attempted]
+      value: "${{ tasks.config.outputs.values.dry_run }}"
+    base_snapshot_id:
+      required: true
+      schema: { type: string, description: "Snapshot of the freshly launched network, restorable into new sandboxes" }
+      value: "${{ tasks.run.outputs.values.base_snapshot_id }}"
+    genesis_time:
+      required: true
+      schema: { type: string, description: "Source network genesis time (sandbox clock) from the snapshot stage — thread into feedback-loop investigations for the reproduction-fidelity check; empty when unrecorded" }
+      value: "${{ tasks.run.outputs.values.?genesis_time.orValue('') }}"
+    snapshots:
+      required: true
+      schema: &snapshot_catalog_schema
+        type: array
+        items:
+          type: object
+          properties:
+            epoch: { type: number }
+            snapshot_id: { type: string }
+            captured_at: { type: string, description: "Capture time on the sandbox clock — carried on the epoch-0 base entry (a mid-epoch capture); the root-cause runbook reads it for pre-first_bad restores" }
+          required: [epoch, snapshot_id]
+      value: "${{ tasks.run.outputs.values.snapshots }}"
+    issues:
+      required: true
+      schema:
+        type: array
+        items: &issue_item_schema
+          type: object
+          properties:
+            title: { type: string }
+            summary: { type: string, description: "Free-text reasoning, written first" }
+            classification:
+              type: object
+              properties:
+                category: { type: string, description: Failure mode — enum owned by the issue-contract runbook }
+                layer: { type: string, description: consensus | execution | network | tooling | cross-layer }
+                spread: { type: string, description: single-client | subset | all-clients | network-wide | unknown }
+                severity: { type: string, description: "Impact rank critical | major | minor — distinct from confidence; scale owned by the issue-contract runbook" }
+            first_bad:
+              type: object
+              description: Earliest artifact that explains later symptoms
+              properties:
+                kind: { type: string, description: slot | block | epoch | log | rpc | test | service-state }
+                value: { type: string }
+                at: { type: string }
+            affected:
+              type: array
+              items:
+                type: object
+                properties:
+                  node: { type: string }
+                  role: { type: string }
+                  client: { type: string }
+                  image: { type: string }
+            evidence:
+              type: array
+              items: &evidence_item_schema
+                type: object
+                properties:
+                  source: { type: string, description: Tool or datasource that produced it }
+                  ref: { type: string, description: Executable re-derivation — a reader can re-run it }
+                  at: { type: string, description: "Slot, block, epoch, or timestamp anchoring it" }
+                  detail: { type: string, description: "What was observed, verbatim values preserved" }
+                required: [source, ref, detail]
+            co_present:
+              type: array
+              items: { type: string }
+              description: Co-present distractor signals, kept out of the root narrative
+            fingerprint:
+              type: object
+              description: Identity block owned by the fingerprinting runbook — no run-specific ids in the key
+              properties:
+                rationale: { type: string }
+                key: { type: string }
+                decision: { type: string, description: new | duplicate | variant | insufficient-context }
+                matched: { type: string }
+                variant_dimension: { type: string }
+                confidence: { type: string }
+            handles:
+              type: object
+              description: What lets an investigation restore or reach the broken state — fill only the id kinds that exist
+              properties:
+                snapshot_id: { type: string }
+                sandbox_id: { type: string }
+                enclave: { type: string }
+                network: { type: string, description: Source or hosted network id }
+                setup_summary:
+                  type: object
+                  description: Watch setup_summary copied whole — reproduction and reachability judge against it
+                  properties:
+                    fork_schedule:
+                      type: object
+                      description: Fork name to activation epoch
+                      additionalProperties: { type: number }
+                    blob_schedule:
+                      type: object
+                      description: Max blobs per block by fork name
+                      additionalProperties: { type: number }
+                    load: { type: array, items: { type: string }, description: Load generators or applied transaction load }
+                    builders: { type: array, items: { type: string } }
+            confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
+          required: [title, summary]
+      value: "${{ tasks.run.outputs.values.issues }}"
+    healthy_window_summary:
+      required: true
+      schema: { type: string, description: "One paragraph instead of issues when the watch window was healthy, else empty" }
+      value: "${{ tasks.run.outputs.values.healthy_window_summary }}"
+    watch_notes:
+      required: true
+      schema: { type: string, description: "Reach/coverage caveats for the watch window, empty when none" }
+      value: "${{ tasks.run.outputs.values.watch_notes }}"
+    final_snapshot:
+      required: true
+      schema:
+        type: object
+        properties:
+          snapshotted: { type: boolean }
+          snapshot_id: { type: string }
+        required: [snapshotted]
+      value: "${{ tasks.run.outputs.values.final_snapshot }}"
+    watch_feedback:
+      required: true
+      schema: &feedback_schema
+        type: object
+        description: Follow-up queue — shape owned by the feedback-queue runbook
+        properties:
+          priority_summary: { type: string }
+          terminal: { type: boolean }
+          terminal_reason: { type: string }
+          tasks:
+            type: array
+            items:
+              type: object
+              properties:
+                id: { type: string }
+                kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | experiment-triage | manual-review | publish | no-op }
+                reason: { type: string }
+                priority: { type: string, description: high | medium | low }
+                inputs: { type: object, description: "Handles and query params only, values stringified", additionalProperties: { type: string } }
+                success_condition: { type: string }
+                stop_condition: { type: string }
+                runbook_refs: { type: array, items: { type: string } }
+                blocked_by: { type: string }
+              required: [kind, reason, success_condition, stop_condition]
+        required: [tasks]
+      value: "${{ tasks.run.outputs.values.watch_feedback }}"
+    investigations:
+      required: true
+      schema:
+        type: array
+        items: &report_schema
+          type: object
+          properties:
+            summary: { type: string, description: "Reasoning in prose, written first" }
+            root_cause:
+              type: object
+              properties:
+                statement: { type: string }
+                family: { type: string }
+                confidence: { type: string, description: "high | medium | low, on the evidence-discipline scale" }
+              required: [statement, confidence]
+            reproduction:
+              type: object
+              properties:
+                status: { type: string, description: reproduced | partial | not-reproduced | local-live | public-live | tooling-live | historical-only }
+                recipe: { type: array, items: { type: string } }
+                fidelity_notes: { type: array, items: { type: string }, description: "Known deviations that materially bear on fidelity, carried from the fidelity check into reporting" }
+              required: [status]
+            timeline:
+              type: array
+              items:
+                type: object
+                properties:
+                  ts: { type: string }
+                  kind: { type: string, description: restart | block | timing | log | note }
+                  text: { type: string }
+                  log: { type: string }
+                required: [text]
+            hypotheses:
+              type: object
+              properties:
+                supported: { type: array, items: { type: string } }
+                rejected: { type: array, items: { type: string } }
+                partial: { type: array, items: { type: string } }
+            trace_verdict: { type: string, description: reachable | partially-reachable | not-reachable | insufficient-evidence }
+            review_verdict: { type: string, description: survives | weakened | refuted }
+            citations:
+              type: array
+              items: *evidence_item_schema
+            feedback: { type: object, description: "Embedded follow-up queue, identical to the sibling feedback output — shape owned by the feedback-queue runbook" }
+            next_action: { type: string, description: file client bug | spec issue | config fix | tooling fix | experiment triage | rerun with more evidence | no issue reproduced }
+          required: [summary, root_cause, reproduction, trace_verdict, review_verdict, next_action]
+      value: "${{ tasks.run.outputs.values.investigations }}"
+    feedback:
+      required: true
+      schema:
+        type: array
+        description: Follow-up queue per investigated issue, parallel to investigations — shape owned by the feedback-queue runbook
+        items: *feedback_schema
+      value: "${{ tasks.run.outputs.values.feedback }}"
+    investigated_issues:
+      required: true
+      schema:
+        type: array
+        description: The canonical issue record each investigation ran on, parallel to investigations
+        items: *issue_item_schema
+      value: "${{ tasks.run.outputs.values.investigated_issues }}"

@@ -1,0 +1,314 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/experiment-report
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when an experiment optimization run has finished and its trial ledger and
+  metrics should become a single self-contained index.html for humans: KPI
+  summary, best-so-far chart, per-round trial table with suspicious rounds
+  flagged, and how to reuse the result. Consumes the experiment family's
+  outputs verbatim and renders only — it recomputes and re-judges nothing.
+tags: ["experiment", "report", "html", "visualization", "trial-ledger", "optimization", "summary"]
+examples:
+  - "render an html report from an experiment run"
+  - "turn the trial ledger into a shareable page"
+  - "visualize optimization rounds as a web page"
+  - "make an index.html for the hillclimb results"
+  - "publish what happened across the rounds"
+inputs:
+  values:
+    goal:
+      required: true
+      description: What the run was optimizing and why, as given to the loop.
+      schema: { type: string }
+    metric_name:
+      required: true
+      description: Label of the scalar that was optimized.
+      schema: { type: string }
+    metric_direction:
+      description: Whether lower or higher metric values were better.
+      schema: { type: string, default: minimize, enum: [minimize, maximize] }
+    trials:
+      required: true
+      description: Typed trial ledger from the run, one record per round in run order (the experiment family's shared trial-record shape).
+      schema: &trials_schema
+        type: array
+        items:
+          type: object
+          properties:
+            round: { type: number }
+            hypothesis: { type: string }
+            commit: { type: string }
+            snapshot_id: { type: string }
+            status: { type: string, enum: [pass, fail, invalid, suspicious] }
+            metric: { type: number }
+            spread: { type: number }
+            paired_gain: { type: number }
+            paired_gain_stderr: { type: number }
+            best_after: { type: number }
+            decision_source: { type: string, enum: [auto, agent] }
+            measurement_note: { type: string }
+            interpretation: { type: string }
+            next_action: { type: string }
+          required: [round, hypothesis, status, interpretation]
+    baseline_metric:
+      required: true
+      description: Metric of the untouched starting state.
+      schema: { type: number }
+    best_metric:
+      required: true
+      description: Best metric the run accepted.
+      schema: { type: number }
+    confirmation_metric:
+      description: Independent confirmation measurement taken on the result at finalize, when the run produced one.
+      schema: { type: number }
+    confirmation_spread:
+      description: Max minus min across the confirmation measurements, when the run took them.
+      schema: { type: number }
+    confirmed:
+      description: Whether the winning metric reproduced on the independent confirmation; false means the headline improvement is unverified and must lead the page.
+      schema: { type: boolean, default: true }
+    reconciliation_gap:
+      description: Improvement the run claimed (sum of accepted gains) minus the improvement the confirmation delivered, when the run reconciled its ledger. Positive means the accepted gains did not compose.
+      schema: { type: number }
+    reconciled:
+      description: Whether the reconciliation gap sits within the run's noise band; false means the run's own accepted gains do not add up to the result it shipped.
+      schema: { type: boolean, default: true }
+    improvement_pct:
+      description: Percent improvement from baseline to best in the goal direction.
+      schema: { type: number }
+    exit_reason:
+      description: Why the loop stopped (e.g. saturated, improvement, patience, plateau, max_iterations).
+      schema: { type: string, default: "" }
+    metric_limit_set:
+      description: Whether the run had a theoretical metric limit configured (bind the loop output of the same name). When false, metric_limit is a placeholder and no limit annotation renders.
+      schema: { type: boolean, default: false }
+    metric_limit:
+      description: Theoretical best the metric could reach, for showing a saturated exit against its ceiling (meaningful only when metric_limit_set).
+      schema: { type: number, default: 0 }
+    converged:
+      description: Whether the loop stopped on its own convergence criteria rather than the round cap.
+      schema: { type: boolean, default: false }
+    accepted_count:
+      description: Rounds whose candidate was accepted.
+      schema: { type: number, default: 0 }
+    discarded_count:
+      description: Rounds whose candidate was discarded.
+      schema: { type: number, default: 0 }
+    integrity_violation_count:
+      description: Rounds rejected for touching the frozen scoring surface.
+      schema: { type: number, default: 0 }
+    result_snapshot_id:
+      description: Durable snapshot (or ref/commit) pinning the winning state; empty when nothing was accepted.
+      schema: { type: string, default: "" }
+    environment_summary:
+      description: One-line note on the verified environment and measurement quality from setup.
+      schema: { type: string, default: "" }
+    summary:
+      description: The run's executive summary, when the producing template emitted one.
+      schema: { type: string, default: "" }
+    progress_report:
+      description: The run's markdown progress report, when the producing template emitted one; its convergence and environment prose seeds the narrative sections.
+      schema: { type: string, default: "" }
+tasks:
+  render:
+    quality-gate: "${{ has(outputs.values.headline) && size(outputs.values.headline) > 0 }}"
+    instructions: |-
+      Render one experiment run into a single self-contained `index.html`
+      (the `report` artifact) plus a one-line `headline`. The page is the
+      run's permanent record and its reader is deciding whether to trust and
+      reuse the result — err on the side of showing more of the data, never
+      less: every field a trial carries appears somewhere on the page.
+
+      Fidelity first: every measured metric, gain, id, status, and note comes
+      verbatim from `trials` and the scalar inputs — never recompute, re-judge,
+      or infer a value; render a missing or omitted field as absent (an em
+      dash), not a guess. The run already made its verdicts; you reproduce
+      them. The one exception is display precision on a value the run supplied
+      as a long derived float (e.g. `improvement_pct` arriving as
+      99.93975298724772): round it to a sensible width for the label (two
+      decimals) — this is formatting, not recomputing. Measured metric values
+      are shown at their given precision, never rounded. Charts draw the
+      supplied numbers as they are; a visualization adds no judgment.
+
+      The page must be fully self-contained and offline-safe: all CSS and any
+      JS inline, charts as inline SVG, no external fonts, images, stylesheets,
+      scripts, or network requests of any kind. Make it readable in both light
+      and dark color schemes (prefers-color-scheme), and sensible for 1 round
+      or 200 — wide content scrolls inside its own container, never the page.
+      Plain `<details>` disclosures are the only interactivity allowed; the
+      page must read complete with JS disabled.
+
+      Content, top to bottom:
+      - Verdict banner, only when something failed: if `confirmed` is false or
+        (`reconciliation_provided` and `reconciled` is false), open the page
+        with a prominent banner naming which check failed — the winning number
+        did not reproduce on the independent confirmation, or the accepted
+        gains do not add up to the shipped result (quote `reconciliation_gap`
+        verbatim) — and stating plainly that the headline improvement is
+        unverified. The rest of the page still renders in full.
+      - Header: goal, metric name and direction, exit reason, converged flag.
+      - KPI row: baseline, best, confirmation metric ± `confirmation_spread`
+        (only when `confirmation_provided`; badge it confirmed/unconfirmed per
+        `confirmed`), improvement percent — `improvement_pct` is baseline →
+        loop best, so CAPTION IT AS SUCH; never label it confirmation-based
+        (a rendered report captioned the best-based 53.80% as
+        "confirmation-based" while its own summary said 53.9% — the two
+        figures differ whenever the confirmation differs from the best, and a
+        mismatched caption is a recompute-class error even though the number
+        was supplied) — reconciliation gap when
+        `reconciliation_provided` (badged per `reconciled`), rounds (the trial
+        count), accepted / discarded / integrity violations.
+      - Best-so-far progression: an inline SVG step chart across rounds from
+        each trial's `best_after` (carry the previous best across rounds that
+        lack one; skip nothing). Draw the series as a single step line only —
+        best-so-far is constant between improvements, so the value holds flat
+        until a round lowers (or, when maximizing, raises) it and then steps.
+        Do not also draw a straight/interpolated connector between points; a
+        diagonal falsely implies gradual change within a round. Visually
+        distinguish rounds that set a new best and rounds marked suspicious.
+        When `confirmation_provided`, draw the confirmation metric as a
+        labelled horizontal reference line so the gap between the loop's best
+        and the independent check is visible on the chart itself. When
+        `metric_limit_set`, also draw `metric_limit` as a labelled dashed
+        horizontal reference line (the metric's theoretical ceiling): a
+        `saturated` exit reads as the step line meeting that line, and any
+        remaining gap is headroom the run left on the table — state that gap
+        in the header when `exit_reason` is `saturated`.
+      - Per-round evidence chart, only when any trial carries `paired_gain`:
+        a second inline SVG with one mark per measured round at its
+        `paired_gain`, a ±`paired_gain_stderr` whisker, and a zero line, so a
+        reader sees at a glance which accepted rounds cleared zero comfortably
+        and which squeaked past on a wide error bar. Distinguish kept
+        (status pass), discarded (fail), and suspicious rounds; skip rounds
+        without a gain rather than plotting zeros.
+      - Trial table, one row per round in order: round, status (badge — make
+        `suspicious` loud), decision source when present (auto vs agent),
+        metric, evidence (`paired_gain ± paired_gain_stderr` when the record
+        has them, else `spread` when present, else an em dash), best_after,
+        measurement note (visually loud when non-empty — it means the verifier
+        did not trust the number), hypothesis, and the record's snapshot or
+        commit id. Bold rows that set a new best. Never drop rows — negative
+        and invalid trials are first-class data.
+      - Per-round detail: give each round a `<details>` disclosure (beneath
+        its row or in a section keyed by round number) carrying the full
+        untruncated hypothesis, `interpretation`, `measurement_note`, and
+        `next_action` when present. The table may truncate long text for
+        scanability only because this detail view carries all of it.
+      - Narrative: the run `summary` when provided, then convergence and
+        environment prose drawn from `progress_report` and
+        `environment_summary` — quote or lightly compress that prose; add no
+        claims beyond it.
+      - Result: `result_snapshot_id` and how to boot/verify it, or a plain
+        statement that nothing was accepted and the baseline stands. Repeat
+        the caveat that the search metric only nominates — the reader should
+        independently verify from the result snapshot before promoting.
+
+      `headline` is one sentence for chat and links: metric, baseline → best,
+      improvement percent, exit reason, and a warning when any trial is
+      suspicious. When `confirmed` is false, the sentence leads with
+      "UNCONFIRMED:" and quotes the confirmation figure beside the claimed
+      best.
+
+      Write the file and declare it as the `report` artifact. Requires a
+      worker that can write files; no network or repository access is needed.
+    inputs:
+      values:
+        goal:
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        metric_name:
+          schema: { type: string }
+          value: "${{ inputs.values.metric_name }}"
+        metric_direction:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        trials:
+          schema: *trials_schema
+          value: "${{ inputs.values.trials }}"
+        baseline_metric:
+          schema: { type: number }
+          value: "${{ inputs.values.baseline_metric }}"
+        best_metric:
+          schema: { type: number }
+          value: "${{ inputs.values.best_metric }}"
+        confirmation_provided:
+          schema: { type: boolean, description: "Whether the run supplied an independent confirmation measurement (when false, the confirmation KPI and reference line are omitted)" }
+          value: "${{ has(inputs.values.confirmation_metric) }}"
+        confirmation_metric:
+          schema: { type: number }
+          value: "${{ inputs.values.?confirmation_metric.orValue(inputs.values.best_metric) }}"
+        confirmation_spread:
+          schema: { type: number }
+          value: "${{ inputs.values.?confirmation_spread.orValue(0.0) }}"
+        confirmed:
+          schema: { type: boolean }
+          value: "${{ inputs.values.?confirmed.orValue(true) }}"
+        reconciliation_provided:
+          schema: { type: boolean, description: "Whether the run reconciled its accepted gains against the confirmation (when false, the reconciliation KPI is omitted)" }
+          value: "${{ has(inputs.values.reconciliation_gap) }}"
+        reconciliation_gap:
+          schema: { type: number }
+          value: "${{ inputs.values.?reconciliation_gap.orValue(0.0) }}"
+        reconciled:
+          schema: { type: boolean }
+          value: "${{ inputs.values.?reconciled.orValue(true) }}"
+        improvement_pct:
+          schema: { type: number }
+          value: "${{ inputs.values.?improvement_pct.orValue(0.0) }}"
+        exit_reason:
+          schema: { type: string }
+          value: "${{ inputs.values.?exit_reason.orValue('') }}"
+        metric_limit_set:
+          schema: { type: boolean }
+          value: "${{ inputs.values.?metric_limit_set.orValue(false) }}"
+        metric_limit:
+          schema: { type: number }
+          value: "${{ inputs.values.?metric_limit.orValue(0.0) }}"
+        converged:
+          schema: { type: boolean }
+          value: "${{ inputs.values.?converged.orValue(false) }}"
+        accepted_count:
+          schema: { type: number }
+          value: "${{ inputs.values.?accepted_count.orValue(0) }}"
+        discarded_count:
+          schema: { type: number }
+          value: "${{ inputs.values.?discarded_count.orValue(0) }}"
+        integrity_violation_count:
+          schema: { type: number }
+          value: "${{ inputs.values.?integrity_violation_count.orValue(0) }}"
+        result_snapshot_id:
+          schema: { type: string }
+          value: "${{ inputs.values.?result_snapshot_id.orValue('') }}"
+        environment_summary:
+          schema: { type: string }
+          value: "${{ inputs.values.?environment_summary.orValue('') }}"
+        summary:
+          schema: { type: string }
+          value: "${{ inputs.values.?summary.orValue('') }}"
+        progress_report:
+          schema: { type: string }
+          value: "${{ inputs.values.?progress_report.orValue('') }}"
+    outputs:
+      values:
+        headline:
+          required: true
+          schema: { type: string, description: "One-sentence result line for chat and links (metric, baseline → best, improvement, exit reason, suspicious warning when applicable)" }
+      artifacts:
+        report:
+          required: true
+          contentType: text/html
+          description: Self-contained index.html report of the run (inline CSS/JS/SVG, no external assets)
+outputs:
+  values:
+    headline:
+      required: true
+      schema: { type: string, description: One-sentence result line for chat and links }
+      value: "${{ tasks.render.outputs.values.headline }}"
+  artifacts:
+    report:
+      ref: tasks.render.outputs.artifacts.report

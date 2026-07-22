@@ -7,8 +7,14 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when iteratively tuning any git-tracked artifact in a repo against a scalar metric. Caller only needs to provide `repo_url`, `goal`, and `result_branch`; the setup task clones the repo, discovers or scaffolds the missing pieces (target files, setup command, benchmark, correctness command, metric name) from the goal and repo conventions, then the loop proposes → applies → checks → measures → keeps-or-reverts greedily until a patience window of no-improvement or max iterations. Works for code performance, SQL queries, prompts, configs, ML training loops, Docker image size, or any repo that can emit a scalar from a shell command. Any of the discovered parameters can be overridden by the caller when they are known up front.
-tags: ["experiment", "optimization", "hillclimb", "benchmark", "autonomous", "autoresearch", "metric"]
+  Use when iteratively tuning any git-tracked artifact in a repo against a scalar metric. Caller only needs to provide `repo_url`, `goal`, and `result_branch`; the setup task clones the repo, discovers or scaffolds the missing pieces (target files, setup command, benchmark, correctness command, metric name) from the goal and repo conventions, then the loop proposes → applies → checks → measures → keeps-or-reverts greedily until a patience window of no-improvement or max iterations. Emits a typed trial ledger (hypothesis, commit, status, metric, interpretation per round) that experiment-verify consumes for independent acceptance. Works for code performance, SQL queries, prompts, configs, ML training loops, Docker image size, or any repo that can emit a scalar from a shell command. Any of the discovered parameters can be overridden by the caller when they are known up front.
+tags: ["experiment", "optimization", "hillclimb", "benchmark", "autonomous", "autoresearch", "metric", "trials"]
+examples:
+  - "clone repo tune p95 latency and push result branch"
+  - "discover benchmark and target files from the repo"
+  - "scaffold a frozen eval before tuning code"
+  - "run explicit target files and benchmark command"
+  - "emit a typed trial ledger for later verification"
 inputs:
   values:
     repo_url:
@@ -61,938 +67,469 @@ inputs:
       description: Stop after this many consecutive rounds where the measured metric does not move outside the noise band of the current best (within `noise_epsilon`). Catches the case where the metric saturates at a floor (e.g. memoization cache hits, timer resolution) and every round becomes a tie.
       schema: { type: number, default: 3 }
     noise_epsilon:
-      description: Relative tolerance used both as an acceptance threshold and a plateau detector. A round is considered "no movement" when `|new - best| <= noise_epsilon * max(|baseline|, 1)`. Default 0 keeps the strict accept rule. Set above the benchmark's run-to-run jitter when measurements are noisy.
+      description: Relative tolerance used both as an acceptance threshold and a plateau detector. A round is considered "no movement" when `|new - best| <= noise_epsilon * max(|baseline|, 1)`. Default 0 means the setup task derives it from the baseline's observed run-to-run jitter; set an explicit positive value to override.
+      schema: { type: number, default: 0 }
+    measurement_runs:
+      description: Optional override for measurements per candidate inside the loop (the median is scored; the spread joins the acceptance threshold). Default 0 means the setup task derives it from observed baseline jitter.
       schema: { type: number, default: 0 }
     auto_cleanup:
       description: Whether to prune the scratch workspace after a successful run. Default off so failed runs stay inspectable.
       schema: { type: boolean, default: false }
 tasks:
-  experiment:
+  setup:
+    quality-gate: "${{ has(outputs.values.baseline_metric) && has(outputs.values.baseline_commit) && size(outputs.values.baseline_commit) > 0 && has(outputs.values.workspace_path) && size(outputs.values.workspace_path) > 0 && has(outputs.values.effective_target_files) && size(outputs.values.effective_target_files) > 0 && has(outputs.values.effective_experiment_command) && size(outputs.values.effective_experiment_command) > 0 && has(outputs.values.effective_metric_name) && size(outputs.values.effective_metric_name) > 0 && has(outputs.values.effective_noise_epsilon) && outputs.values.effective_noise_epsilon >= 0.0 && has(outputs.values.effective_measurement_runs) && outputs.values.effective_measurement_runs >= 1.0 && has(outputs.values.frozen_files) }}"
+    instructions: |-
+      Prepare a clean scratch workspace AND resolve all missing experiment parameters from the repo itself. Leadership only knows the repo URL and the goal; you have the cloned code, so you own discovery. The scaffolded benchmark *is* the scoring contract for the entire run — a sloppy bench will produce a meaningless run no matter how good the proposer is. Treat this task as the most important one in the loop.
+
+      Step 0 — Validate inputs.
+      - `patience` MUST be strictly less than `max_iterations`. If `patience >= max_iterations`, the loop's no-improvement exit can never trigger before the hard cap, so the run will burn the full budget on plateaus. Fail this task with a clear error: `patience (X) must be < max_iterations (Y)`.
+      - `plateau_patience` should be at least 2 and strictly less than `max_iterations`. If invalid, fail with a clear error.
+      - `noise_epsilon` and `measurement_runs` must be >= 0. If negative, fail.
+
+      Step 1 — Clone and branch.
+      - Clone `repo_url` into the current directory.
+      - Check out `base_branch`. Create local branch `result_branch` from it.
+      - Capture the **absolute path** of the clone root and return it as `workspace_path`.
+
+      Step 2 — Resolve each parameter. For each field below, honour the caller-provided value when it is non-empty; otherwise derive it from the repo and goal.
+
+      `effective_setup_command`:
+      - If `setup_command` was provided, use it.
+      - Else detect the project's conventional install/build sequence by reading the manifest files at the repo root (package manager lockfile, project config, Makefile). Use the project's idiomatic command. If nothing is obviously needed, return `""`.
+
+      `effective_target_files` (the **mutable** scope):
+      - If `target_files` was provided (non-empty), use it.
+      - Else read the repo + goal and identify the artifact being optimized. Prefer the narrowest scope that covers the goal. Profile-guided where possible: include hot helpers the target plausibly dominates through; exclude obviously cold callees.
+      - Hard rule: this list must NOT contain any file the benchmark or correctness command reads as scoring input. Mutable code and frozen scoring code are disjoint. The proposer must never be able to edit its own scorer.
+
+      `effective_experiment_command` and `effective_metric_name` (the **frozen** scoring contract):
+      - If `experiment_command` was provided, use it (the caller has decided). If `metric_name` was also provided, use it; otherwise infer from the command's output format.
+      - Else first try to discover an existing benchmark in the project's conventional framework. If you find one that already targets the goal's artifact and reports a meaningful scalar, use it.
+      - Else scaffold one. **Before writing a single line, read the docs for the benchmarking framework you intend to use** (web search the framework's "best practices" / "guidelines" / "common pitfalls" page — every mature harness has one) and apply the framework's anti-pitfall guidance. Generic scaffolding rules that apply in every language and domain follow below.
+
+      The frozen-vs-mutable separation:
+      - The benchmark file and any helper data it depends on are FROZEN. They are committed in this setup step and the proposer is forbidden from editing them. Place them outside `effective_target_files`.
+      - The metric is the loop's accept/revert oracle. If the oracle is gameable, the loop will game it instead of solving the goal. Karpathy's autoresearch enforces this with a separate frozen `prepare.py` containing the eval function — borrow that pattern: scoring lives in files the agent cannot touch.
+
+      Anti-patterns the scaffolded benchmark MUST avoid (these traps cause the metric to plateau at a meaningless saturation point and turn the loop into noise):
+      - **Repeated identical inputs in a tight loop**: if you call the target N times with the same arguments, a one-line memoization will pin every subsequent call to a cache hit. Vary inputs across iterations, or invalidate caches between runs, or measure cold-start cost explicitly. If the goal is specifically to measure cache-hit fast-path, name the metric for that and add a parallel cold-path metric so the optimizer cannot collapse one onto the other.
+      - **Dead-code elimination**: optimizing compilers/JITs may notice the target's return value is unused and eliminate the call entirely. Always consume the result — sum it, write it to a sink, return it from the bench function, write it to a side-effecting variable (a `volatile`, a global, a printed line). Pick whatever idiom the chosen framework prescribes.
+      - **Constant folding**: hardcoded inputs may be computed at compile time. Construct inputs with runtime randomness (seeded for reproducibility) or read from a fixture file.
+      - **No warmup**: first invocations include JIT compilation, lazy module loading, page faults, branch predictor cold start. Run an explicit warmup phase BEFORE timing and discard those samples. Most frameworks have a `Warmup` or equivalent decorator — use it.
+      - **Single-run measurement**: a single sample is dominated by noise. Measure N times and report the median (preferred) or trimmed mean. Choose N so total measurement runtime is at least 1-2 seconds, but bench duration stays under ~30s per round so the loop can iterate fast.
+      - **Resolution underflow / formatting truncation**: if the operation completes in less time than your timer's resolution, you'll measure 0. If you format the metric with limited decimal precision (e.g. `.toFixed(3)` on milliseconds for a 100ns operation), you'll print 0. Pick units and precision such that the baseline reads ~3-5 significant digits above the timer's resolution. If the operation is too fast, batch it into the timed region (call N times under one start/stop) and divide.
+      - **Setup time bleeding into measurement**: only the call-under-test should be inside the timed region. Construct fixtures, allocate buffers, and warm caches *before* `start = clock()`.
+      - **Ambiguous output**: emit the metric on a single line in a regex-grabbable form (`metric_name: <number>`) at the end of the run. Downstream extraction is intentionally dumb — one regex, no JSON parsing, no walking results trees. Borrow Karpathy's pattern: print a `---` separator then the metric line.
+      - **Mixing wall clock with CPU time**: pick one. Wall clock is honest for end-user latency, CPU time is honest for compute-bound work. Document which.
+      - **Coarse-grained metric for fine-grained changes**: if rounds change individual instructions but the metric measures end-to-end latency dominated by I/O, the signal-to-noise will be terrible. Make the bench narrow enough that the proposer's plausible changes move the metric.
+
+      Per-domain hints (apply when relevant, do NOT shoehorn):
+      - Code performance: time a function under representative workload. Vary inputs across iterations. Median-of-N. Warmup. Consume return value.
+      - SQL / query optimization: time the query against a fixed, restored fixture dataset. Run `EXPLAIN` or equivalent to ensure the plan is real, not a cache hit. Reset query cache between runs if the engine has one.
+      - Prompt / LLM tuning: metric is task accuracy or rubric score on a held-out eval set. Eval set is FROZEN. Score with a deterministic scorer (string match, regex, judge model with seed and temp 0). Size the eval set at 20-50 tasks (up to ~100) and balance it across the behaviours the goal cares about — oversized sets encode distribution minutiae and imbalanced sets drive one-directional optimization.
+      - Config / hyperparameter tuning: metric is downstream task performance, measured with the same protocol the goal cares about. Held-out split, multiple seeds if cheap.
+      - ML training loop: metric is val loss / val metric on a pinned held-out split, measured under a fixed wall-clock or step budget so runs are comparable. Eval split MUST never be in the training set. Karpathy's autoresearch is the canonical example here: `VAL_SHARD = MAX_SHARD` lives in frozen code.
+      - Artifact size (Docker images, bundles, binaries): metric is `size_bytes` after a clean build. Cache invalidation is critical — measure from a clean state.
+
+      When you finish drafting the scaffolded benchmark, do a five-line self-review against the anti-pattern list above. If the bench fails any of them, revise before committing.
+
+      `effective_correctness_command`:
+      - If `correctness_command` was provided, use it.
+      - Else detect existing tests that cover the target. If found, construct the invocation that runs the relevant subset.
+      - If no tests cover the target and the domain warrants correctness checking (most domains except those where a broken artifact naturally produces a bad metric — ML, generative quality scoring), scaffold minimal tests that capture current observable behaviour of the target. Tests are there to verify correctness, not to define the solution — pin behaviour the goal must preserve, not implementation details the optimizer should be free to change. Commit them. Use their invocation.
+      - The correctness command file(s), like the benchmark, are FROZEN scoring inputs. Place them outside `effective_target_files`.
+      - If the domain does not need a correctness gate, return `""`.
+
+      Step 3 — Execute setup.
+      - If `effective_setup_command` is non-empty, run it. Fail the task if setup fails.
+
+      Step 4 — Commit scaffolding.
+      - Any bench or test files you scaffolded in Step 2 must be committed before step 5. Use a clear commit message like `scaffold: add autoresearch bench for <target>`.
+
+      Step 5 — Baseline measurement, noise calibration, and sanity checks.
+      - Run `effective_experiment_command` three times and extract the scalar labelled `effective_metric_name` from each run. Return the median as `baseline_metric`.
+      - Calibrate the noise parameters the loop will run under. A keep decision below the noise floor is a coin flip, so these numbers are as load-bearing as the benchmark itself:
+        - `effective_noise_epsilon`: the caller's `noise_epsilon` when > 0; otherwise the observed relative jitter across the three runs, `(max - min) / max(|median|, 1)`, padded slightly upward so ordinary wobble does not read as improvement. 0 only when the three runs agree exactly (a deterministic scorer).
+        - `effective_measurement_runs`: the caller's `measurement_runs` when > 0; otherwise 1 when the bench already aggregates internally (median-of-N, many iterations) and its jitter is small relative to plausible gains, else 3. Keep the total per-round measurement time under ~90s so the loop iterates fast.
+      - Sanity-check the baseline before declaring success. Reject these and revise your scaffold:
+        - Baseline is exactly 0, NaN, infinity, or a degenerate value the metric direction makes uninteresting (e.g. `0` for a `minimize` metric — the loop has no headroom).
+        - Baseline is at or below the noise floor of the chosen measurement (e.g. wall-clock under one millisecond on a millisecond-precision timer; perfect score on a tiny eval set).
+        - The three runs disagree by more than ~30% — noise that large drowns any plausible gain; raise the bench's internal iteration count or use a more deterministic scorer, then re-measure.
+      - If extraction fails or sanity checks fail, the quality-gate will reject this setup — revise your scaffold or extraction strategy and retry.
+
+      Step 6 — Return state.
+      - `baseline_commit`: the current HEAD sha after setup + scaffolding but before any experiment try commits.
+      - `frozen_files`: every workspace-relative path the scoring contract reads — benchmark files, fixtures and datasets, eval splits, correctness test files — whether discovered or scaffolded. This is the declared scoring surface downstream verification audits the diff against; a path missing here weakens that audit.
+      - `workspace_summary`: a short note describing repo state, any scaffolding, the chosen metric, and the baseline value with a one-sentence assessment of measurement quality (e.g. `3 runs, median 412ms, jitter ±0.5%, epsilon 0.008, 1 measurement/round`).
+
+      Do not delete the workspace at the end of this task.
+
+      This task clones the repo, runs shell commands, and may web-search benchmark docs — a worker with reasoning and tool-use is required.
     inputs:
       values:
         repo_url:
-          required: true
           schema: { type: string }
           value: "${{ inputs.values.repo_url }}"
         base_branch:
-          required: true
           schema: { type: string }
           value: "${{ inputs.values.?base_branch.orValue('main') }}"
         result_branch:
-          required: true
           schema: { type: string }
           value: "${{ inputs.values.result_branch }}"
+        goal:
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        metric_direction:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
         setup_command:
-          required: true
           schema: { type: string }
           value: "${{ inputs.values.?setup_command.orValue('') }}"
         target_files:
-          required: true
           schema: { type: array, items: { type: string } }
           value: "${{ inputs.values.?target_files.orValue([]) }}"
         correctness_command:
-          required: true
           schema: { type: string }
           value: "${{ inputs.values.?correctness_command.orValue('') }}"
         experiment_command:
-          required: true
           schema: { type: string }
           value: "${{ inputs.values.?experiment_command.orValue('') }}"
         metric_name:
-          required: true
           schema: { type: string }
           value: "${{ inputs.values.?metric_name.orValue('') }}"
-        metric_direction:
-          required: true
-          schema: { type: string }
-          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
-        goal:
-          required: true
-          schema: { type: string }
-          value: "${{ inputs.values.goal }}"
         max_iterations:
-          required: true
           schema: { type: number }
           value: "${{ inputs.values.?max_iterations.orValue(20) }}"
         patience:
-          required: true
           schema: { type: number }
           value: "${{ inputs.values.?patience.orValue(5) }}"
         plateau_patience:
-          required: true
           schema: { type: number }
           value: "${{ inputs.values.?plateau_patience.orValue(3) }}"
         noise_epsilon:
-          required: true
           schema: { type: number }
           value: "${{ inputs.values.?noise_epsilon.orValue(0) }}"
-        auto_cleanup:
-          required: true
-          schema: { type: boolean }
-          value: "${{ inputs.values.?auto_cleanup.orValue(false) }}"
-    tasks:
-      setup:
-        quality-gate: "${{ has(outputs.values.baseline_metric) && has(outputs.values.baseline_commit) && size(outputs.values.baseline_commit) > 0 && has(outputs.values.workspace_path) && size(outputs.values.workspace_path) > 0 && has(outputs.values.effective_target_files) && size(outputs.values.effective_target_files) > 0 && has(outputs.values.effective_experiment_command) && size(outputs.values.effective_experiment_command) > 0 && has(outputs.values.effective_metric_name) && size(outputs.values.effective_metric_name) > 0 }}"
-        instructions: |-
-          Prepare a clean scratch workspace AND resolve all missing experiment parameters from the repo itself. Leadership only knows the repo URL and the goal; you have the cloned code, so you own discovery. The scaffolded benchmark *is* the scoring contract for the entire run — a sloppy bench will produce a meaningless run no matter how good the proposer is. Treat this task as the most important one in the loop.
-
-          Step 0 — Validate inputs.
-          - `patience` MUST be strictly less than `max_iterations`. If `patience >= max_iterations`, the loop's no-improvement exit can never trigger before the hard cap, so the run will burn the full budget on plateaus. Fail this task with a clear error: `patience (X) must be < max_iterations (Y)`.
-          - `plateau_patience` should be at least 2 and strictly less than `max_iterations`. If invalid, fail with a clear error.
-          - `noise_epsilon` must be >= 0. If negative, fail.
-
-          Step 1 — Clone and branch.
-          - Clone `repo_url` into the current directory.
-          - Check out `base_branch`. Create local branch `result_branch` from it.
-          - Capture the **absolute path** of the clone root and return it as `workspace_path`.
-
-          Step 2 — Resolve each parameter. For each field below, honour the caller-provided value when it is non-empty; otherwise derive it from the repo and goal.
-
-          `effective_setup_command`:
-          - If `setup_command` was provided, use it.
-          - Else detect the project's conventional install/build sequence by reading the manifest files at the repo root (package manager lockfile, project config, Makefile). Use the project's idiomatic command. If nothing is obviously needed, return `""`.
-
-          `effective_target_files` (the **mutable** scope):
-          - If `target_files` was provided (non-empty), use it.
-          - Else read the repo + goal and identify the artifact being optimized. Prefer the narrowest scope that covers the goal. Profile-guided where possible: include hot helpers the target plausibly dominates through; exclude obviously cold callees.
-          - Hard rule: this list must NOT contain any file the benchmark or correctness command reads as scoring input. Mutable code and frozen scoring code are disjoint. The proposer must never be able to edit its own scorer.
-
-          `effective_experiment_command` and `effective_metric_name` (the **frozen** scoring contract):
-          - If `experiment_command` was provided, use it (the caller has decided). If `metric_name` was also provided, use it; otherwise infer from the command's output format.
-          - Else first try to discover an existing benchmark in the project's conventional framework. If you find one that already targets the goal's artifact and reports a meaningful scalar, use it.
-          - Else scaffold one. **Before writing a single line, read the docs for the benchmarking framework you intend to use** (web search the framework's "best practices" / "guidelines" / "common pitfalls" page — every mature harness has one) and apply the framework's anti-pitfall guidance. Generic scaffolding rules that apply in every language and domain follow below.
-
-          The frozen-vs-mutable separation:
-          - The benchmark file and any helper data it depends on are FROZEN. They are committed in this setup step and the proposer is forbidden from editing them. Place them outside `effective_target_files`.
-          - The metric is the loop's accept/revert oracle. If the oracle is gameable, the loop will game it instead of solving the goal. Karpathy's autoresearch enforces this with a separate frozen `prepare.py` containing the eval function — borrow that pattern: scoring lives in files the agent cannot touch.
-
-          Anti-patterns the scaffolded benchmark MUST avoid (these traps cause the metric to plateau at a meaningless saturation point and turn the loop into noise):
-          - **Repeated identical inputs in a tight loop**: if you call the target N times with the same arguments, a one-line memoization will pin every subsequent call to a cache hit. Vary inputs across iterations, or invalidate caches between runs, or measure cold-start cost explicitly. If the goal is specifically to measure cache-hit fast-path, name the metric for that and add a parallel cold-path metric so the optimizer cannot collapse one onto the other.
-          - **Dead-code elimination**: optimizing compilers/JITs may notice the target's return value is unused and eliminate the call entirely. Always consume the result — sum it, write it to a sink, return it from the bench function, write it to a side-effecting variable (a `volatile`, a global, a printed line). Pick whatever idiom the chosen framework prescribes.
-          - **Constant folding**: hardcoded inputs may be computed at compile time. Construct inputs with runtime randomness (seeded for reproducibility) or read from a fixture file.
-          - **No warmup**: first invocations include JIT compilation, lazy module loading, page faults, branch predictor cold start. Run an explicit warmup phase BEFORE timing and discard those samples. Most frameworks have a `Warmup` or equivalent decorator — use it.
-          - **Single-run measurement**: a single sample is dominated by noise. Measure N times and report the median (preferred) or trimmed mean. Choose N so total measurement runtime is at least 1-2 seconds, but bench duration stays under ~30s per round so the loop can iterate fast.
-          - **Resolution underflow / formatting truncation**: if the operation completes in less time than your timer's resolution, you'll measure 0. If you format the metric with limited decimal precision (e.g. `.toFixed(3)` on milliseconds for a 100ns operation), you'll print 0. Pick units and precision such that the baseline reads ~3-5 significant digits above the timer's resolution. If the operation is too fast, batch it into the timed region (call N times under one start/stop) and divide.
-          - **Setup time bleeding into measurement**: only the call-under-test should be inside the timed region. Construct fixtures, allocate buffers, and warm caches *before* `start = clock()`.
-          - **Ambiguous output**: emit the metric on a single line in a regex-grabbable form (`metric_name: <number>`) at the end of the run. Downstream extraction is intentionally dumb — one regex, no JSON parsing, no walking results trees. Borrow Karpathy's pattern: print a `---` separator then the metric line.
-          - **Mixing wall clock with CPU time**: pick one. Wall clock is honest for end-user latency, CPU time is honest for compute-bound work. Document which.
-          - **Coarse-grained metric for fine-grained changes**: if rounds change individual instructions but the metric measures end-to-end latency dominated by I/O, the signal-to-noise will be terrible. Make the bench narrow enough that the proposer's plausible changes move the metric.
-
-          Per-domain hints (apply when relevant, do NOT shoehorn):
-          - Code performance: time a function under representative workload. Vary inputs across iterations. Median-of-N. Warmup. Consume return value.
-          - SQL / query optimization: time the query against a fixed, restored fixture dataset. Run `EXPLAIN` or equivalent to ensure the plan is real, not a cache hit. Reset query cache between runs if the engine has one.
-          - Prompt / LLM tuning: metric is task accuracy or rubric score on a held-out eval set. Eval set is FROZEN. Score with a deterministic scorer (string match, regex, judge model with seed and temp 0).
-          - Config / hyperparameter tuning: metric is downstream task performance, measured with the same protocol the goal cares about. Held-out split, multiple seeds if cheap.
-          - ML training loop: metric is val loss / val metric on a pinned held-out split, measured under a fixed wall-clock or step budget so runs are comparable. Eval split MUST never be in the training set. Karpathy's autoresearch is the canonical example here: `VAL_SHARD = MAX_SHARD` lives in frozen code.
-          - Artifact size (Docker images, bundles, binaries): metric is `size_bytes` after a clean build. Cache invalidation is critical — measure from a clean state.
-
-          When you finish drafting the scaffolded benchmark, do a five-line self-review against the anti-pattern list above. If the bench fails any of them, revise before committing.
-
-          `effective_correctness_command`:
-          - If `correctness_command` was provided, use it.
-          - Else detect existing tests that cover the target. If found, construct the invocation that runs the relevant subset.
-          - If no tests cover the target and the domain warrants correctness checking (most domains except those where a broken artifact naturally produces a bad metric — ML, generative quality scoring), scaffold minimal tests that capture current observable behaviour of the target. Commit them. Use their invocation.
-          - The correctness command file(s), like the benchmark, are FROZEN scoring inputs. Place them outside `effective_target_files`.
-          - If the domain does not need a correctness gate, return `""`.
-
-          Step 3 — Execute setup.
-          - If `effective_setup_command` is non-empty, run it. Fail the task if setup fails.
-
-          Step 4 — Commit scaffolding.
-          - Any bench or test files you scaffolded in Step 2 must be committed before step 5. Use a clear commit message like `scaffold: add autoresearch bench for <target>`.
-
-          Step 5 — Baseline measurement and sanity checks.
-          - Run `effective_experiment_command` once. Extract the scalar labelled `effective_metric_name`. Return it as `baseline_metric`.
-          - Sanity-check the baseline before declaring success. Reject these and revise your scaffold:
-            - Baseline is exactly 0, NaN, infinity, or a degenerate value the metric direction makes uninteresting (e.g. `0` for a `minimize` metric — the loop has no headroom).
-            - Baseline is at or below the noise floor of the chosen measurement (e.g. wall-clock under one millisecond on a millisecond-precision timer; perfect score on a tiny eval set).
-            - Re-running the bench once more produces a value that disagrees with the first by more than ~30% (if so, your noise is huge — increase iteration count or use a more deterministic scorer).
-          - If extraction fails or sanity checks fail, the quality-gate will reject this setup — revise your scaffold or extraction strategy and retry.
-
-          Step 6 — Return state.
-          - `baseline_commit`: the current HEAD sha after setup + scaffolding but before any experiment try commits.
-          - `workspace_summary`: a short note describing repo state, any scaffolding, the chosen metric, and the baseline value with a one-sentence assessment of measurement quality (e.g. `noise = ±0.5%`, `single run, wall clock`).
-
-          Do not delete the workspace at the end of this task.
-
-          This task clones the repo, runs shell commands, and may web-search benchmark docs — a worker with reasoning and tool-use is required.
-        inputs:
-          values:
-            repo_url:
-              schema: { type: string }
-              value: "${{ inputs.values.repo_url }}"
-            base_branch:
-              schema: { type: string }
-              value: "${{ inputs.values.base_branch }}"
-            result_branch:
-              schema: { type: string }
-              value: "${{ inputs.values.result_branch }}"
-            goal:
-              schema: { type: string }
-              value: "${{ inputs.values.goal }}"
-            metric_direction:
-              schema: { type: string }
-              value: "${{ inputs.values.metric_direction }}"
-            setup_command:
-              schema: { type: string }
-              value: "${{ inputs.values.setup_command }}"
-            target_files:
-              schema: { type: array, items: { type: string } }
-              value: "${{ inputs.values.target_files }}"
-            correctness_command:
-              schema: { type: string }
-              value: "${{ inputs.values.correctness_command }}"
-            experiment_command:
-              schema: { type: string }
-              value: "${{ inputs.values.experiment_command }}"
-            metric_name:
-              schema: { type: string }
-              value: "${{ inputs.values.metric_name }}"
-            max_iterations:
-              schema: { type: number }
-              value: "${{ inputs.values.max_iterations }}"
-            patience:
-              schema: { type: number }
-              value: "${{ inputs.values.patience }}"
-            plateau_patience:
-              schema: { type: number }
-              value: "${{ inputs.values.plateau_patience }}"
-            noise_epsilon:
-              schema: { type: number }
-              value: "${{ inputs.values.noise_epsilon }}"
-        outputs:
-          values:
-            baseline_metric:
-              required: true
-              schema:
-                type: number
-                description: Scalar metric measured on the baseline commit before any experiments
-            baseline_commit:
-              required: true
-              schema:
-                type: string
-                description: Git sha of the starting point (after any scaffolding, before the loop runs)
-            workspace_path:
-              required: true
-              schema:
-                type: string
-                description: Absolute path to the cloned repo root
-            workspace_summary:
-              required: true
-              schema:
-                type: string
-                description: Short summary of the prepared workspace
-            effective_setup_command:
-              required: true
-              schema:
-                type: string
-                description: The setup command that was ultimately used (caller override or discovered)
-            effective_target_files:
-              required: true
-              schema:
-                type: array
-                items: { type: string }
-                description: Resolved editable scope the loop will operate on
-            effective_correctness_command:
-              required: true
-              schema:
-                type: string
-                description: Resolved correctness command; empty means gate disabled
-            effective_experiment_command:
-              required: true
-              schema:
-                type: string
-                description: Resolved experiment command producing the scalar metric
-            effective_metric_name:
-              required: true
-              schema:
-                type: string
-                description: Resolved metric label extracted from experiment output
-            scaffolding_notes:
-              required: true
-              schema:
-                type: string
-                description: Human-readable note on any bench or test files that were scaffolded
-      hunt:
-        needs: [setup]
-        inputs:
-          values:
-            workspace_path:
-              required: true
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.workspace_path }}"
-            goal:
-              required: true
-              schema: { type: string }
-              value: "${{ inputs.values.goal }}"
-            target_files:
-              required: true
-              schema: { type: array, items: { type: string } }
-              value: "${{ tasks.setup.outputs.values.effective_target_files }}"
-            metric_name:
-              required: true
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.effective_metric_name }}"
-            metric_direction:
-              required: true
-              schema: { type: string }
-              value: "${{ inputs.values.metric_direction }}"
-            correctness_command:
-              required: true
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.effective_correctness_command }}"
-            experiment_command:
-              required: true
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.effective_experiment_command }}"
-            baseline_metric:
-              required: true
-              schema: { type: number }
-              value: "${{ tasks.setup.outputs.values.baseline_metric }}"
-            baseline_commit:
-              required: true
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.baseline_commit }}"
-            noise_epsilon:
-              required: true
-              schema: { type: number }
-              value: "${{ inputs.values.noise_epsilon }}"
-            plateau_patience:
-              required: true
-              schema: { type: number }
-              value: "${{ inputs.values.plateau_patience }}"
-            patience:
-              required: true
-              schema: { type: number }
-              value: "${{ inputs.values.patience }}"
-        loop:
-          max: "${{ inputs.values.max_iterations }}"
-          until: "${{ outputs.values.no_improvement_streak >= inputs.values.patience || outputs.values.plateau_streak >= inputs.values.plateau_patience }}"
-          onMaxExhausted: continue
-        tasks:
-          propose:
-            quality-gate: "${{ has(outputs.values.description) && size(outputs.values.description) > 0 && has(outputs.values.change_plan) && size(outputs.values.change_plan) > 0 }}"
-            instructions: |-
-              Before anything else, `cd` into `workspace_path`. All repo reads in this task are relative to that directory.
-
-              Propose one change that is likely to improve `metric_name` in the direction of `metric_direction`, given the `goal`.
-
-              Scope rules:
-              - Only propose edits to files listed in `target_files`. If you believe a change outside that scope is needed, record the observation in `rationale` and propose the best in-scope alternative instead.
-              - Do not edit any benchmark, test, or correctness-verification file, even if it appears in `target_files`.
-
-              Use `experiment_log` to inform the proposal:
-              - Avoid repeating changes that were already tried and reverted (they failed — don't re-propose unless combined with a new idea).
-              - Build on kept changes (the repo HEAD reflects the accumulated accepted state).
-              - If `no_improvement_streak` is high, try a different direction — exhaust one idea's neighborhood before resetting.
-
-              Plateau handling: if `plateau_streak` is non-zero, the metric has stopped responding to recent changes — every recent measurement is within `noise_epsilon` of the current best. This usually means one of three things:
-              1. You've genuinely found a near-optimum and should propose more *radical* structural changes (different algorithm, different data structure, different approach to the goal) rather than micro-tweaks of the current implementation.
-              2. The metric is saturated against a measurement floor or ceiling (e.g. a cache made the bench effectively free, or accuracy hit 100%). Micro-tweaks will not help. State this hypothesis clearly in `rationale` — the loop is configured to terminate on extended plateaus, so this signal is actionable for leadership even when no proposal helps.
-              3. Run-to-run noise dominates real changes. Suggest tightening measurement (e.g. larger N, better isolation) in `rationale`.
-              When `plateau_streak >= 2`, prefer proposals that target a substantially different code path or approach than the kept changes. Do not propose another small variation of the existing fast path.
-
-              Return a short single-line `description` of the change and a concrete `change_plan` describing exactly what edits the apply step should make.
-
-              Prefer a worker with reasoning and tool-use to read the repo.
-            inputs:
-              values:
-                workspace_path:
-                  schema: { type: string }
-                  value: "${{ inputs.values.workspace_path }}"
-                goal:
-                  schema: { type: string }
-                  value: "${{ inputs.values.goal }}"
-                target_files:
-                  schema: { type: array, items: { type: string } }
-                  value: "${{ inputs.values.target_files }}"
-                metric_name:
-                  schema: { type: string }
-                  value: "${{ inputs.values.metric_name }}"
-                metric_direction:
-                  schema: { type: string }
-                  value: "${{ inputs.values.metric_direction }}"
-                baseline_metric:
-                  schema: { type: number }
-                  value: "${{ inputs.values.baseline_metric }}"
-                best_metric:
-                  schema: { type: number }
-                  value: "${{ loop.best_metric.orValue(inputs.values.baseline_metric) }}"
-                experiment_log:
-                  schema: { type: string }
-                  value: "${{ loop.experiment_log.orValue('') }}"
-                no_improvement_streak:
-                  schema: { type: number }
-                  value: "${{ loop.no_improvement_streak.orValue(0.0) }}"
-                plateau_streak:
-                  schema: { type: number }
-                  value: "${{ loop.plateau_streak.orValue(0.0) }}"
-                noise_epsilon:
-                  schema: { type: number }
-                  value: "${{ inputs.values.noise_epsilon }}"
-            outputs:
-              values:
-                description:
-                  required: true
-                  schema:
-                    type: string
-                    description: Short one-line summary, used as the try commit message
-                change_plan:
-                  required: true
-                  schema:
-                    type: string
-                    description: Concrete plan the apply step will execute
-                rationale:
-                  schema:
-                    type: string
-                    description: Why this change is likely to improve the metric
-          apply:
-            needs: [propose]
-            quality-gate: "${{ has(outputs.values.commit_sha) && size(outputs.values.commit_sha) > 0 }}"
-            instructions: |-
-              Before anything else, `cd` into `workspace_path`. All edits and git commands in this task run relative to that directory.
-
-              Execute the `change_plan`. Edit only files listed in `target_files`.
-
-              After editing, stage and commit with a message shaped as `try: {description}`.
-              Return the commit sha.
-
-              Requires a worker with tool-use.
-            inputs:
-              values:
-                workspace_path:
-                  schema: { type: string }
-                  value: "${{ inputs.values.workspace_path }}"
-                target_files:
-                  schema: { type: array, items: { type: string } }
-                  value: "${{ inputs.values.target_files }}"
-                description:
-                  schema: { type: string }
-                  value: "${{ tasks.propose.outputs.values.description }}"
-                change_plan:
-                  schema: { type: string }
-                  value: "${{ tasks.propose.outputs.values.change_plan }}"
-            outputs:
-              values:
-                commit_sha:
-                  required: true
-                  schema:
-                    type: string
-                    description: Sha of the try commit
-                files_touched:
-                  schema:
-                    type: array
-                    items: { type: string }
-                    description: Files the apply step actually modified
-          correctness:
-            needs: [apply]
-            quality-gate: "${{ has(outputs.values.passed) && has(outputs.values.summary) }}"
-            instructions: |-
-              Before anything else, `cd` into `workspace_path`. Run `correctness_command` from there.
-
-              Determine whether the current commit is correct enough to score.
-
-              If `correctness_command` is empty, return `passed: true` immediately with a summary noting the gate was skipped.
-              Otherwise, run `correctness_command` and set `passed` based on its exit code. Summarize failures concisely; don't dump the full log.
-
-              Requires a worker with tool-use.
-            inputs:
-              values:
-                workspace_path:
-                  schema: { type: string }
-                  value: "${{ inputs.values.workspace_path }}"
-                correctness_command:
-                  schema: { type: string }
-                  value: "${{ inputs.values.correctness_command }}"
-            outputs:
-              values:
-                passed:
-                  required: true
-                  schema:
-                    type: boolean
-                    description: True if correctness passed or the gate was skipped
-                summary:
-                  required: true
-                  schema:
-                    type: string
-                    description: Short note on what happened
-          execute:
-            if: "${{ tasks.correctness.outputs.values.passed }}"
-            needs: [apply, correctness]
-            quality-gate: "${{ has(outputs.values.metric) }}"
-            instructions: |-
-              Before anything else, `cd` into `workspace_path`. Run `experiment_command` from there.
-
-              Extract the scalar value labelled `metric_name` from the command's output.
-
-              Parsing strategy:
-              - If the output includes a `name=value` or `name: value` line, use that.
-              - If the output is JSON, parse it and look up the key.
-              - If a results file path is emitted, read it.
-              - If extraction is ambiguous, prefer the last occurrence and include a note in `stdout_tail`.
-
-              Return `metric` as a number. Quality-gate will reject non-numeric output and trigger a retry.
-
-              Requires a worker with tool-use.
-            inputs:
-              values:
-                workspace_path:
-                  schema: { type: string }
-                  value: "${{ inputs.values.workspace_path }}"
-                experiment_command:
-                  schema: { type: string }
-                  value: "${{ inputs.values.experiment_command }}"
-                metric_name:
-                  schema: { type: string }
-                  value: "${{ inputs.values.metric_name }}"
-            outputs:
-              values:
-                metric:
-                  required: true
-                  schema:
-                    type: number
-                    description: Extracted scalar value for metric_name
-                duration_seconds:
-                  schema:
-                    type: number
-                    description: Wall-clock seconds the experiment_command took
-                stdout_tail:
-                  schema:
-                    type: string
-                    description: Last few lines of the command output for diagnostic context
-          decide:
-            needs: [propose, apply, correctness, execute]
-            uses: dev.wagie/decide@1.0.0
-            inputs:
-              values:
-                question:
-                  value: "${{ 'Should this experiment change be kept or reverted?' }}"
-                context:
-                  value: |-
-                    ${{
-                      "Goal: " + inputs.values.goal + "\n" +
-                      "Metric: " + inputs.values.metric_name + " (direction: " + inputs.values.metric_direction + ")\n" +
-                      "Baseline: " + string(inputs.values.baseline_metric) + "\n" +
-                      "Best so far: " + string(loop.best_metric.orValue(inputs.values.baseline_metric)) + "\n" +
-                      "Noise epsilon (relative): " + string(inputs.values.noise_epsilon) + "\n" +
-                      "Proposed change: " + tasks.propose.outputs.values.description + "\n" +
-                      "Files touched: " + string(size(tasks.apply.outputs.values.?files_touched.orValue([]))) + " file(s)\n" +
-                      "Correctness passed: " + string(tasks.correctness.outputs.values.passed) + "\n" +
-                      "Correctness summary: " + tasks.correctness.outputs.values.summary + "\n" +
-                      "New metric (if measured): " + (tasks.correctness.outputs.values.passed ? string(tasks.execute.outputs.values.metric) : "n/a - correctness failed") + "\n\n" +
-                      "Acceptance rule:\n" +
-                      "- If correctness failed, revert.\n" +
-                      "- Else compute the noise band: band = noise_epsilon * max(|baseline|, 1). Treat the new metric as a real improvement only if the move outside the band is in the goal direction:\n" +
-                      "  - minimize: keep iff (best_metric - new_metric) > band.\n" +
-                      "  - maximize: keep iff (new_metric - best_metric) > band.\n" +
-                      "- Tie-and-near-tie tiebreaker (Karpathy-style simplicity preference): if the new metric is within the noise band of best (neither clearly better nor clearly worse) AND the proposed change is meaningfully simpler than what it replaces (smaller diff, fewer lines, removes complexity, deletes dead code, drops a layer of abstraction), keep — simplicity at no metric cost is a real win and worth advancing the branch for. Otherwise revert. When in doubt, revert: the earlier commit wins ties.\n" +
-                      "- If noise_epsilon == 0, the band is zero and exact ties revert (the strict accept rule)."
-                    }}
-                options:
-                  value: "${{ ['keep', 'revert'] }}"
-          apply_and_log:
-            needs: [decide, propose, correctness, execute]
-            quality-gate: "${{ has(outputs.values.applied) && has(outputs.values.tsv_row) && size(outputs.values.tsv_row) > 0 && has(outputs.values.plateau_streak_next) }}"
-            instructions: |-
-              Before anything else, `cd` into `workspace_path`. Any git command in this task runs relative to that directory.
-
-              Apply the decision, produce a TSV log row, and update the plateau streak.
-
-              Apply:
-              - If `decision` is `revert`, run `git reset --hard HEAD~1` to discard the try commit.
-              - If `decision` is `keep`, leave HEAD alone.
-              - Return `applied` as the decision string.
-
-              Log:
-              - Produce a single TSV line ending with `\n`.
-              - Columns (tab-separated): timestamp_iso, decision, correctness_passed, metric_value_or_na, best_metric_so_far, plateau_streak_next, description.
-              - When correctness was not measured, write `na` in the metric column.
-
-              Plateau streak update:
-              - The plateau streak counts consecutive rounds where the metric did not move outside the noise band of the current best (the loop terminates when this streak hits `plateau_patience`).
-              - Compute `band = noise_epsilon * max(|baseline_metric|, 1)`.
-              - If correctness failed (`metric_measured == false`), leave the streak unchanged: an unmeasurable round is neither movement nor non-movement.
-              - Else if `|metric - best_metric| <= band`, increment the streak (the metric is within noise of best — no real movement).
-              - Else reset the streak to 0 (the metric moved outside the noise band, regardless of direction; the plateau is broken whether or not the move was an improvement).
-              - Return the new value as `plateau_streak_next` (number) and a boolean `at_plateau` set to true iff `plateau_streak_next >= plateau_patience - 1` (so that the *next* propose round can see a strong escalation signal one step early).
-
-              Prefer a worker with tool-use and reasoning.
-            inputs:
-              values:
-                workspace_path:
-                  schema: { type: string }
-                  value: "${{ inputs.values.workspace_path }}"
-                decision:
-                  schema: { type: string }
-                  value: "${{ tasks.decide.outputs.values.decision }}"
-                description:
-                  schema: { type: string }
-                  value: "${{ tasks.propose.outputs.values.description }}"
-                correctness_passed:
-                  schema: { type: boolean }
-                  value: "${{ tasks.correctness.outputs.values.passed }}"
-                metric:
-                  schema: { type: number }
-                  value: "${{ tasks.correctness.outputs.values.passed ? tasks.execute.outputs.values.metric : 0.0 }}"
-                metric_measured:
-                  schema: { type: boolean }
-                  value: "${{ tasks.correctness.outputs.values.passed }}"
-                best_metric:
-                  schema: { type: number }
-                  value: "${{ loop.best_metric.orValue(inputs.values.baseline_metric) }}"
-                baseline_metric:
-                  schema: { type: number }
-                  value: "${{ inputs.values.baseline_metric }}"
-                noise_epsilon:
-                  schema: { type: number }
-                  value: "${{ inputs.values.noise_epsilon }}"
-                plateau_streak:
-                  schema: { type: number }
-                  value: "${{ loop.plateau_streak.orValue(0.0) }}"
-                plateau_patience:
-                  schema: { type: number }
-                  value: "${{ inputs.values.plateau_patience }}"
-            outputs:
-              values:
-                applied:
-                  required: true
-                  schema:
-                    type: string
-                    description: Decision that was applied (keep or revert)
-                tsv_row:
-                  required: true
-                  schema:
-                    type: string
-                    description: One TSV line summarising this iteration (trailing newline included)
-                plateau_streak_next:
-                  required: true
-                  schema:
-                    type: number
-                    description: Updated plateau streak count after this iteration
-                at_plateau:
-                  schema:
-                    type: boolean
-                    description: True when the streak is one step from triggering the plateau exit
-        outputs:
-          values:
-            best_metric:
-              required: true
-              schema:
-                type: number
-                description: Best metric seen so far after this iteration
-              value: "${{ tasks.decide.outputs.values.decision == 'keep' ? tasks.execute.outputs.values.metric : loop.best_metric.orValue(inputs.values.baseline_metric) }}"
-            best_commit:
-              required: true
-              schema:
-                type: string
-                description: Commit sha that produced best_metric
-              value: "${{ tasks.decide.outputs.values.decision == 'keep' ? tasks.apply.outputs.values.commit_sha : loop.best_commit.orValue(inputs.values.baseline_commit) }}"
-            no_improvement_streak:
-              required: true
-              schema:
-                type: number
-                description: Consecutive rounds without an accepted improvement
-              value: "${{ tasks.decide.outputs.values.decision == 'keep' ? 0.0 : loop.no_improvement_streak.orValue(0.0) + 1.0 }}"
-            plateau_streak:
-              required: true
-              schema:
-                type: number
-                description: Consecutive rounds whose measured metric was within the noise band of best
-              value: "${{ tasks.apply_and_log.outputs.values.plateau_streak_next }}"
-            experiment_log:
-              required: true
-              schema:
-                type: string
-                description: Accumulated TSV of all iterations
-              value: "${{ loop.experiment_log.orValue('') + tasks.apply_and_log.outputs.values.tsv_row }}"
-            accepted_count:
-              required: true
-              schema:
-                type: number
-                description: Number of rounds whose change was kept
-              value: "${{ tasks.decide.outputs.values.decision == 'keep' ? loop.accepted_count.orValue(0.0) + 1.0 : loop.accepted_count.orValue(0.0) }}"
-            reverted_count:
-              required: true
-              schema:
-                type: number
-                description: Number of rounds whose change was reverted
-              value: "${{ tasks.decide.outputs.values.decision == 'revert' ? loop.reverted_count.orValue(0.0) + 1.0 : loop.reverted_count.orValue(0.0) }}"
-            converged:
-              required: true
-              schema:
-                type: boolean
-                description: Whether the experiment loop exited because its until condition was satisfied
-              value: "${{ (tasks.decide.outputs.values.decision == 'keep' ? 0.0 : loop.no_improvement_streak.orValue(0.0) + 1.0) >= inputs.values.patience || tasks.apply_and_log.outputs.values.plateau_streak_next >= inputs.values.plateau_patience }}"
-      finalize:
-        needs: [hunt, setup]
-        quality-gate: "${{ has(outputs.values.result_branch_url) && size(outputs.values.result_branch_url) > 0 && has(outputs.values.exit_reason) && size(outputs.values.exit_reason) > 0 }}"
-        instructions: |-
-          Before anything else, `cd` into `workspace_path`. The git push and any commands in this task run relative to that directory.
-
-          Finalize the experiment run. The reader of these artifacts is leadership trying to decide whether to ship the kept changes and whether to trust this loop's verdict — write for them.
-
-          Step 1 — Push.
-          - Push HEAD to `result_branch` on `origin`. Force-push is acceptable if the branch already exists from a prior run.
-          - Record the resulting branch URL (e.g. https://github.com/owner/repo/tree/<branch>) as `result_branch_url`.
-
-          Step 2 — TSV artifact.
-          - Write the accumulated `experiment_log` to the `experiment_log_artifact` slot, preserving iteration order. This is the raw ledger; do not summarise or reorder it.
-
-          Step 3 — Determine the exit reason. Pick exactly one and return it as `exit_reason`:
-          - `improvement`: best_metric is meaningfully better than baseline (in goal direction) AND `converged == true` is not from a plateau.
-          - `patience`: the loop exited because `no_improvement_streak` hit `patience` — proposer ran out of useful ideas.
-          - `plateau`: the loop exited because `plateau_streak` hit `plateau_patience` — the metric stopped responding (often a sign the bench is saturated, not that the goal is solved).
-          - `max_iterations`: hit the hard cap without converging.
-          - `no_improvement`: ran the full budget but best_metric never moved off baseline.
-          You can disambiguate `patience` vs `plateau` by inspecting the trailing rows of `experiment_log` — repeated identical metric values point at plateau; varying metrics with no acceptances point at patience.
-
-          Step 4 — Progress report (`progress_report` artifact, markdown).
-          - Render a markdown document with these sections:
-            - **Run summary**: goal, metric (with direction), baseline value, best value, absolute and percent improvement, exit reason, total rounds, accepted, reverted.
-            - **Resolved parameters**: effective_target_files (as a code-fenced list), effective_experiment_command, effective_metric_name, effective_correctness_command, scaffolding_notes if non-empty.
-            - **Iteration table**: one row per iteration, columns: `#`, `decision`, `correctness`, `metric`, `best`, `description`. Build this from `experiment_log` (it is already TSV; transpose into a markdown table). Highlight the row whose metric became the new best (e.g. bold the metric value).
-            - **Progress visualisation**: this is the headline artefact — modeled on Karpathy's `progress.png` (https://github.com/karpathy/autoresearch/blob/master/progress.png), a chart of best-so-far across iterations. Try the following in order, stop at the first that succeeds, and embed the result in the markdown:
-              1. If `gnuplot` is available (`command -v gnuplot`), generate `progress.png` from the TSV (best-so-far line per iteration; prefer dual-line: per-round metric as light dots and best-so-far as a bold line; clearly mark accept vs revert markers if feasible). Embed via `![progress](progress.png)`.
-              2. Else if `python3` is available with `matplotlib` (probe with `python3 -c 'import matplotlib'`), generate `progress.png` the same way and embed it.
-              3. Else if any other charting tool is in PATH that you recognise (R + ggplot2, plotly-cli, etc.), use it.
-              4. Fallback: emit an ASCII sparkline of best-so-far across iterations in a fenced code block (one character per iteration).
-            - The chart and the iteration table are both produced — the chart is the at-a-glance signal, the table is the receipts.
-            - **Convergence note**: 2-3 sentence assessment. Did the loop converge cleanly, plateau early, or burn budget? If `exit_reason == plateau`, explicitly call out that the bench may have saturated and recommend whether the run is trustworthy.
-            - **Best commit & branch**: best_commit sha and result_branch_url.
-
-          Step 5 — Concise summary (`summary` artifact, markdown).
-          - A 6-12 line executive summary suitable for a PR description: goal, the change in one sentence, baseline → best, exit reason, link to result branch and progress report.
-
-          Both the summary and the progress report are markdown artifacts. The progress report is the in-depth read; the summary is the elevator pitch.
-
-          Requires a worker with tool-use and reasoning.
-        inputs:
-          values:
-            workspace_path:
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.workspace_path }}"
-            repo_url:
-              schema: { type: string }
-              value: "${{ inputs.values.repo_url }}"
-            result_branch:
-              schema: { type: string }
-              value: "${{ inputs.values.result_branch }}"
-            goal:
-              schema: { type: string }
-              value: "${{ inputs.values.goal }}"
-            metric_name:
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.effective_metric_name }}"
-            metric_direction:
-              schema: { type: string }
-              value: "${{ inputs.values.metric_direction }}"
-            effective_target_files:
-              schema: { type: array, items: { type: string } }
-              value: "${{ tasks.setup.outputs.values.effective_target_files }}"
-            effective_experiment_command:
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.effective_experiment_command }}"
-            effective_correctness_command:
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.effective_correctness_command }}"
-            scaffolding_notes:
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.scaffolding_notes }}"
-            baseline_metric:
-              schema: { type: number }
-              value: "${{ tasks.setup.outputs.values.baseline_metric }}"
-            best_metric:
-              schema: { type: number }
-              value: "${{ tasks.hunt.outputs.values.best_metric }}"
-            best_commit:
-              schema: { type: string }
-              value: "${{ tasks.hunt.outputs.values.best_commit }}"
-            accepted_count:
-              schema: { type: number }
-              value: "${{ tasks.hunt.outputs.values.accepted_count }}"
-            reverted_count:
-              schema: { type: number }
-              value: "${{ tasks.hunt.outputs.values.reverted_count }}"
-            experiment_log:
-              schema: { type: string }
-              value: "${{ tasks.hunt.outputs.values.experiment_log }}"
-            converged:
-              schema: { type: boolean }
-              value: "${{ tasks.hunt.outputs.values.converged }}"
-            patience:
-              schema: { type: number }
-              value: "${{ inputs.values.patience }}"
-            plateau_patience:
-              schema: { type: number }
-              value: "${{ inputs.values.plateau_patience }}"
-            max_iterations:
-              schema: { type: number }
-              value: "${{ inputs.values.max_iterations }}"
-        outputs:
-          values:
-            result_branch_url:
-              required: true
-              schema:
-                type: string
-                description: URL of the pushed result branch
-            exit_reason:
-              required: true
-              schema:
-                type: string
-                description: Why the loop ended — one of improvement, patience, plateau, max_iterations, no_improvement
-            summary:
-              required: true
-              schema:
-                type: string
-                description: Short executive summary suitable for a PR description
-            experiment_log_artifact:
-              required: true
-              schema:
-                type: string
-                description: Iteration-by-iteration TSV log
-            progress_report:
-              required: true
-              schema:
-                type: string
-                description: In-depth markdown report with iteration table and progress chart (or ASCII fallback)
-      cleanup:
-        if: "${{ inputs.values.auto_cleanup == true }}"
-        needs: [finalize, setup]
-        quality-gate: "${{ has(outputs.values.removed) }}"
-        instructions: |-
-          Remove the workspace at `workspace_path`. Do not touch anything outside it. Refuse to proceed if `workspace_path` is empty, `/`, or `$HOME`.
-
-          Requires a worker with tool-use.
-        inputs:
-          values:
-            workspace_path:
-              schema: { type: string }
-              value: "${{ tasks.setup.outputs.values.workspace_path }}"
-        outputs:
-          values:
-            removed:
-              required: true
-              schema:
-                type: boolean
-                description: Whether the scratch workspace was successfully removed
+        measurement_runs:
+          schema: { type: number }
+          value: "${{ inputs.values.?measurement_runs.orValue(0) }}"
     outputs:
       values:
         baseline_metric:
           required: true
-          schema: { type: number }
-          value: "${{ tasks.setup.outputs.values.baseline_metric }}"
-        best_metric:
+          schema:
+            type: number
+            description: Scalar metric measured on the baseline commit before any experiments
+        baseline_commit:
           required: true
-          schema: { type: number }
-          value: "${{ tasks.hunt.outputs.values.best_metric }}"
-        best_commit:
+          schema:
+            type: string
+            description: Git sha of the starting point (after any scaffolding, before the loop runs)
+        workspace_path:
           required: true
-          schema: { type: string }
-          value: "${{ tasks.hunt.outputs.values.best_commit }}"
-        rounds_completed:
+          schema:
+            type: string
+            description: Absolute path to the cloned repo root
+        workspace_summary:
           required: true
-          schema: { type: number }
-          value: "${{ tasks.hunt.outputs.values.accepted_count + tasks.hunt.outputs.values.reverted_count }}"
-        accepted_count:
+          schema:
+            type: string
+            description: Short summary of the prepared workspace
+        effective_setup_command:
           required: true
-          schema: { type: number }
-          value: "${{ tasks.hunt.outputs.values.accepted_count }}"
-        reverted_count:
-          required: true
-          schema: { type: number }
-          value: "${{ tasks.hunt.outputs.values.reverted_count }}"
-        result_branch_url:
-          required: true
-          schema: { type: string }
-          value: "${{ tasks.finalize.outputs.values.result_branch_url }}"
-        experiment_log:
-          required: true
-          schema: { type: string }
-          value: "${{ tasks.finalize.outputs.values.experiment_log_artifact }}"
-        summary:
-          required: true
-          schema: { type: string }
-          value: "${{ tasks.finalize.outputs.values.summary }}"
-        progress_report:
-          required: true
-          schema: { type: string }
-          value: "${{ tasks.finalize.outputs.values.progress_report }}"
-        exit_reason:
-          required: true
-          schema: { type: string }
-          value: "${{ tasks.finalize.outputs.values.exit_reason }}"
-        converged:
-          required: true
-          schema: { type: boolean }
-          value: "${{ tasks.hunt.outputs.values.converged }}"
+          schema:
+            type: string
+            description: The setup command that was ultimately used (caller override or discovered)
         effective_target_files:
           required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Resolved editable scope the loop will operate on
+        effective_correctness_command:
+          required: true
+          schema:
+            type: string
+            description: Resolved correctness command; empty means gate disabled
+        effective_experiment_command:
+          required: true
+          schema:
+            type: string
+            description: Resolved experiment command producing the scalar metric
+        effective_metric_name:
+          required: true
+          schema:
+            type: string
+            description: Resolved metric label extracted from experiment output
+        effective_noise_epsilon:
+          required: true
+          schema:
+            type: number
+            description: Relative noise tolerance the loop runs under (caller override or derived from baseline jitter)
+        effective_measurement_runs:
+          required: true
+          schema:
+            type: number
+            description: Measurements per candidate inside the loop (caller override or derived from baseline jitter)
+        frozen_files:
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+            description: Declared scoring surface — every workspace-relative path the benchmark or correctness gate reads
+        scaffolding_notes:
+          required: true
+          schema:
+            type: string
+            description: Human-readable note on any bench or test files that were scaffolded
+  optimize:
+    needs: [setup]
+    uses: dev.wagie/optimize-loop@1.0.0
+    inputs:
+      values:
+        objective:
+          value: "${{ inputs.values.goal }}"
+        metric_name:
+          value: "${{ tasks.setup.outputs.values.effective_metric_name }}"
+        metric_direction:
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        initial_state:
+          value: "${{ tasks.setup.outputs.values.baseline_commit }}"
+        initial_metric:
+          value: "${{ tasks.setup.outputs.values.baseline_metric }}"
+        max_iterations:
+          value: "${{ inputs.values.?max_iterations.orValue(20) }}"
+        patience:
+          value: "${{ inputs.values.?patience.orValue(5) }}"
+        plateau_patience:
+          value: "${{ inputs.values.?plateau_patience.orValue(3) }}"
+        noise_epsilon:
+          value: "${{ tasks.setup.outputs.values.effective_noise_epsilon }}"
+        measurement_runs:
+          value: "${{ tasks.setup.outputs.values.effective_measurement_runs }}"
+        method:
+          value: |-
+            ${{
+              "Every git and shell command in this loop runs inside the cloned repo at " + tasks.setup.outputs.values.workspace_path + " — cd there before doing anything.\n\n" +
+              "PROPOSE + APPLY (proposer):\n" +
+              "- Edit ONLY these files: " + tasks.setup.outputs.values.effective_target_files.join(", ") + ". Never edit a benchmark, test, or correctness file, even if it appears in that list.\n" +
+              "- Implement exactly and only the committed hypothesis — no opportunistic refactors, drive-by cleanups, or extra scaffolding. Unrelated deltas make the trial ledger uninterpretable.\n" +
+              "- Stage and commit the change with a message shaped 'try: <one-line hypothesis — what changes and why it should improve the metric>'. This message becomes the trial ledger's hypothesis, so make it falsifiable, not vague. The candidate_state you return is the sha of this try commit.\n\n" +
+              "VALIDITY (measurer):\n" +
+              (size(tasks.setup.outputs.values.effective_correctness_command) > 0
+                ? "- Run the correctness gate: `" + tasks.setup.outputs.values.effective_correctness_command + "`. If it exits non-zero, set valid=false, report the current best_metric as candidate_metric, and do NOT run the measurement.\n"
+                : "- There is no correctness gate; treat every applied candidate as valid.\n") +
+              "\nMEASURE (measurer, only when valid):\n" +
+              "- One measurement = run `" + tasks.setup.outputs.values.effective_experiment_command + "` and extract the scalar labelled '" + tasks.setup.outputs.values.effective_metric_name + "' from its output — prefer a `name: value` or `name=value` line, else a JSON key, else the last numeric occurrence. Take measurement_runs measurements as the loop directs; the median is candidate_metric.\n\n" +
+              "KEEP / REVERT (enactor):\n" +
+              "- To keep, leave HEAD as it is — the try commit stays.\n" +
+              "- To revert: first preserve the try commit so the trial ledger keeps its sha — `git branch \"trial/$(git rev-parse --short HEAD)\"` — then return the repo to the best state with `git reset --hard <best_state>`, where best_state is the best commit sha you are given. The trial/* branches are local bookkeeping only; never push them."
+            }}
+  finalize:
+    needs: [optimize, setup]
+    quality-gate: "${{ has(outputs.values.result_branch_url) && size(outputs.values.result_branch_url) > 0 && has(outputs.values.trials) && has(outputs.values.summary) && size(outputs.values.summary) > 0 && has(outputs.values.progress_report) && size(outputs.values.progress_report) > 0 }}"
+    instructions: |-
+      Before anything else, `cd` into `workspace_path`. The git push and any commands in this task run relative to that directory.
+
+      Finalize the experiment run. The reader of these artifacts is leadership trying to decide whether to ship the kept changes and whether to trust this loop's verdict — write for them.
+
+      Step 1 — Push.
+      - Push HEAD to `result_branch` on `origin`. Force-push is acceptable if the branch already exists from a prior run. Push ONLY `result_branch` — the local trial/* bookkeeping branches stay local.
+      - Record the resulting branch URL (e.g. https://github.com/owner/repo/tree/<branch>) as `result_branch_url`.
+
+      Step 2 — Trial ledger.
+      - `experiment_log` is the loop's raw TSV: one row per round, columns `decision`, `valid`, `candidate_metric_or_na`, `spread_or_na`, `best_metric`, `change`. Convert it, in order, into one typed trial object per round (`round` is the 1-based row index).
+      - `hypothesis`: the row's change description (the 'try:' commit message body).
+      - `commit`: recover the try-commit sha. Kept rounds are the `try:` commits on `result_branch` after `baseline_commit`, in order. Reverted rounds were preserved as local `trial/*` branches — match each to its row by commit message (`try: <change>`). When a sha cannot be recovered unambiguously, use `""`.
+      - `status`: `invalid` when the row's valid column is false; else `pass` when the decision was keep; else `fail`. Statuses speak for the search proxy only — `pass` means the trial beat the frozen bench, not that the improvement is validated; validation is experiment-verify's job. Upgrade to `suspicious` — regardless of keep/revert — when the round shows anomaly signals: an accepted improvement wildly out of family with every other measured delta (order-of-magnitude jump), the metric collapsing to an exact floor/ceiling (0, or byte-identical repeats), or a change description that plausibly altered measurement rather than the artifact. Flag only when you can name the concrete signal; a suspicious flag with no nameable evidence is noise, and verification downstream re-checks every kept round anyway.
+      - `metric`: the row's measured candidate metric, copied verbatim from the log — never recomputed, re-derived, or rounded. Omit for invalid rounds (the `na` column value is not a number).
+      - `spread`: the row's spread column, copied verbatim. Omit when `na`.
+      - `best_after`: the row's best_metric column, copied verbatim.
+      - `interpretation`: one scoped sentence — what this round actually established, no more (e.g. "memoizing the tokenizer regex saved ~8% on this bench" or "loop unrolling did not move the metric; the hot path is elsewhere").
+      - `next_action`: optional — a concrete follow-up the round earned ("combine with round 4's win", "verify round 7's jump — likely bench artifact"). Phrase follow-ups as evidence-weighted guidance, not permanent bans: a within-noise loss is weak evidence against an idea, a far-outside-noise loss is strong evidence. Omit when there is none.
+      - Negative and invalid trials are first-class data: never drop rows.
+
+      Step 3 — Progress report (`progress_report` artifact, markdown).
+      - Render a markdown document with these sections:
+        - **Run summary**: goal, metric (with direction), baseline value, best value, absolute and percent improvement, exit reason, total rounds, accepted, reverted.
+        - **Resolved parameters**: effective_target_files (as a code-fenced list), effective_experiment_command, effective_metric_name, effective_correctness_command, scaffolding_notes if non-empty.
+        - **Trial table**: one row per trial, columns: `#`, `status`, `metric`, `best`, `hypothesis`, `interpretation`. Bold the rows whose metric became the new best. Mark suspicious rows prominently.
+        - **Progress visualisation**: this is the headline artefact — modeled on Karpathy's `progress.png` (https://github.com/karpathy/autoresearch/blob/master/progress.png), a chart of best-so-far across iterations. Try the following in order, stop at the first that succeeds, and embed the result in the markdown:
+          1. If `gnuplot` is available (`command -v gnuplot`), generate `progress.png` from the TSV (best-so-far line per iteration; prefer dual-line: per-round metric as light dots and best-so-far as a bold line; clearly mark accept vs revert markers if feasible). Embed via `![progress](progress.png)`.
+          2. Else if `python3` is available with `matplotlib` (probe with `python3 -c 'import matplotlib'`), generate `progress.png` the same way and embed it.
+          3. Else if any other charting tool is in PATH that you recognise (R + ggplot2, plotly-cli, etc.), use it.
+          4. Fallback: emit an ASCII sparkline of best-so-far across iterations in a fenced code block (one character per iteration).
+        - The chart and the trial table are both produced — the chart is the at-a-glance signal, the table is the receipts.
+        - **Convergence note**: 2-4 sentence assessment. Did the loop converge cleanly, plateau early, or burn budget? If `exit_reason` is `plateau`, explicitly call out that the bench may have saturated and recommend whether the run is trustworthy. Also check for search collapse: if every accepted trial rode substantially one mechanism (all descendants of one idea, no mechanism diversity), say so — the run explored a single basin and a relaunch with a different framing may find more.
+        - **Best commit & branch**: best_commit sha and result_branch_url.
+
+      Step 4 — Concise summary (`summary` artifact, markdown).
+      - A 6-12 line executive summary suitable for a PR description: goal, the change in one sentence, baseline → best, exit reason, link to result branch and progress report.
+      - Always close with the handoff line: the search metric only nominates — run experiment-verify against `result_branch` (baseline `baseline_commit`) before promoting. If any kept trial is suspicious, say so here and make verification non-negotiable.
+
+      Requires a worker with tool-use and reasoning.
+    inputs:
+      values:
+        workspace_path:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.workspace_path }}"
+        repo_url:
+          schema: { type: string }
+          value: "${{ inputs.values.repo_url }}"
+        result_branch:
+          schema: { type: string }
+          value: "${{ inputs.values.result_branch }}"
+        goal:
+          schema: { type: string }
+          value: "${{ inputs.values.goal }}"
+        metric_name:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.effective_metric_name }}"
+        metric_direction:
+          schema: { type: string }
+          value: "${{ inputs.values.?metric_direction.orValue('minimize') }}"
+        effective_target_files:
           schema: { type: array, items: { type: string } }
           value: "${{ tasks.setup.outputs.values.effective_target_files }}"
         effective_experiment_command:
-          required: true
           schema: { type: string }
           value: "${{ tasks.setup.outputs.values.effective_experiment_command }}"
-        effective_metric_name:
-          required: true
-          schema: { type: string }
-          value: "${{ tasks.setup.outputs.values.effective_metric_name }}"
         effective_correctness_command:
-          required: true
           schema: { type: string }
           value: "${{ tasks.setup.outputs.values.effective_correctness_command }}"
-        effective_setup_command:
-          required: true
-          schema: { type: string }
-          value: "${{ tasks.setup.outputs.values.effective_setup_command }}"
-        workspace_path:
-          required: true
-          schema: { type: string }
-          value: "${{ tasks.setup.outputs.values.workspace_path }}"
         scaffolding_notes:
-          required: true
           schema: { type: string }
           value: "${{ tasks.setup.outputs.values.scaffolding_notes }}"
+        baseline_metric:
+          schema: { type: number }
+          value: "${{ tasks.setup.outputs.values.baseline_metric }}"
+        baseline_commit:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.baseline_commit }}"
+        best_metric:
+          schema: { type: number }
+          value: "${{ tasks.optimize.outputs.values.best_metric }}"
+        best_commit:
+          schema: { type: string }
+          value: "${{ tasks.optimize.outputs.values.best_state }}"
+        accepted_count:
+          schema: { type: number }
+          value: "${{ tasks.optimize.outputs.values.accepted_count }}"
+        reverted_count:
+          schema: { type: number }
+          value: "${{ tasks.optimize.outputs.values.reverted_count }}"
+        experiment_log:
+          schema: { type: string }
+          value: "${{ tasks.optimize.outputs.values.log }}"
+        exit_reason:
+          schema: { type: string }
+          value: "${{ tasks.optimize.outputs.values.exit_reason }}"
+        converged:
+          schema: { type: boolean }
+          value: "${{ tasks.optimize.outputs.values.converged }}"
+    outputs:
+      values:
+        result_branch_url:
+          required: true
+          schema:
+            type: string
+            description: URL of the pushed result branch
+        trials:
+          required: true
+          schema: &trials_schema
+            type: array
+            description: Typed trial ledger, one record per round in run order
+            items:
+              type: object
+              properties:
+                round: { type: number }
+                hypothesis: { type: string }
+                commit: { type: string }
+                snapshot_id: { type: string }
+                status: { type: string, enum: [pass, fail, invalid, suspicious] }
+                metric: { type: number }
+                spread: { type: number }
+                paired_gain: { type: number }
+                paired_gain_stderr: { type: number }
+                best_after: { type: number }
+                decision_source: { type: string, enum: [auto, agent] }
+                measurement_note: { type: string }
+                interpretation: { type: string }
+                next_action: { type: string }
+              required: [round, hypothesis, status, interpretation]
+        summary:
+          required: true
+          schema:
+            type: string
+            description: Short executive summary suitable for a PR description
+        progress_report:
+          required: true
+          schema:
+            type: string
+            description: In-depth markdown report with trial table and progress chart (or ASCII fallback)
+  cleanup:
+    if: "${{ inputs.values.?auto_cleanup.orValue(false) == true }}"
+    needs: [finalize, setup]
+    quality-gate: "${{ has(outputs.values.removed) }}"
+    instructions: |-
+      Remove the workspace at `workspace_path`. Do not touch anything outside it. Refuse to proceed if `workspace_path` is empty, `/`, or `$HOME`.
+
+      Requires a worker with tool-use.
+    inputs:
+      values:
+        workspace_path:
+          schema: { type: string }
+          value: "${{ tasks.setup.outputs.values.workspace_path }}"
+    outputs:
+      values:
+        removed:
+          required: true
+          schema:
+            type: boolean
+            description: Whether the scratch workspace was successfully removed
 outputs:
   values:
     baseline_metric:
       required: true
       schema: { type: number }
-      value: "${{ tasks.experiment.outputs.values.baseline_metric }}"
+      value: "${{ tasks.setup.outputs.values.baseline_metric }}"
+    baseline_commit:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.setup.outputs.values.baseline_commit }}"
     best_metric:
       required: true
       schema: { type: number }
-      value: "${{ tasks.experiment.outputs.values.best_metric }}"
+      value: "${{ tasks.optimize.outputs.values.best_metric }}"
     best_commit:
       required: true
       schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.best_commit }}"
+      value: "${{ tasks.optimize.outputs.values.best_state }}"
     improvement_pct:
       required: true
       schema: { type: number }
       value: >-
         ${{ inputs.values.?metric_direction.orValue('minimize') == 'minimize'
-              ? (tasks.experiment.outputs.values.baseline_metric - tasks.experiment.outputs.values.best_metric) / tasks.experiment.outputs.values.baseline_metric * 100.0
-              : (tasks.experiment.outputs.values.best_metric - tasks.experiment.outputs.values.baseline_metric) / tasks.experiment.outputs.values.baseline_metric * 100.0 }}
+              ? (tasks.setup.outputs.values.baseline_metric - tasks.optimize.outputs.values.best_metric) / (tasks.setup.outputs.values.baseline_metric == 0.0 ? 1.0 : tasks.setup.outputs.values.baseline_metric) * 100.0
+              : (tasks.optimize.outputs.values.best_metric - tasks.setup.outputs.values.baseline_metric) / (tasks.setup.outputs.values.baseline_metric == 0.0 ? 1.0 : tasks.setup.outputs.values.baseline_metric) * 100.0 }}
     improved:
       required: true
       schema: { type: boolean }
       value: >-
         ${{ inputs.values.?metric_direction.orValue('minimize') == 'minimize'
-              ? tasks.experiment.outputs.values.best_metric < tasks.experiment.outputs.values.baseline_metric
-              : tasks.experiment.outputs.values.best_metric > tasks.experiment.outputs.values.baseline_metric }}
+              ? tasks.optimize.outputs.values.best_metric < tasks.setup.outputs.values.baseline_metric
+              : tasks.optimize.outputs.values.best_metric > tasks.setup.outputs.values.baseline_metric }}
     rounds_completed:
       required: true
       schema: { type: number }
-      value: "${{ tasks.experiment.outputs.values.rounds_completed }}"
+      value: "${{ tasks.optimize.outputs.values.accepted_count + tasks.optimize.outputs.values.reverted_count }}"
     accepted_count:
       required: true
       schema: { type: number }
-      value: "${{ tasks.experiment.outputs.values.accepted_count }}"
+      value: "${{ tasks.optimize.outputs.values.accepted_count }}"
     reverted_count:
       required: true
       schema: { type: number }
-      value: "${{ tasks.experiment.outputs.values.reverted_count }}"
+      value: "${{ tasks.optimize.outputs.values.reverted_count }}"
     result_branch:
       required: true
       schema: { type: string }
@@ -1000,52 +537,64 @@ outputs:
     result_branch_url:
       required: true
       schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.result_branch_url }}"
-    experiment_log:
+      value: "${{ tasks.finalize.outputs.values.result_branch_url }}"
+    trials:
       required: true
-      schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.experiment_log }}"
+      schema: *trials_schema
+      value: "${{ tasks.finalize.outputs.values.trials }}"
     summary:
       required: true
       schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.summary }}"
+      value: "${{ tasks.finalize.outputs.values.summary }}"
     progress_report:
       required: true
       schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.progress_report }}"
+      value: "${{ tasks.finalize.outputs.values.progress_report }}"
     exit_reason:
       required: true
-      schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.exit_reason }}"
+      schema: { type: string, description: "One of improvement, patience, plateau, max_iterations" }
+      value: "${{ tasks.optimize.outputs.values.exit_reason }}"
     converged:
       required: true
       schema: { type: boolean }
-      value: "${{ tasks.experiment.outputs.values.converged }}"
+      value: "${{ tasks.optimize.outputs.values.converged }}"
     effective_target_files:
       required: true
       schema: { type: array, items: { type: string } }
-      value: "${{ tasks.experiment.outputs.values.effective_target_files }}"
+      value: "${{ tasks.setup.outputs.values.effective_target_files }}"
     effective_experiment_command:
       required: true
       schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.effective_experiment_command }}"
+      value: "${{ tasks.setup.outputs.values.effective_experiment_command }}"
     effective_metric_name:
       required: true
       schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.effective_metric_name }}"
+      value: "${{ tasks.setup.outputs.values.effective_metric_name }}"
     effective_correctness_command:
       required: true
       schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.effective_correctness_command }}"
+      value: "${{ tasks.setup.outputs.values.effective_correctness_command }}"
     effective_setup_command:
       required: true
       schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.effective_setup_command }}"
+      value: "${{ tasks.setup.outputs.values.effective_setup_command }}"
+    effective_noise_epsilon:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.setup.outputs.values.effective_noise_epsilon }}"
+    effective_measurement_runs:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.setup.outputs.values.effective_measurement_runs }}"
+    frozen_files:
+      required: true
+      schema: { type: array, items: { type: string } }
+      value: "${{ tasks.setup.outputs.values.frozen_files }}"
     workspace_path:
       required: true
       schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.workspace_path }}"
+      value: "${{ tasks.setup.outputs.values.workspace_path }}"
     scaffolding_notes:
       required: true
       schema: { type: string }
-      value: "${{ tasks.experiment.outputs.values.scaffolding_notes }}"
+      value: "${{ tasks.setup.outputs.values.scaffolding_notes }}"

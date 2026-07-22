@@ -1,0 +1,274 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/fuzzer-coverage-snapshot-loop
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a fuzzer and its coverage harness are already baked into a panda-compute
+  snapshot and corpus coverage should be grown through snapshot lineage instead of
+  git: composes the coverage experiment contract (frozen denominator, corpus-safety
+  invariants, runbook-owned gap triage) into the goal, runs the snapshot
+  hillclimb on the generator surface, and renders the HTML report from the loop's
+  own cold-boot confirmation and reconciliation. The snapshot path has no
+  independent git verification stage — when a mergeable, verify-accepted branch is
+  the goal, use dev.wagie/fuzzer-coverage-loop instead.
+tags: ["fuzzing", "coverage", "corpus", "generator", "fuzzer", "snapshot", "panda-compute", "evm", "fuzzyvm", "experiment", "optimization"]
+examples:
+  - "grow fuzzer corpus coverage from a prebaked compute snapshot"
+  - "snapshot lineage coverage hillclimb on a fuzzer generator"
+  - "tune fuzzyvm's generator in ephemeral sandboxes and pin the winner"
+  - "coverage experiment on a snapshot with the harness already baked"
+  - "improve coverage without git using snapshot promote or discard"
+inputs:
+  values:
+    snapshot_id:
+      required: true
+      description: Panda-compute snapshot with the fuzzer, its dependencies, and the coverage benchmark fully baked. The loop never mutates it.
+      schema: { type: string }
+    workdir:
+      required: true
+      description: Absolute in-guest path to the fuzzer repo root inside the snapshot.
+      schema: { type: string }
+    target_files:
+      required: true
+      description: Workdir-relative generator surface the proposer may edit (files or directories). Never include the benchmark, fixtures, corpus databases, or dependency manifests — those are scoring surface.
+      schema: { type: array, minItems: 1, items: { type: string } }
+    experiment_command:
+      required: true
+      description: "In-guest command run from workdir that performs one budgeted measurement — generate into a fresh scratch corpus for the harness's fixed budget, replay under coverage against the fixed denominator — and emits a final `coverage_pct: <number>` line."
+      schema: { type: string }
+    coverage_scope:
+      required: true
+      description: Coverage denominator the baked benchmark replays against (e.g. a Go coverpkg pattern). Stated in the goal so the proposer knows what is being measured; the benchmark itself owns enforcing it.
+      schema: { type: string }
+    runbook:
+      required: true
+      description: "How a worker locates the runbook owning this fuzzer's coverage-improvement procedure — a `panda search runbooks \"<need>\"` query or a document URL. Embedded verbatim in the goal."
+      schema: { type: string }
+    frozen_files:
+      description: Workdir-relative scoring surface that must stay byte-identical all run (benchmark script, fixtures, dependency manifests). A directory freezes its subtree. Empty disables the integrity gate.
+      schema:
+        type: array
+        default: []
+        items:
+          type: string
+    correctness_command:
+      description: Optional in-guest gate command run from workdir; non-zero exit marks the candidate invalid (e.g. build plus generator tests). Empty disables the gate.
+      schema: { type: string, default: "" }
+    bench_seed_env:
+      description: "Environment variable the baked benchmark reads its generation seed from. When set, the loop rotates a fresh seed each round and shares it across the candidate and incumbent arms, so the generation RNG cancels in the paired difference instead of masquerading as a code effect. Empty means the benchmark takes no seed (generation variance then rides in every measurement). Bind fuzzer-coverage-prepare's bench_seed_env output here."
+      schema: { type: string, default: "" }
+    strategy_bias:
+      description: Optional free-text proposal bias appended to the goal (e.g. `focus on precompile input vectors`). Empty adds nothing.
+      schema: { type: string, default: "" }
+    max_iterations:
+      description: Hard cap on rounds. Rounds are expensive — each pairs candidate and incumbent measurements, every one a full generation budget.
+      schema: { type: number, default: 10 }
+    patience:
+      description: Stop after this many consecutive rounds with no accepted improvement.
+      schema: { type: number, default: 3 }
+    measurement_runs:
+      description: "Candidate/incumbent pairs measured per round (a round costs twice this many benchmark invocations). The default matches the underlying loop's statistical floor — the paired-difference stderr is unreliable below 5 pairs. Raise it when jitter drowns real gains; if you must go lower to save wall-clock, shrink generation_budget instead."
+      schema: { type: number, default: 5 }
+    noise_epsilon:
+      description: Relative acceptance/plateau tolerance. Default 0 derives it from observed baseline jitter — prefer that for stochastic fuzzing coverage.
+      schema: { type: number, default: 0 }
+    sandbox_ttl:
+      description: Lease for each ephemeral sandbox. Must comfortably cover one full round — measurement_runs pairs of budgeted generate-and-replay invocations plus snapshotting.
+      schema: { type: string, default: 6h }
+    compute_commands:
+      description: Optional pre-verified panda-compute CLI cheatsheet from a previous run; empty derives it fresh.
+      schema: { type: string, default: "" }
+tasks:
+  loop:
+    uses: dev.wagie/experiment-snapshot-loop@1.0.0
+    inputs:
+      values:
+        snapshot_id:
+          value: "${{ inputs.values.snapshot_id }}"
+        goal:
+          value: |-
+            ${{ "Objective: maximize the statement coverage that this fuzzer's generated corpus reaches over the fixed coverage scope `" + inputs.values.coverage_scope + "`, by improving the fuzzer's program generator — never the measurement. Coverage is a compass, not a score: a win reaches code the corpus could not reach before, across varied input shapes, not merely a line turned green.\n\n" +
+                "Domain procedure is owned by the fuzzer's coverage-improvement runbook; locate it via: " + inputs.values.runbook + ". It holds the phase sequence, the triage classes separating reachable gaps from code that is unreachable by design (skip those), and the map of which generator surface fixes which gap class. Read it before the first proposal and follow it every round.\n\n" +
+                "The scoring surface is already baked into this environment: the benchmark command performs one fixed-budget generate-and-replay measurement, reads its generation seed from the environment when the loop supplies one (rotated and shared per round across both arms so the generation RNG cancels), and that equal budget per invocation is what makes two coverage numbers comparable. Invariants: never write to, truncate, or delete any persistent corpus database — the benchmark's own scratch corpus is the only corpus a round may create; and the benchmark, its fixtures, and the dependency manifests pinning the measured codebase are frozen, so a candidate cannot improve the number by shrinking or moving what is measured.\n\n" +
+                "A change that makes the generator emit invalid programs is not a win at any coverage number." +
+                (inputs.values.?strategy_bias.orValue('') == '' ? '' : "\n\nProposal bias for this run: " + inputs.values.strategy_bias) }}
+        workdir:
+          value: "${{ inputs.values.workdir }}"
+        target_files:
+          value: "${{ inputs.values.target_files }}"
+        frozen_files:
+          value: "${{ inputs.values.?frozen_files.orValue([]) }}"
+        experiment_command:
+          value: "${{ inputs.values.experiment_command }}"
+        correctness_command:
+          value: "${{ inputs.values.?correctness_command.orValue('') }}"
+        bench_seed_env:
+          value: "${{ inputs.values.?bench_seed_env.orValue('') }}"
+        metric_name:
+          value: "${{ 'coverage_pct' }}"
+        metric_direction:
+          value: "${{ 'maximize' }}"
+        max_iterations:
+          value: "${{ inputs.values.?max_iterations.orValue(10.0) }}"
+        patience:
+          value: "${{ inputs.values.?patience.orValue(3.0) }}"
+        measurement_runs:
+          value: "${{ inputs.values.?measurement_runs.orValue(5.0) }}"
+        noise_epsilon:
+          value: "${{ inputs.values.?noise_epsilon.orValue(0.0) }}"
+        sandbox_ttl:
+          value: "${{ inputs.values.?sandbox_ttl.orValue('6h') }}"
+        compute_commands:
+          value: "${{ inputs.values.?compute_commands.orValue('') }}"
+  report:
+    needs: [loop]
+    uses: dev.wagie/experiment-report@1.0.0
+    inputs:
+      values:
+        goal:
+          value: "${{ tasks.loop.outputs.values.goal }}"
+        metric_name:
+          value: "${{ tasks.loop.outputs.values.metric_name }}"
+        metric_direction:
+          value: "${{ tasks.loop.outputs.values.metric_direction }}"
+        trials:
+          value: "${{ tasks.loop.outputs.values.trials }}"
+        baseline_metric:
+          value: "${{ tasks.loop.outputs.values.baseline_metric }}"
+        best_metric:
+          value: "${{ tasks.loop.outputs.values.best_metric }}"
+        confirmation_metric:
+          value: "${{ tasks.loop.outputs.values.confirmation_metric }}"
+        confirmation_spread:
+          value: "${{ tasks.loop.outputs.values.confirmation_spread }}"
+        confirmed:
+          value: "${{ tasks.loop.outputs.values.confirmed }}"
+        reconciliation_gap:
+          value: "${{ tasks.loop.outputs.values.reconciliation_gap }}"
+        reconciled:
+          value: "${{ tasks.loop.outputs.values.reconciled }}"
+        improvement_pct:
+          value: "${{ tasks.loop.outputs.values.improvement_pct }}"
+        exit_reason:
+          value: "${{ tasks.loop.outputs.values.exit_reason }}"
+        metric_limit_set:
+          value: "${{ tasks.loop.outputs.values.metric_limit_set }}"
+        metric_limit:
+          value: "${{ tasks.loop.outputs.values.metric_limit }}"
+        converged:
+          value: "${{ tasks.loop.outputs.values.converged }}"
+        accepted_count:
+          value: "${{ tasks.loop.outputs.values.accepted_count }}"
+        discarded_count:
+          value: "${{ tasks.loop.outputs.values.discarded_count }}"
+        integrity_violation_count:
+          value: "${{ tasks.loop.outputs.values.integrity_violation_count }}"
+        result_snapshot_id:
+          value: "${{ tasks.loop.outputs.values.result_snapshot_id }}"
+        environment_summary:
+          value: "${{ tasks.loop.outputs.values.environment_summary }}"
+        summary:
+          value: "${{ tasks.loop.outputs.values.summary }}"
+        progress_report:
+          value: "${{ tasks.loop.outputs.values.progress_report }}"
+outputs:
+  values:
+    result_snapshot_id:
+      required: true
+      schema: { type: string, description: Durably pinned snapshot of the best generator state (the input snapshot when nothing was accepted) }
+      value: "${{ tasks.loop.outputs.values.result_snapshot_id }}"
+    confirmed:
+      required: true
+      schema: { type: boolean, description: Whether the winning coverage reproduced on a cold boot of the result snapshot — this is the snapshot path's acceptance check }
+      value: "${{ tasks.loop.outputs.values.confirmed }}"
+    reconciled:
+      required: true
+      schema: { type: boolean, description: Whether the accepted per-round gains add up to the shipped result }
+      value: "${{ tasks.loop.outputs.values.reconciled }}"
+    confirmation_metric:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.loop.outputs.values.confirmation_metric }}"
+    baseline_metric:
+      required: true
+      schema: { type: number, description: Coverage percentage of the untouched generator's corpus }
+      value: "${{ tasks.loop.outputs.values.baseline_metric }}"
+    best_metric:
+      required: true
+      schema: { type: number, description: Best coverage percentage the loop accepted }
+      value: "${{ tasks.loop.outputs.values.best_metric }}"
+    improvement_pct:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.loop.outputs.values.improvement_pct }}"
+    improved:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.loop.outputs.values.improved }}"
+    exit_reason:
+      required: true
+      schema: { type: string, description: "One of saturated, plateau, patience, improvement, max_iterations" }
+      value: "${{ tasks.loop.outputs.values.exit_reason }}"
+    converged:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.loop.outputs.values.converged }}"
+    rounds_completed:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.loop.outputs.values.rounds_completed }}"
+    accepted_count:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.loop.outputs.values.accepted_count }}"
+    discarded_count:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.loop.outputs.values.discarded_count }}"
+    integrity_violation_count:
+      required: true
+      schema: { type: number, description: Rounds rejected for touching the frozen scoring surface }
+      value: "${{ tasks.loop.outputs.values.integrity_violation_count }}"
+    trials:
+      required: true
+      schema:
+        type: array
+        description: Typed trial ledger, one record per round in run order
+        items:
+          type: object
+          properties:
+            round: { type: number }
+            hypothesis: { type: string }
+            commit: { type: string }
+            snapshot_id: { type: string }
+            status: { type: string, enum: [pass, fail, invalid, suspicious] }
+            metric: { type: number }
+            spread: { type: number }
+            paired_gain: { type: number }
+            paired_gain_stderr: { type: number }
+            best_after: { type: number }
+            decision_source: { type: string, enum: [auto, agent] }
+            measurement_note: { type: string }
+            interpretation: { type: string }
+            next_action: { type: string }
+          required: [round, hypothesis, status, interpretation]
+      value: "${{ tasks.loop.outputs.values.trials }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.loop.outputs.values.summary }}"
+    headline:
+      required: true
+      schema: { type: string, description: One-sentence result line for chat and links }
+      value: "${{ tasks.report.outputs.values.headline }}"
+    environment_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.loop.outputs.values.environment_summary }}"
+  artifacts:
+    report:
+      ref: tasks.report.outputs.artifacts.report

@@ -11,6 +11,11 @@ description: >-
   detailed reviewer persona with focus area and principles to produce scored
   findings.
 tags: ["code-review", "persona", "reviewer"]
+examples:
+  - "review this diff as one security specialist"
+  - "check changed lines only for performance risks"
+  - "call out strengths and issues from one lens"
+  - "respect dismissed false positives on recheck"
 inputs:
   values:
     diff:
@@ -20,7 +25,7 @@ inputs:
     persona:
       required: true
       description: Reviewer persona defining role, focus area, and review principles
-      schema:
+      schema: &review_persona_schema
         type: object
         properties:
           role:
@@ -53,7 +58,7 @@ inputs:
       schema: { type: string }
     dismissed_findings:
       description: "Findings from prior review iterations dismissed as false positives with reasoning. Reviewers must not re-flag these unless the code has materially changed."
-      schema:
+      schema: &dismissed_findings_schema
         type: array
         items:
           type: object
@@ -130,7 +135,7 @@ tasks:
           schema: { type: string }
           value: "${{ inputs.values.diff }}"
         persona:
-          schema: { type: object }
+          schema: *review_persona_schema
           value: "${{ inputs.values.persona }}"
         threshold:
           schema: { type: number }
@@ -145,7 +150,7 @@ tasks:
           schema: { type: string }
           value: "${{ inputs.values.?context.orValue('') }}"
         dismissed_findings:
-          schema: { type: array, items: { type: object } }
+          schema: *dismissed_findings_schema
           value: "${{ inputs.values.?dismissed_findings.orValue([]) }}"
     outputs:
       values:
@@ -160,7 +165,7 @@ tasks:
             description: Whether the code passes this reviewer's assessment
         findings:
           required: true
-          schema:
+          schema: &review_findings_schema
             type: array
             description: Specific findings from this reviewer's perspective
             items:
@@ -189,7 +194,7 @@ outputs:
       value: "${{ tasks.review.outputs.values.verdict }}"
     findings:
       required: true
-      schema: { type: array, items: { type: object } }
+      schema: *review_findings_schema
       value: "${{ tasks.review.outputs.values.findings }}"
     reasoning:
       required: true

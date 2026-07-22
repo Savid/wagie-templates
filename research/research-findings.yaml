@@ -7,8 +7,14 @@ authors: [savid]
 homepage: https://github.com/savid/wagie-templates
 repository: https://github.com/savid/wagie-templates
 description: >-
-  Use when a topic needs a typed batch of research findings; returns incremental findings with evidence quality metadata, focused on breadth first and then explicit gap closure.
-tags: ["research", "findings", "evidence"]
+  Use when a topic needs a typed batch of research findings; returns incremental findings with structured source references and evidence quality metadata, focused on breadth first and then explicit gap closure.
+tags: ["research", "findings", "evidence", "citations"]
+examples:
+  - "gather new evidence-backed claims for this topic"
+  - "fill priority research gaps with cited findings"
+  - "record structured source refs behind every claim"
+  - "surface contradictions in the next research batch"
+  - "add new findings without repeating prior claims"
 inputs:
   values:
     topic:
@@ -17,7 +23,7 @@ inputs:
       schema: { type: string }
     previous_findings:
       description: Prior findings already established
-      schema:
+      schema: &research_findings_schema
         type: array
         items:
           type: object
@@ -26,11 +32,27 @@ inputs:
               type: string
             evidence:
               type: string
+            sources:
+              type: array
+              items:
+                type: object
+                properties:
+                  ref:
+                    type: string
+                  title:
+                    type: string
+                  date:
+                    type: string
+                  quote:
+                    type: string
+                required: [ref]
             confidence:
               type: number
             source_type:
               type: string
             evidence_strength:
+              type: string
+            polarity:
               type: string
             corroboration:
               type: number
@@ -39,7 +61,7 @@ inputs:
           required: [claim, evidence, confidence]
     gaps:
       description: Remaining questions or subtopics to address
-      schema:
+      schema: &research_gaps_schema
         type: array
         items:
           type: object
@@ -50,10 +72,12 @@ inputs:
               type: string
             difficulty:
               type: string
+            dimension:
+              type: string
           required: [question]
     plan_questions:
       description: Sub-questions from the research plan to target
-      schema:
+      schema: &plan_questions_schema
         type: array
         items:
           type: object
@@ -65,6 +89,8 @@ inputs:
             priority:
               type: string
             difficulty:
+              type: string
+            rationale:
               type: string
           required: [question]
 tasks:
@@ -89,21 +115,33 @@ tasks:
 
       Evidence standards:
       - Every claim must cite specific evidence, not general knowledge
+      - Record every source behind a finding as a structured sources
+        entry: ref is the URL, DOI, or stable identifier; quote is a
+        short excerpt or locator that makes re-verification cheap
+      - corroboration is not asserted, it is derived: it must equal the
+        number of distinct independent sources[].ref entries backing
+        the claim. Two pages from the same publisher or the same study
+        reported twice are one source, not two
       - Assess each source: is it primary research, secondary analysis,
         or speculation? Record this as source_type
       - Rate evidence_strength honestly: strong means multiple credible
         sources agree; moderate means some support exists; weak means
         limited or indirect support only
-      - When multiple independent sources support a claim, record how
-        many as corroboration
       - When sources contradict each other, surface the contradiction
         explicitly — do not silently pick a side
 
       Epistemic discipline:
       - Distinguish between established facts, expert consensus with
         debate, emerging or contested findings, and your inference
-      - If you cannot find evidence for something, say so rather than
-        filling with plausible-sounding claims
+      - If a gap cannot be filled because no credible evidence exists,
+        record that as a negative finding: polarity is negative, the
+        claim states that no credible evidence was found, the evidence
+        describes what was searched and where, source_type is
+        inference, and sources lists whatever was checked (it may be
+        empty). A well-supported negative finding is a substantive
+        result — never pad the batch with plausible-sounding claims
+        instead, and never mark a finding negative just because it was
+        cheap to write
       - Do not hedge with phrases like "it is important to note" — be
         direct about what the evidence shows and where it is uncertain
       - Form concrete assessments. Vague conclusions like "there are
@@ -117,19 +155,19 @@ tasks:
           schema: { type: string }
           value: "${{ inputs.values.topic }}"
         previous_findings:
-          schema: { type: array, items: { type: object } }
+          schema: *research_findings_schema
           value: "${{ inputs.values.?previous_findings.orValue([]) }}"
         gaps:
-          schema: { type: array, items: { type: object } }
+          schema: *research_gaps_schema
           value: "${{ inputs.values.?gaps.orValue([]) }}"
         plan_questions:
-          schema: { type: array, items: { type: object } }
+          schema: *plan_questions_schema
           value: "${{ inputs.values.?plan_questions.orValue([]) }}"
     outputs:
       values:
         findings:
           required: true
-          schema:
+          schema: &incremental_findings_schema
             type: array
             items:
               type: object
@@ -140,6 +178,23 @@ tasks:
                 evidence:
                   type: string
                   description: Specific evidence supporting the claim
+                sources:
+                  type: array
+                  description: Structured references behind the claim; empty only for inference or negative findings
+                  items:
+                    type: object
+                    properties:
+                      ref:
+                        type: string
+                        description: URL, DOI, or stable identifier of the source
+                      title:
+                        type: string
+                      date:
+                        type: string
+                      quote:
+                        type: string
+                        description: Short excerpt or locator that makes re-verification cheap
+                    required: [ref]
                 confidence:
                   type: number
                   description: 0-100 confidence in the claim
@@ -151,17 +206,21 @@ tasks:
                   type: string
                   enum: [strong, moderate, weak]
                   description: How well evidence supports the claim
+                polarity:
+                  type: string
+                  enum: [positive, negative]
+                  description: positive asserts evidence was found; negative records that no credible evidence exists
                 corroboration:
                   type: number
-                  description: Number of independent sources supporting the claim
+                  description: Derived count of distinct independent sources[].ref entries; never asserted without a matching source
                 contradictions:
                   type: string
                   description: Known contradicting evidence or viewpoints
-              required: [claim, evidence, confidence, source_type, evidence_strength]
+              required: [claim, evidence, sources, confidence, source_type, evidence_strength, polarity]
             description: Incremental research findings
 outputs:
   values:
     findings:
       required: true
-      schema: { type: array, items: { type: object } }
+      schema: *incremental_findings_schema
       value: "${{ tasks.investigate.outputs.values.findings }}"

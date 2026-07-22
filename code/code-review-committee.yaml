@@ -11,6 +11,12 @@ description: >-
   parallel, then a top-level judge deduplicates, resolves conflicts, and
   produces a unified verdict with confidence scores.
 tags: ["code-review", "committee", "parallel-review", "review-panel"]
+examples:
+  - "run a multi-persona review panel on this diff"
+  - "average reviewer scores into one PR verdict"
+  - "review this diff for security and performance issues"
+  - "dedupe specialist findings into one code verdict"
+  - "run my custom API and security reviewers on this diff"
 inputs:
   values:
     diff:
@@ -207,7 +213,17 @@ tasks:
                     type: string
                   findings:
                     type: array
-                    items: { type: object }
+                    items: &review_finding_schema
+                      type: object
+                      properties:
+                        type: { type: string, enum: [issue, strength] }
+                        severity: { type: string, enum: [critical, high, medium, low, info] }
+                        location: { type: string, description: File path and line or code reference }
+                        observation: { type: string }
+                        impact: { type: string }
+                        suggestion: { type: string }
+                        source: { type: string, description: URL or documentation reference supporting this finding }
+                      required: [type, severity, location, observation, impact]
                   reasoning:
                     type: string
                 required: [role, score, verdict, findings, reasoning]
@@ -218,7 +234,7 @@ tasks:
           required: true
           schema:
             type: array
-            items:
+            items: &committee_review_schema
               type: object
               properties:
                 role:
@@ -229,7 +245,7 @@ tasks:
                   type: string
                 findings:
                   type: array
-                  items: { type: object }
+                  items: *review_finding_schema
                 reasoning:
                   type: string
               required: [role, score, verdict, findings, reasoning]
@@ -293,7 +309,9 @@ tasks:
     inputs:
       values:
         reviews:
-          schema: { type: array, items: { type: object } }
+          schema:
+            type: array
+            items: *committee_review_schema
           value: "${{ tasks.review_panel.outputs.values.reviews }}"
         threshold:
           schema: { type: number }
@@ -311,7 +329,7 @@ tasks:
             description: Unified committee verdict
         findings:
           required: true
-          schema:
+          schema: &committee_findings_schema
             type: array
             description: Deduplicated, ranked findings with agreement tracking
             items:
@@ -343,7 +361,7 @@ tasks:
               required: [severity, location, observation, impact, suggestion, agreed_by, confidence]
         scores_by_reviewer:
           required: true
-          schema:
+          schema: &scores_by_reviewer_schema
             type: array
             description: Individual scores from each reviewer
             items:
@@ -372,11 +390,11 @@ outputs:
       value: "${{ tasks.judge.outputs.values.verdict }}"
     findings:
       required: true
-      schema: { type: array, items: { type: object } }
+      schema: *committee_findings_schema
       value: "${{ tasks.judge.outputs.values.findings }}"
     scores_by_reviewer:
       required: true
-      schema: { type: array, items: { type: object } }
+      schema: *scores_by_reviewer_schema
       value: "${{ tasks.judge.outputs.values.scores_by_reviewer }}"
     agreement_score:
       required: true

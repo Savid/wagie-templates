@@ -2,41 +2,66 @@
 
 ## Scope
 
-This repo is the companion library for specialized Wagie templates that do not belong in Wagie's core root-level library.
+This repo is a companion library of specialized Wagie templates that do not belong in
+Wagie's core root-level library.
 
-Current families:
+Families are shallow root-level directories, one per domain. Place templates by the
+domain that owns their meaning, not by incidental tooling. Do not reintroduce a
+`templates/` wrapper, and do not create deep category trees unless the repo grows
+enough to justify them.
 
-- `ethereum/`: devnet and Kurtosis Ethereum workflows
-- `code/`: code-review and code-quality workflows
-- `ci/`: CI failure triage and GitHub issue state workflows
-- `research/`: iterative research workflows
-- `experiments/`: autonomous experiment loops (metric-driven hillclimb over any git-tracked artifact)
+## Building Blocks
 
-Keep family directories shallow. Do not reintroduce a `templates/` wrapper here.
+A template is one responsibility with a declared boundary: typed inputs and outputs,
+composable via `uses:` or usable standalone.
 
-## Entry Points vs Building Blocks
+A seam earns its own template only when it is real: reused by more than one plausible
+caller, retrievable as a concept a searcher would query, or carrying genuine
+orchestration (a loop, fan-out, distinct worker placement, or a typed gate) behind a
+clean single-responsibility boundary. Otherwise fold the work into the parent's
+`instructions` or a container step — prefer a little duplication over the wrong split.
 
-Within a family, some templates are user-facing entry points and others are internal building blocks composed by those entry points. Current roles:
+Fragment for orchestration leverage, not to hand-hold the agent. Wagie's value here is
+loops, fan-out, worker placement, and enforced typed handoffs between steps — the things a
+single worker can't do in one pass. It is *not* chopping a worker's reasoning into many
+micro-tasks. Give a worker a whole cohesive job and a typed output, and let external
+knowledge surfaces (domain runbooks, docs) carry the domain procedure. A step that is
+just "the agent thinks" belongs inside a worker, not as its own task — and every extra
+task also dilutes the retrieval pool the router searches.
 
-- `ethereum/`: entry points are `devnet-debug`, `kurtosis-ethereum-bug-hunt`, `kurtosis-ethereum-network-lifecycle`, `kurtosis-ethereum-config`, `assertoor-ci-investigate`. The rest (`devnet-context`, `devnet-baseline`, `devnet-finality-assessment`, `devnet-notes`, `devnet-topology-profile`, `devnet-report`, `kurtosis-ethereum-devnet-config`, `kurtosis-ethereum-reference`, `kurtosis-enclave-*`, `assertoor-ci-normalize`, `assertoor-ci-fingerprint`, `assertoor-ci-classify`, `assertoor-ci-cluster-investigate`, `assertoor-ci-issue-render`, `assertoor-ci-run-report`, `assertoor-ci-test-inspect`, `assertoor-ci-regression-window`, `assertoor-ci-kurtosis-reproduce`, `ethereum-client-image-resolve`, `ethereum-component-source-dive`, `ethereum-package-launcher-audit`) are building blocks, most also callable standalone.
-- `code/`: entry points are `code-review-committee`, `code-review-fix-loop`, `code-review-adversarial`, `code-verification`. `code-diff`, `code-reviewer`, `code-evidence-locate`, and `source-investigation-committee` are building blocks.
-- `ci/`: building blocks are `github-actions-failure-fetch`, `failure-cluster`, `ci-investigate-issue-context`, `ci-investigate-issue-state-check`, `ci-investigate-issue-publish-by-fingerprint`, and `discord-webhook-notify`. Domain-specific adapters, fingerprinting, and issue rendering should live in the family that owns the artifact format, such as `ethereum/assertoor-ci-investigate`.
-- `research/`: entry point is `deep-research`. `research-plan`, `research-findings`, `research-coverage-assess`, `research-verify` are building blocks, callable standalone for one-shot use.
-- `experiments/`: entry point is `experiment-loop`. The setup task inside the template handles discovery (resolving target files, setup/benchmark/correctness commands, metric name from the repo + goal) so callers only need to supply `repo_url`, `goal`, and `result_branch` in the common case. All discovered parameters can be overridden explicitly.
+## Family Shape
 
-When authoring new templates, flag the role in the description if it is not a top-level entry point.
+Templates can be user-facing entry points, pipeline stages, or internal building
+blocks. Do not maintain template-name inventories in this file; they drift.
+Use each template's `description`, `tags`, inputs, and outputs to signal whether
+it is an entry point or a building block.
+
+- `ethereum/`: keep Ethereum devnet and Kurtosis workflows pipeline-shaped.
+  Templates should be thin orchestration/glue around Panda runbooks: gather or
+  generate config, provision or snapshot a network, observe it, then investigate
+  structured issues. Panda runbooks own domain procedure and operational
+  knowledge; templates own typed handoffs, fanout, loops, and artifacts.
+- `code/`: keep code-review, source-investigation, verification, and fix-loop
+  workflows here when they are code-domain specific. Generic review-loop or
+  consensus primitives belong in core Wagie.
+- `research/`: keep iterative research workflows here when they coordinate
+  search, findings, coverage assessment, and verification around a research
+  question. Generic extract/summarize/evaluate primitives belong in core Wagie.
+- `experiments/`: keep metric-driven experiment loops here. The common shape is
+  discovery/setup, propose/apply/check/measure, keep-or-revert, then summarize
+  progress and convergence.
+
+When authoring new templates, flag the role in the template description if it is
+not a top-level entry point.
 
 ## Boundary
 
 Templates in this repo should be specialized, domain-coupled, or operator-specific.
 
-Keep generic core templates in the main Wagie repo, especially:
-
-- atomic cognitive primitives: decide, evaluate, extract, transform, summarize, generate
-- orchestration patterns: map-reduce, review-loop, self-consistency-jury
-- structural glue: promote-reject, evaluation-aggregate
-
-If a template can stand as a root-level composable primitive for many unrelated workflows, it probably belongs in core, not here.
+Keep generic material in core Wagie: atomic cognitive primitives, generic
+orchestration patterns (review loops, consensus, map-reduce), and structural glue.
+If a template can stand as a root-level composable primitive for many unrelated
+workflows, it probably belongs in core, not here.
 
 ## Repo Rules
 
@@ -44,6 +69,9 @@ If a template can stand as a root-level composable primitive for many unrelated 
 - Keep instruction files concise and scoped; put detailed topic guidance in referenced docs instead of growing this file.
 - Prefer the smallest family that owns the workflow. Avoid dumping unrelated templates into a catch-all bucket.
 - Cross-family dependencies should be rare and intentional. Prefer depending on core Wagie templates over coupling families together without a strong reason.
+- References to external knowledge surfaces (e.g. runbook refs inside instructions) are
+  plain prose to the worker — nothing here validates them, so keep them current when the
+  external surface changes.
 
 ## Core Commands
 

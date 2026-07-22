@@ -1,0 +1,500 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-watch
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a running Ethereum devnet — a live hosted network, a local Kurtosis enclave, or a restored panda-compute snapshot — must be watched live over a bounded window going forward and its problems surfaced. Establishes a shared watch window, fans out neutral per-service and network observation, then collates the observations into deduped issue records. Live and forward — watchers resolve how to reach each network kind from the panda runbooks; for a window already in the past, scan history with devnet-scan instead.
+tags: ["ethereum", "devnet", "watch", "observability", "issues", "hosted", "live", "kurtosis"]
+examples:
+  - "monitor this live devnet going forward"
+  - "monitor restored snapshot for new live issues"
+  - "return start and end epochs for the watch window"
+  - "include service roles builds and fork setup"
+  - "take final compute snapshot after watching"
+inputs:
+  values:
+    devnet:
+      description: Source devnet id this network reproduces, passed to collation for context and dedupe
+      schema: { type: string }
+    snapshot_id:
+      description: A panda-compute snapshot to restore and watch
+      schema: { type: string }
+    network_target:
+      description: An already-running network to attach to — hosted, local enclave, or restored snapshot
+      schema: &network_target_schema
+        type: object
+        properties:
+          kind: { type: string, description: local | compute | public — owned by the runbook that owns debugging an Ethereum network (its tooling kind never reaches a watch) }
+          enclave: { type: string }
+          sandbox_id: { type: string }
+          network_id: { type: string, description: "Public network id, when known" }
+        required: [kind]
+    watch_epochs:
+      description: How many epochs to watch from the current epoch (default 5)
+      schema: { type: number, default: 5 }
+    sandbox_ttl:
+      description: TTL for a restored compute sandbox, when applicable
+      schema: { type: string }
+tasks:
+  provision:
+    quality-gate: "${{ has(outputs.values.network_target) && size(outputs.values.services) > 0 && has(outputs.values.setup_summary) && outputs.values.window.end_epoch >= outputs.values.window.start_epoch }}"
+    instructions: |-
+      Establish the network to watch and the shared watch window. Do not modify
+      the network.
+
+      Route by the target kind — resolve runbooks by meaning via
+      `panda search runbooks "<need>"`: attach to a supplied network target
+      as-is; restore a snapshot per the runbook that owns the panda-compute
+      lifecycle; reach and map a local enclave per the runbook that owns running
+      and reaching a Kurtosis devnet; ground a hosted network's id, endpoints,
+      and node inventory per the runbook that owns hosted devnet context intake. Set the
+      shared window per the runbook that owns neutral devnet watching — every
+      watcher stops at end_epoch. Watchers are isolated and only receive these
+      values, so the network target must carry enough to address the nodes for
+      its kind.
+
+      Emit one service entry per node and tooling service with its role and
+      build, the network target, the window with its slot timing, and the
+      setup_summary that collation judges against.
+    inputs:
+      values:
+        snapshot_id:
+          schema: { type: string }
+          value: "${{ inputs.values.?snapshot_id.orValue('') }}"
+        provided_target:
+          schema:
+            type: object
+            description: Caller-supplied target if any
+            properties:
+              kind: { type: string }
+              enclave: { type: string }
+              sandbox_id: { type: string }
+              network_id: { type: string }
+          value: "${{ inputs.values.?network_target.orValue({}) }}"
+        watch_epochs:
+          required: true
+          schema: { type: number }
+          value: "${{ inputs.values.?watch_epochs.orValue(5) }}"
+        sandbox_ttl:
+          schema: { type: string }
+          value: "${{ inputs.values.?sandbox_ttl.orValue('') }}"
+    outputs:
+      values:
+        network_target:
+          required: true
+          schema: *network_target_schema
+        sandbox_id:
+          required: true
+          schema: { type: string, description: "Compute sandbox id when applicable, else empty" }
+        services:
+          required: true
+          schema:
+            type: array
+            items: &service_schema
+              type: object
+              properties:
+                service: { type: string }
+                role: { type: string, enum: [cl, el, vc, builder, tooling, unknown] }
+                client: { type: string }
+                image: { type: string }
+                paired: { type: array, items: { type: string } }
+              required: [service, role]
+            description: One entry per node and tooling service to watch, with role and build
+        window:
+          required: true
+          schema: &window_schema
+            type: object
+            properties:
+              start_epoch: { type: number }
+              end_epoch: { type: number }
+              seconds_per_slot: { type: number }
+              slots_per_epoch: { type: number }
+            required: [start_epoch, end_epoch]
+        setup_summary:
+          required: true
+          schema: &setup_summary_schema
+            type: object
+            description: Fork/blob schedule, load generators, builders — shape owned by the neutral-watching runbook's output contract
+            properties:
+              fork_schedule:
+                type: object
+                description: Fork name to activation epoch
+                additionalProperties: { type: number }
+              blob_schedule:
+                type: object
+                description: Max blobs per block by fork name
+                additionalProperties: { type: number }
+              load: { type: array, items: { type: string }, description: Load generators or applied transaction load }
+              builders: { type: array, items: { type: string } }
+  observe:
+    needs: [provision]
+    inputs:
+      values:
+        network_target:
+          required: true
+          schema: *network_target_schema
+          value: "${{ tasks.provision.outputs.values.network_target }}"
+        end_epoch:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.provision.outputs.values.window.end_epoch }}"
+    matrix:
+      axes:
+        service:
+          schema:
+            type: array
+            items: *service_schema
+          value: "${{ tasks.provision.outputs.values.services }}"
+    tasks:
+      observe_one:
+        quality-gate: "${{ has(outputs.values.result) }}"
+        instructions: |-
+          Observe one service until the network reaches the end epoch, then
+          report neutral facts only — do not judge whether they are problems;
+          collate does that. Do not modify or snapshot the network.
+
+          Resolve runbooks by meaning via `panda search runbooks "<need>"`.
+          Follow the runbook that owns neutral devnet watching for this
+          service's role lane and the runbook that owns the fork model for
+          fork-specific artifacts. Record each fact as an evidence item per the
+          issue-contract runbook.
+
+          Return this service's observations, empty if nothing notable, with
+          reduced reach or other coverage caveats recorded in `notes` — a reach
+          limitation is a caveat, never an observation.
+        inputs:
+          values:
+            service:
+              required: true
+              schema: *service_schema
+              value: "${{ matrix.service }}"
+            network_target:
+              required: true
+              schema: *network_target_schema
+              value: "${{ inputs.values.network_target }}"
+            end_epoch:
+              required: true
+              schema: { type: number }
+              value: "${{ inputs.values.end_epoch }}"
+        outputs:
+          values:
+            result:
+              required: true
+              schema: &observe_result_schema
+                type: object
+                properties:
+                  service: { type: string }
+                  role: { type: string }
+                  notes: { type: string, description: "Reach or coverage caveats for this service, empty when none — watch.notes in the neutral-watching runbook" }
+                  observations:
+                    type: array
+                    items: &evidence_item_schema
+                      type: object
+                      properties:
+                        source: { type: string, description: Tool or datasource that produced it }
+                        ref: { type: string, description: Executable re-derivation — a reader can re-run it }
+                        at: { type: string, description: "Slot, block, epoch, or timestamp anchoring it" }
+                        detail: { type: string, description: "What was observed, verbatim values preserved" }
+                      required: [source, ref, detail]
+                required: [observations]
+    outputs:
+      values:
+        observations:
+          required: true
+          schema:
+            type: array
+            items: *observe_result_schema
+          value: "${{ tasks.observe_one.outputs.values.result }}"
+  observe_network:
+    needs: [provision]
+    quality-gate: "${{ has(outputs.values.network_observations) }}"
+    instructions: |-
+      Observe the network as a whole across the watch window, facts only — do
+      not judge, modify, or snapshot.
+
+      Resolve runbooks by meaning via `panda search runbooks "<need>"`. Follow
+      the network lane of the runbook that owns neutral devnet watching and the
+      runbook that owns the fork model and health thresholds; judge block
+      fullness against the setup_summary per the runbook that owns evidence
+      discipline. Record each fact as an evidence item per the issue-contract
+      runbook, and reduced reach or other coverage caveats in `notes` — a reach
+      limitation is a caveat, never an observation.
+    inputs:
+      values:
+        network_target:
+          required: true
+          schema: *network_target_schema
+          value: "${{ tasks.provision.outputs.values.network_target }}"
+        end_epoch:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.provision.outputs.values.window.end_epoch }}"
+        setup_summary:
+          required: true
+          schema: *setup_summary_schema
+          value: "${{ tasks.provision.outputs.values.setup_summary }}"
+    outputs:
+      values:
+        network_observations:
+          required: true
+          schema: &network_obs_schema
+            type: array
+            items: *evidence_item_schema
+        notes:
+          schema: { type: string, description: "Reach or coverage caveats for the network lane, empty when none" }
+  snapshot_final:
+    needs: [provision, observe, observe_network]
+    quality-gate: "${{ has(outputs.values.snapshotted) }}"
+    instructions: |-
+      If the network is a panda-compute sandbox this watch owns — provisioned
+      for this watch, including a restore made on its behalf; the
+      compute-lifecycle runbook owns the ownership rule — take exactly one
+      final snapshot after the end epoch is reached, per the runbook that owns
+      the panda-compute lifecycle (`panda search runbooks "snapshot a
+      devnet"`); poll the operation and resolve the snapshot id. On a shared
+      sandbox another live task is using, never snapshot: set
+      snapshotted=false and record the owner dependency in `notes`. If the
+      network is a local enclave or hosted, skip and set snapshotted=false —
+      snapshot/restore is panda-compute only. Do not snapshot mid-window.
+    inputs:
+      values:
+        network_target:
+          required: true
+          schema: *network_target_schema
+          value: "${{ tasks.provision.outputs.values.network_target }}"
+        sandbox_id:
+          required: true
+          schema: { type: string }
+          value: "${{ tasks.provision.outputs.values.sandbox_id }}"
+        end_epoch:
+          required: true
+          schema: { type: number }
+          value: "${{ tasks.provision.outputs.values.window.end_epoch }}"
+    outputs:
+      values:
+        snapshotted:
+          required: true
+          schema: { type: boolean }
+        snapshot_id:
+          required: true
+          schema: { type: string, description: "Final snapshot id, empty when not applicable" }
+        notes:
+          schema: { type: string, description: "Owner-dependency or skip caveats, empty when none" }
+  collate:
+    needs: [provision, observe, observe_network, snapshot_final]
+    quality-gate: "${{ has(outputs.values.issues) && (size(outputs.values.issues) > 0 || size(outputs.values.healthy_window_summary) > 0) }}"
+    instructions: |-
+      Turn the neutral observations into self-contained issue records — judge
+      here; the watchers did not. Outputs are the structured values declared
+      below, never an HTML page or bug board, even if a retrieved runbook
+      offers to build one.
+
+      Resolve runbooks by meaning via `panda search runbooks "<need>"`: the
+      runbook that owns collating watch issues for the judgment rules and the
+      handles mapping, the issue-contract runbook for the record and
+      evidence-item shapes, the one that owns issue fingerprinting for identity
+      (one issue per cause, not per node), the one that owns the fork model and
+      health thresholds, and the one that owns evidence discipline. Judge
+      against the setup_summary; fill each issue's handles from this run,
+      setup_summary copied whole and the source devnet id as network.
+
+      When the window is healthy, emit zero issues and a one-paragraph
+      healthy_window_summary in their place. Merge every watcher's reach or
+      coverage caveat (per-service notes, network_notes, and snapshot_notes)
+      into the notes
+      output — coverage limitations are context for the reader, not issues.
+      Emit handoff gaps in the feedback queue (the runbook that owns shaping
+      investigation follow-ups), never embedded in issues.
+
+      The structured output has a hard size budget: keep each evidence item's
+      `detail` to a tight verbatim excerpt — its `ref` stays the exact
+      re-runnable command. Never emit placeholder or diagnostic values to get
+      a failing call through; report the problem honestly in `notes` instead.
+    inputs:
+      values:
+        setup_summary:
+          required: true
+          schema: *setup_summary_schema
+          value: "${{ tasks.provision.outputs.values.setup_summary }}"
+        window:
+          required: true
+          schema: *window_schema
+          value: "${{ tasks.provision.outputs.values.window }}"
+        observations:
+          required: true
+          schema:
+            type: array
+            items: *observe_result_schema
+          value: "${{ tasks.observe.outputs.values.observations }}"
+        network_observations:
+          required: true
+          schema: *network_obs_schema
+          value: "${{ tasks.observe_network.outputs.values.network_observations }}"
+        devnet:
+          schema: { type: string, description: Source devnet id when known }
+          value: "${{ inputs.values.?devnet.orValue('') }}"
+        network_target:
+          required: true
+          schema: *network_target_schema
+          value: "${{ tasks.provision.outputs.values.network_target }}"
+        final_snapshot_id:
+          required: true
+          schema: { type: string, description: "Final snapshot id, empty when not applicable" }
+          value: "${{ tasks.snapshot_final.outputs.values.snapshot_id }}"
+        network_notes:
+          schema: { type: string, description: "Network-lane reach/coverage caveats" }
+          value: "${{ tasks.observe_network.outputs.values.?notes.orValue('') }}"
+        snapshot_notes:
+          schema: { type: string, description: "Final-snapshot caveats (owner dependency, skip reason)" }
+          value: "${{ tasks.snapshot_final.outputs.values.?notes.orValue('') }}"
+    outputs:
+      values:
+        issues:
+          required: true
+          schema: &issue_schema
+            type: array
+            items:
+              type: object
+              properties:
+                title: { type: string }
+                summary: { type: string, description: "Free-text reasoning, written first" }
+                classification:
+                  type: object
+                  properties:
+                    category: { type: string, description: Failure mode — enum owned by the issue-contract runbook }
+                    layer: { type: string, description: consensus | execution | network | tooling | cross-layer }
+                    spread: { type: string, description: single-client | subset | all-clients | network-wide | unknown }
+                    severity: { type: string, description: "Impact rank critical | major | minor — distinct from confidence; scale owned by the issue-contract runbook" }
+                first_bad:
+                  type: object
+                  description: Earliest artifact that explains later symptoms
+                  properties:
+                    kind: { type: string, description: slot | block | epoch | log | rpc | test | service-state }
+                    value: { type: string }
+                    at: { type: string }
+                affected:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      node: { type: string }
+                      role: { type: string }
+                      client: { type: string }
+                      image: { type: string }
+                evidence:
+                  type: array
+                  items: *evidence_item_schema
+                co_present:
+                  type: array
+                  items: { type: string }
+                  description: Co-present distractor signals, kept out of the root narrative
+                fingerprint:
+                  type: object
+                  description: Identity block owned by the fingerprinting runbook — no run-specific ids in the key
+                  properties:
+                    rationale: { type: string }
+                    key: { type: string }
+                    decision: { type: string, description: new | duplicate | variant | insufficient-context }
+                    matched: { type: string }
+                    variant_dimension: { type: string }
+                    confidence: { type: string }
+                handles:
+                  type: object
+                  description: What lets an investigation restore or reach the broken state — fill only the id kinds that exist
+                  properties:
+                    snapshot_id: { type: string }
+                    sandbox_id: { type: string }
+                    enclave: { type: string }
+                    network: { type: string, description: Source or hosted network id }
+                    setup_summary:
+                      type: object
+                      description: Watch setup_summary copied whole — reproduction and reachability judge against it
+                      properties:
+                        fork_schedule:
+                          type: object
+                          description: Fork name to activation epoch
+                          additionalProperties: { type: number }
+                        blob_schedule:
+                          type: object
+                          description: Max blobs per block by fork name
+                          additionalProperties: { type: number }
+                        load: { type: array, items: { type: string }, description: Load generators or applied transaction load }
+                        builders: { type: array, items: { type: string } }
+                confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
+              required: [title, summary]
+        healthy_window_summary:
+          required: true
+          schema: { type: string, description: "One paragraph instead of issues when the window is healthy, else empty" }
+        notes:
+          required: true
+          schema: { type: string, description: "Merged reach/coverage caveats from all watchers, empty when none — watch.notes in the neutral-watching runbook" }
+        feedback:
+          required: true
+          schema: &feedback_schema
+            type: object
+            description: Follow-up queue — shape owned by the feedback-queue runbook
+            properties:
+              priority_summary: { type: string }
+              terminal: { type: boolean }
+              terminal_reason: { type: string }
+              tasks:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | experiment-triage | manual-review | publish | no-op }
+                    reason: { type: string }
+                    priority: { type: string, description: high | medium | low }
+                    inputs: { type: object, description: "Handles and query params only, values stringified", additionalProperties: { type: string } }
+                    success_condition: { type: string }
+                    stop_condition: { type: string }
+                    runbook_refs: { type: array, items: { type: string } }
+                    blocked_by: { type: string }
+                  required: [kind, reason, success_condition, stop_condition]
+            required: [tasks]
+outputs:
+  values:
+    issues:
+      required: true
+      schema: *issue_schema
+      value: "${{ tasks.collate.outputs.values.issues }}"
+    healthy_window_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.collate.outputs.values.healthy_window_summary }}"
+    notes:
+      required: true
+      schema: { type: string, description: "Reach/coverage caveats for the watch window, empty when none" }
+      value: "${{ tasks.collate.outputs.values.notes }}"
+    feedback:
+      required: true
+      schema: *feedback_schema
+      value: "${{ tasks.collate.outputs.values.feedback }}"
+    network_target:
+      required: true
+      schema: *network_target_schema
+      value: "${{ tasks.provision.outputs.values.network_target }}"
+    window:
+      required: true
+      schema: *window_schema
+      value: "${{ tasks.provision.outputs.values.window }}"
+    observations:
+      required: true
+      schema:
+        type: array
+        items: *observe_result_schema
+      value: "${{ tasks.observe.outputs.values.observations }}"
+    final_snapshot:
+      required: true
+      schema:
+        type: object
+        properties:
+          snapshotted: { type: boolean }
+          snapshot_id: { type: string }
+        required: [snapshotted]
+      value: "${{ {'snapshotted': tasks.snapshot_final.outputs.values.snapshotted, 'snapshot_id': tasks.snapshot_final.outputs.values.snapshot_id} }}"

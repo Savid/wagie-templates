@@ -1,0 +1,316 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/fuzzer-coverage-loop
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use when a coverage-guided fuzzer's generator should be tuned until the fresh-corpus
+  coverage it reaches grows, and you want a mergeable git branch verified before promotion:
+  clones the fuzzer repo, composes a coverage experiment contract (fixed generation budget
+  into a fresh scratch corpus, frozen coverage denominator, a single coverage_pct metric
+  line) around the domain runbook that owns phase procedure and gap triage, then chains the
+  experiment family end to end on git branches — propose/measure/keep-or-revert on the
+  generator, independent verification of the winning branch, and a rendered HTML report.
+  The git-branch entry point; use fuzzer-coverage-snapshot-loop instead when the harness
+  is baked into a panda-compute snapshot and no git branch is wanted. Shaped by FuzzyVM's
+  EVM coverage workflow but fits any fuzzer whose corpus coverage is measurable from a
+  shell command.
+tags: ["fuzzing", "coverage", "corpus", "generator", "fuzzer", "evm", "fuzzyvm", "experiment", "optimization", "verification", "git"]
+examples:
+  - "grow the EVM coverage FuzzyVM's corpus reaches by tuning its generator"
+  - "improve a fuzzer's generator until corpus coverage plateaus and verify the win"
+  - "coverage-driven improvement loop for a fuzzing corpus generator"
+  - "tune weighted strategies so the fuzzer reaches uncovered code paths"
+  - "run a fuzzer coverage experiment from a runbook and render a report"
+inputs:
+  values:
+    repo_url:
+      required: true
+      description: Git URL of the fuzzer repository (the generator being tuned, not the codebase being covered). Worker must have fetch and push credentials.
+      schema: { type: string }
+    base_branch:
+      description: Branch to start from.
+      schema: { type: string, default: main }
+    result_branch:
+      required: true
+      description: Branch name the loop pushes the accumulated kept generator changes to (e.g. `autoresearch/coverage-2026-07-21`).
+      schema: { type: string }
+    coverage_scope:
+      required: true
+      description: "Coverage denominator the corpus is replayed against, in the fuzzer toolchain's own terms — e.g. a Go coverpkg pattern like `github.com/ethereum/go-ethereum/core/vm/...`."
+      schema: { type: string }
+    runbook:
+      required: true
+      description: "How a worker locates the runbook owning this fuzzer's coverage-improvement procedure — a `panda search runbooks \"<need>\"` query or a document URL."
+      schema: { type: string }
+    generation_budget:
+      description: "Fixed wall-clock corpus-generation budget one benchmark invocation spends before replaying for coverage (e.g. `30m`). With measurement_runs invocations per candidate, this dominates run duration."
+      schema: { type: string, default: 30m }
+    target_files:
+      description: Optional override of the generator surface the proposer may edit (workdir-relative files or directories). Empty lets the loop's setup infer it from the goal, the runbook, and repo conventions. Never include the benchmark, fixtures, or dependency manifests — those belong to the frozen scoring surface.
+      schema:
+        type: array
+        default: []
+        items:
+          type: string
+    strategy_bias:
+      description: Optional free-text proposal bias appended to the goal (e.g. `focus on precompile input vectors`), so parallel callers can point runs at different gap families. Empty adds nothing.
+      schema: { type: string, default: "" }
+    max_iterations:
+      description: Hard cap on experiment rounds. Rounds are expensive here — each costs measurement_runs full generation budgets — so the default is deliberately lower than the generic loop's.
+      schema: { type: number, default: 10 }
+    patience:
+      description: Stop after this many consecutive rounds with no accepted improvement. Must be strictly less than max_iterations.
+      schema: { type: number, default: 3 }
+    measurement_runs:
+      description: Coverage measurements per candidate inside the loop (the median is scored). Each costs a full generation budget; raise it only when observed run-to-run jitter drowns real gains.
+      schema: { type: number, default: 3 }
+    noise_epsilon:
+      description: Relative tolerance used as acceptance threshold and plateau detector. Default 0 lets the loop's setup derive it from the baseline's observed run-to-run jitter — fuzzing coverage is stochastic, so prefer the derived value unless you have measured better.
+      schema: { type: number, default: 0 }
+    replication_runs:
+      description: Verification measurements per side (baseline and candidate) in the acceptance stage. Each is a full benchmark invocation.
+      schema: { type: number, default: 5 }
+    holdout_command:
+      description: Optional held-out scoring command for verification, spent once per side — e.g. replaying the tuned corpus against a wider or different coverage scope than the tuned denominator, to show the gains transfer. Empty skips the holdout.
+      schema: { type: string, default: "" }
+tasks:
+  loop:
+    uses: dev.wagie/experiment-loop@1.0.0
+    inputs:
+      values:
+        repo_url:
+          value: "${{ inputs.values.repo_url }}"
+        base_branch:
+          value: "${{ inputs.values.?base_branch.orValue('main') }}"
+        result_branch:
+          value: "${{ inputs.values.result_branch }}"
+        target_files:
+          value: "${{ inputs.values.?target_files.orValue([]) }}"
+        metric_name:
+          value: "${{ 'coverage_pct' }}"
+        metric_direction:
+          value: "${{ 'maximize' }}"
+        goal:
+          value: |-
+            ${{ "Objective: maximize the statement coverage that this fuzzer's generated corpus reaches over the fixed coverage scope `" + inputs.values.coverage_scope + "`, by improving the fuzzer's program generator — never the measurement. Coverage is a compass, not a score: a win reaches code the corpus could not reach before, across varied input shapes, not merely a line turned green.\n\n" +
+                "Domain procedure is owned by the fuzzer's coverage-improvement runbook; locate it via: " + inputs.values.runbook + ". It holds the phase sequence (generate, replay under coverage, analyze gaps, triage, modify the generator), the triage classes separating reachable gaps from code that is unreachable by design (skip those), and the map of which generator surface fixes which gap class. Read it before the first proposal and follow it every round.\n\n" +
+                "Measurement contract — discover or scaffold the benchmark to satisfy it exactly: one invocation (1) resets any coverage-guided fuzzing cache, (2) reads its generation seed from an environment variable with a fixed fallback and generates into a fresh scratch corpus for a fixed wall-clock budget of " + inputs.values.?generation_budget.orValue('30m') + ", (3) replays that corpus under coverage instrumentation against the coverage scope above, (4) prints exactly one final `coverage_pct: <number>` line, and (5) removes its scratch corpus. Equal budget per invocation is what makes two measurements comparable; a deterministic seed makes a run reproducible and stops the generation RNG from masquerading as a code effect. Never write to, truncate, or delete a pre-existing corpus database. The denominator is frozen: the benchmark script and the dependency manifests pinning the measured codebase belong to the frozen scoring surface (a comparison across different scopes or dependency pins is meaningless), so a candidate cannot improve the number by shrinking or moving what is measured.\n\n" +
+                "Correctness gate: the fuzzer builds cleanly, its generator tests pass, and generated programs remain valid; no coverage number redeems a generator that emits invalid programs." +
+                (inputs.values.?strategy_bias.orValue('') == '' ? '' : "\n\nProposal bias for this run: " + inputs.values.strategy_bias) }}
+        max_iterations:
+          value: "${{ inputs.values.?max_iterations.orValue(10.0) }}"
+        patience:
+          value: "${{ inputs.values.?patience.orValue(3.0) }}"
+        measurement_runs:
+          value: "${{ inputs.values.?measurement_runs.orValue(3.0) }}"
+        noise_epsilon:
+          value: "${{ inputs.values.?noise_epsilon.orValue(0.0) }}"
+  verify:
+    needs: [loop]
+    uses: dev.wagie/experiment-verify@1.0.0
+    inputs:
+      values:
+        repo_url:
+          value: "${{ inputs.values.repo_url }}"
+        result_branch:
+          value: "${{ inputs.values.result_branch }}"
+        baseline_commit:
+          value: "${{ tasks.loop.outputs.values.baseline_commit }}"
+        best_commit:
+          value: "${{ tasks.loop.outputs.values.best_commit }}"
+        goal:
+          value: "${{ 'Maximize the statement coverage the fuzzer corpus reaches over ' + inputs.values.coverage_scope + ' by improving its generator' }}"
+        target_files:
+          value: "${{ tasks.loop.outputs.values.effective_target_files }}"
+        frozen_files:
+          value: "${{ tasks.loop.outputs.values.frozen_files }}"
+        experiment_command:
+          value: "${{ tasks.loop.outputs.values.effective_experiment_command }}"
+        metric_name:
+          value: "${{ tasks.loop.outputs.values.effective_metric_name }}"
+        metric_direction:
+          value: "${{ 'maximize' }}"
+        correctness_command:
+          value: "${{ tasks.loop.outputs.values.effective_correctness_command }}"
+        setup_command:
+          value: "${{ tasks.loop.outputs.values.effective_setup_command }}"
+        replication_runs:
+          value: "${{ inputs.values.?replication_runs.orValue(5.0) }}"
+        holdout_command:
+          value: "${{ inputs.values.?holdout_command.orValue('') }}"
+        trials:
+          value: "${{ tasks.loop.outputs.values.trials }}"
+  report:
+    needs: [loop, verify]
+    uses: dev.wagie/experiment-report@1.0.0
+    inputs:
+      values:
+        goal:
+          value: "${{ 'Maximize the statement coverage the fuzzer corpus reaches over ' + inputs.values.coverage_scope + ' by improving its generator' }}"
+        metric_name:
+          value: "${{ tasks.loop.outputs.values.effective_metric_name }}"
+        metric_direction:
+          value: "${{ 'maximize' }}"
+        trials:
+          value: "${{ tasks.loop.outputs.values.trials }}"
+        baseline_metric:
+          value: "${{ tasks.loop.outputs.values.baseline_metric }}"
+        best_metric:
+          value: "${{ tasks.loop.outputs.values.best_metric }}"
+        confirmed:
+          value: "${{ tasks.verify.outputs.values.verdict == 'accept' }}"
+        improvement_pct:
+          value: "${{ tasks.loop.outputs.values.improvement_pct }}"
+        exit_reason:
+          value: "${{ tasks.loop.outputs.values.exit_reason }}"
+        converged:
+          value: "${{ tasks.loop.outputs.values.converged }}"
+        accepted_count:
+          value: "${{ tasks.loop.outputs.values.accepted_count }}"
+        discarded_count:
+          value: "${{ tasks.loop.outputs.values.reverted_count }}"
+        result_snapshot_id:
+          value: "${{ tasks.loop.outputs.values.result_branch_url }}"
+        environment_summary:
+          value: "${{ tasks.loop.outputs.values.scaffolding_notes }}"
+        summary:
+          value: "${{ tasks.loop.outputs.values.summary }}"
+        progress_report:
+          value: "${{ tasks.loop.outputs.values.progress_report }}"
+outputs:
+  values:
+    verdict:
+      required: true
+      schema: { type: string, enum: [accept, reject, suspicious], description: Independent acceptance verdict on the winning branch — the loop's metric only nominated; this decided }
+      value: "${{ tasks.verify.outputs.values.verdict }}"
+    claim:
+      required: true
+      schema: { type: string, description: Narrowest claim the verification evidence supports }
+      value: "${{ tasks.verify.outputs.values.claim }}"
+    decision_packet:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.verify.outputs.values.decision_packet }}"
+    significant:
+      required: true
+      schema: { type: boolean, description: Whether the replicated improvement cleared the noise band }
+      value: "${{ tasks.verify.outputs.values.significant }}"
+    legal:
+      required: true
+      schema: { type: boolean, description: Whether the winning diff stayed inside the declared generator surface }
+      value: "${{ tasks.verify.outputs.values.legal }}"
+    measured_improvement_pct:
+      required: true
+      schema: { type: number, description: Improvement measured by independent replication (the honest figure; the loop's own improvement_pct is search-inflated) }
+      value: "${{ tasks.verify.outputs.values.measured_improvement_pct }}"
+    baseline_median:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.verify.outputs.values.baseline_median }}"
+    candidate_median:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.verify.outputs.values.candidate_median }}"
+    holdout_ran:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.verify.outputs.values.holdout_ran }}"
+    transferred:
+      required: true
+      schema: { type: boolean, description: Whether the coverage gain transferred to the held-out scoring command (meaningful only when holdout_ran) }
+      value: "${{ tasks.verify.outputs.values.transferred }}"
+    headline:
+      required: true
+      schema: { type: string, description: One-sentence result line for chat and links }
+      value: "${{ tasks.report.outputs.values.headline }}"
+    result_branch_url:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.loop.outputs.values.result_branch_url }}"
+    baseline_commit:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.loop.outputs.values.baseline_commit }}"
+    best_commit:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.loop.outputs.values.best_commit }}"
+    baseline_metric:
+      required: true
+      schema: { type: number, description: Coverage percentage of the untouched generator's corpus }
+      value: "${{ tasks.loop.outputs.values.baseline_metric }}"
+    best_metric:
+      required: true
+      schema: { type: number, description: Best coverage percentage the loop accepted }
+      value: "${{ tasks.loop.outputs.values.best_metric }}"
+    improvement_pct:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.loop.outputs.values.improvement_pct }}"
+    improved:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.loop.outputs.values.improved }}"
+    exit_reason:
+      required: true
+      schema: { type: string, description: "One of improvement, patience, plateau, max_iterations" }
+      value: "${{ tasks.loop.outputs.values.exit_reason }}"
+    converged:
+      required: true
+      schema: { type: boolean }
+      value: "${{ tasks.loop.outputs.values.converged }}"
+    rounds_completed:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.loop.outputs.values.rounds_completed }}"
+    accepted_count:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.loop.outputs.values.accepted_count }}"
+    reverted_count:
+      required: true
+      schema: { type: number }
+      value: "${{ tasks.loop.outputs.values.reverted_count }}"
+    trials:
+      required: true
+      schema:
+        type: array
+        description: Typed trial ledger, one record per round in run order
+        items:
+          type: object
+          properties:
+            round: { type: number }
+            hypothesis: { type: string }
+            commit: { type: string }
+            snapshot_id: { type: string }
+            status: { type: string, enum: [pass, fail, invalid, suspicious] }
+            metric: { type: number }
+            spread: { type: number }
+            paired_gain: { type: number }
+            paired_gain_stderr: { type: number }
+            best_after: { type: number }
+            decision_source: { type: string, enum: [auto, agent] }
+            measurement_note: { type: string }
+            interpretation: { type: string }
+            next_action: { type: string }
+          required: [round, hypothesis, status, interpretation]
+      value: "${{ tasks.loop.outputs.values.trials }}"
+    summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.loop.outputs.values.summary }}"
+    experiment_command:
+      required: true
+      schema: { type: string, description: "The frozen scoring command the run settled on, for anyone re-measuring the result" }
+      value: "${{ tasks.loop.outputs.values.effective_experiment_command }}"
+    frozen_files:
+      required: true
+      schema: { type: array, items: { type: string }, description: "The scoring surface the run froze (benchmark, fixtures, dependency manifests)" }
+      value: "${{ tasks.loop.outputs.values.frozen_files }}"
+  artifacts:
+    report:
+      ref: tasks.report.outputs.artifacts.report

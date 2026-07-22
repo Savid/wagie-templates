@@ -1,0 +1,367 @@
+kind: Template
+schemaVersion: wagie/v1
+id: dev.wagie/devnet-scan
+version: "1.0.0"
+license: MIT
+authors: [savid]
+homepage: https://github.com/savid/wagie-templates
+repository: https://github.com/savid/wagie-templates
+description: >-
+  Use to check what went wrong on a hosted Ethereum devnet over a past time window — for example "any issues on devnet X in the last 24 hours?". Queries the devnet's retained data across the window and returns a deduped issue list with suspected layers and first-seen markers. Retrospective: it scans history, so reach for it when the window is in the past rather than watching a running network forward.
+tags: ["ethereum", "devnet", "scan", "retrospective", "issues", "clickhouse", "history"]
+examples:
+  - "what went wrong on devnet X in the last five epochs"
+  - "scan devnet X between slots 100 and 200"
+  - "query retained ClickHouse data for past finality stalls"
+  - "dedupe historical failures by fingerprint"
+  - "return first-seen markers across a past window"
+inputs:
+  values:
+    devnet:
+      required: true
+      description: Hosted devnet name or network id whose retained data to scan, e.g. glamsterdam-devnet-6
+      schema: { type: string }
+    lookback:
+      description: How far back to scan from now, as a duration, e.g. 24h or 6h
+      schema: { type: string, default: 24h }
+    start_time:
+      description: Explicit window start (ISO or slot/epoch); overrides lookback when set
+      schema: { type: string }
+    end_time:
+      description: Explicit window end; defaults to now
+      schema: { type: string }
+    focus:
+      description: Optional steering, e.g. "finality", "prysm nodes", "blobs on slot 823"
+      schema: { type: string }
+    max_scan_rounds:
+      description: Gap-filling rounds for the scan hunt
+      schema: { type: number, default: 2 }
+    max_angles:
+      description: Optional soft cap on how many scan angles the hunt opens; unset means no cap
+      schema: { type: number }
+tasks:
+  frame:
+    quality-gate: "${{ has(outputs.values.scan_target) && size(outputs.values.scan_target) > 0 && outputs.values.scan_target.contains('runbooks://') && has(outputs.values.objective) && size(outputs.values.objective) > 0 && has(outputs.values.window) && has(outputs.values.window.resolved) && outputs.values.window.resolved && has(outputs.values.window.start_time) && size(outputs.values.window.start_time) > 0 && has(outputs.values.window.end_time) && size(outputs.values.window.end_time) > 0 && has(outputs.values.window.start_slot) && has(outputs.values.window.end_slot) && outputs.values.window.end_slot >= outputs.values.window.start_slot }}"
+    instructions: |-
+      Resolve the retained-data access and the concrete time window for the scan.
+      Do not query for issues yet — just frame the target.
+
+      Resolve runbooks by meaning via `panda search runbooks "<need>"`. Resolve
+      the devnet's network id and slot timing with the runbook that owns hosted
+      devnet context intake; resolve dataset placement and turn the requested
+      window (explicit start/end, else `lookback` back from now) into its
+      concrete block/slot range with the runbook that owns ClickHouse querying.
+
+      The next stage is a domain-agnostic discovery hunt whose workers see only
+      this target string — they preserve its access recipe verbatim and cannot
+      reconstruct one it omits. So make `scan_target` a self-contained recipe, not
+      a label: the network id, the resolved window as BOTH wall-clock and slot
+      range (a block range only when one is honestly derivable — the ClickHouse
+      runbook owns when it is not), the concrete data coordinates (query surface, resolved
+      cluster, the network's own database, dataset), and explicit pointers to the
+      runbook that owns ClickHouse query discipline, the one that owns querying
+      the devnet's observability APIs over a past window, the one that owns the
+      fork model and health thresholds, and the one that owns evidence discipline —
+      probes must keep the exact query behind each fact so collate can emit
+      re-runnable evidence refs. Spell each pointer as a runnable command
+      (`panda read runbooks://<stem>`), not a bare ref: a probe has only the
+      terminal and skips a pointer it cannot resolve. A probe must be able to
+      begin querying from `scan_target` alone.
+
+      Pin the window so a re-run is reproducible: resolve it to a concrete, closed
+      range — never a relative expression — recording the wall-clock timestamps
+      in `window.start_time`/`window.end_time` and the slot range in
+      `window.start_slot`/`window.end_slot`, with `window.resolved: true`. When
+      only `lookback` is given, floor the window's end to the last completed
+      epoch boundary and set its start to that end minus `lookback` on the same
+      boundary, so the edges are re-derivable. State the slot range as a closed
+      inclusive interval and derive any epoch range in the recipe from those same
+      slots — probes re-deriving their own edges disagree about coverage. Runs
+      meant to be compared
+      MUST share explicit `start_time`/`end_time`: a bare `lookback` drifts with
+      wall-clock time and makes two scans diverge for reasons that are not about
+      the network.
+
+      Set `objective` to "Find all issues in <devnet> during <window>", folding
+      in any `focus`.
+    inputs:
+      values:
+        devnet:
+          required: true
+          schema: { type: string }
+          value: "${{ inputs.values.devnet }}"
+        lookback:
+          schema: { type: string }
+          value: "${{ inputs.values.?lookback.orValue('24h') }}"
+        start_time:
+          schema: { type: string }
+          value: "${{ inputs.values.?start_time.orValue('') }}"
+        end_time:
+          schema: { type: string }
+          value: "${{ inputs.values.?end_time.orValue('') }}"
+        focus:
+          schema: { type: string }
+          value: "${{ inputs.values.?focus.orValue('') }}"
+    outputs:
+      values:
+        scan_target:
+          required: true
+          schema: { type: string, description: "Devnet, resolved window, and retained-data access" }
+        objective:
+          required: true
+          schema: { type: string, description: One-line scan objective }
+        window:
+          required: true
+          schema: &window_schema
+            type: object
+            properties:
+              start_time: { type: string, description: "Wall-clock window start, concrete ISO timestamp" }
+              end_time: { type: string, description: "Wall-clock window end, concrete ISO timestamp" }
+              start_slot: { type: number }
+              end_slot: { type: number }
+              resolved: { type: boolean }
+            required: [resolved, start_time, end_time, start_slot, end_slot]
+  scan:
+    needs: [frame]
+    uses: dev.wagie/scoped-discovery@1.0.0
+    inputs:
+      values:
+        target:
+          value: "${{ tasks.frame.outputs.values.scan_target }}"
+        objective:
+          value: "${{ tasks.frame.outputs.values.objective }}"
+        max_gapfill_rounds:
+          value: "${{ inputs.values.?max_scan_rounds.orValue(2) }}"
+        max_angles:
+          value: "${{ inputs.values.?max_angles.orValue(0) }}"
+  collate:
+    needs: [frame, scan]
+    quality-gate: "${{ has(outputs.values.issues) && has(outputs.values.feedback) && has(outputs.values.scan_summary) && size(outputs.values.scan_summary) > 0 }}"
+    instructions: |-
+      Turn the scan findings into self-contained issue records over the window —
+      judge here; the scan gathered facts. Outputs are the structured values
+      declared below plus the full-detail `issues_full` artifact, never an HTML page
+      or bug board, even if a retrieved runbook offers to build one.
+
+      The structured `findings` input is only an index; the scan's full
+      evidence — exact queries and verbatim excerpts per finding id — is in
+      the `scan_findings` artifact file. Read it and judge from the full
+      detail, not the summaries.
+
+      Resolve runbooks by meaning via `panda search runbooks "<need>"`: the
+      runbook that owns collating watch issues for the judgment rules, the
+      issue-contract runbook for the record and evidence-item shapes, the one
+      that owns issue fingerprinting for identity (one issue per cause, not per
+      node or slot), the one that owns the fork model and health thresholds,
+      and the one that owns evidence discipline. Handles carry the devnet's
+      network id only — a retained-data scan has no enclave, sandbox, or
+      snapshot.
+
+      Write the issue records at two depths:
+      - The `issues_full` artifact is the record of record — go deep, no size
+        budget: every issue in the issue-contract shape with unabridged
+        evidence (complete queries, verbatim excerpts) and the finding ids
+        it was built from. One JSON object: `issues`, `window`,
+        `scan_summary`.
+      - The structured `issues` values carry the same records with each
+        evidence item's `detail` cut to a tight excerpt (its `ref` stays the
+        exact re-runnable command) — depth belongs in the artifact. Never
+        emit placeholder or diagnostic values to get a failing call through;
+        if the report cannot be produced, say so in `scan_summary` and
+        return the issues you have.
+
+      Emit handoff gaps in the feedback queue (the runbook that owns shaping
+      investigation follow-ups), never embedded in issues.
+
+      Ground the `scan_summary` — what the window and sources covered and what
+      remains uncertain — in the scan's own `coverage` report and `converged`
+      flag rather than re-deriving it; treat `converged` as a signal to qualify,
+      not a verdict to echo as a settled root cause. Carry forward any angle the
+      scan left unexplored.
+    inputs:
+      values:
+        devnet:
+          schema: { type: string }
+          value: "${{ inputs.values.devnet }}"
+        coverage:
+          schema: { type: string }
+          value: "${{ tasks.scan.outputs.values.coverage_summary }}"
+        converged:
+          schema: { type: boolean }
+          value: "${{ tasks.scan.outputs.values.converged }}"
+        window:
+          schema: *window_schema
+          value: "${{ tasks.frame.outputs.values.window }}"
+        findings:
+          schema:
+            type: array
+            description: Compact index into the scan_findings artifact
+            items:
+              type: object
+              properties:
+                id: { type: string, description: Matches the finding's id in the scan_findings artifact }
+                angle: { type: string }
+                summary: { type: string }
+                severity: { type: string }
+              required: [id, angle, summary]
+          value: "${{ tasks.scan.outputs.values.findings }}"
+      artifacts:
+        scan_findings:
+          ref: tasks.scan.outputs.artifacts.findings_full
+    outputs:
+      values:
+        issues:
+          required: true
+          schema: &issue_schema
+            type: array
+            items:
+              type: object
+              properties:
+                title: { type: string }
+                summary: { type: string, description: "Free-text reasoning, written first" }
+                classification:
+                  type: object
+                  properties:
+                    category: { type: string, description: Failure mode — enum owned by the issue-contract runbook }
+                    layer: { type: string, description: consensus | execution | network | tooling | cross-layer }
+                    spread: { type: string, description: single-client | subset | all-clients | network-wide | unknown }
+                    severity: { type: string, description: "Impact rank critical | major | minor — distinct from confidence; scale owned by the issue-contract runbook" }
+                first_bad:
+                  type: object
+                  description: Earliest artifact that explains later symptoms
+                  properties:
+                    kind: { type: string, description: slot | block | epoch | log | rpc | test | service-state }
+                    value: { type: string }
+                    at: { type: string }
+                affected:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      node: { type: string }
+                      role: { type: string }
+                      client: { type: string }
+                      image: { type: string }
+                evidence:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      source: { type: string, description: Tool or datasource that produced it }
+                      ref: { type: string, description: Executable re-derivation — a reader can re-run it }
+                      at: { type: string, description: "Slot, block, epoch, or timestamp anchoring it" }
+                      detail: { type: string, description: "What was observed, verbatim values preserved" }
+                    required: [source, ref, detail]
+                co_present:
+                  type: array
+                  items: { type: string }
+                  description: Co-present distractor signals, kept out of the root narrative
+                fingerprint:
+                  type: object
+                  description: Identity block owned by the fingerprinting runbook — no run-specific ids in the key
+                  properties:
+                    rationale: { type: string }
+                    key: { type: string }
+                    decision: { type: string, description: new | duplicate | variant | insufficient-context }
+                    matched: { type: string }
+                    variant_dimension: { type: string }
+                    confidence: { type: string }
+                handles:
+                  type: object
+                  description: What lets an investigation restore or reach the broken state — a retained-data scan fills network only
+                  properties:
+                    snapshot_id: { type: string }
+                    sandbox_id: { type: string }
+                    enclave: { type: string }
+                    network: { type: string, description: The scanned devnet's network id }
+                    setup_summary:
+                      type: object
+                      description: Fork/blob schedule, load, builders, when the grounded context establishes them
+                      properties:
+                        fork_schedule:
+                          type: object
+                          description: Fork name to activation epoch
+                          additionalProperties: { type: number }
+                        blob_schedule:
+                          type: object
+                          description: Max blobs per block by fork name
+                          additionalProperties: { type: number }
+                        load: { type: array, items: { type: string }, description: Load generators or applied transaction load }
+                        builders: { type: array, items: { type: string } }
+                confidence: { type: string, description: Scale owned by the evidence-discipline runbook }
+              required: [title, summary]
+        scan_summary:
+          required: true
+          schema: { type: string, description: "What window and sources were covered, and what remains uncertain" }
+        feedback:
+          required: true
+          schema: &feedback_schema
+            type: object
+            description: Follow-up queue — shape owned by the feedback-queue runbook
+            properties:
+              priority_summary: { type: string }
+              terminal: { type: boolean }
+              terminal_reason: { type: string }
+              tasks:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    kind: { type: string, description: watch | investigate | config | snapshot | source-trace | reachability-trace | experiment-triage | manual-review | publish | no-op }
+                    reason: { type: string }
+                    priority: { type: string, description: high | medium | low }
+                    inputs: { type: object, description: "Handles and query params only, values stringified", additionalProperties: { type: string } }
+                    success_condition: { type: string }
+                    stop_condition: { type: string }
+                    runbook_refs: { type: array, items: { type: string } }
+                    blocked_by: { type: string }
+                  required: [kind, reason, success_condition, stop_condition]
+            required: [tasks]
+      artifacts:
+        issues_full:
+          required: true
+          contentType: application/json
+          description: >-
+            Full-detail issue records over the window — every issue in the
+            issue-contract shape with unabridged evidence (complete queries and
+            verbatim excerpts) and the scan finding ids each was built from.
+            The structured issues values are the same records with evidence
+            details cut to excerpts.
+outputs:
+  values:
+    issues:
+      required: true
+      schema: *issue_schema
+      value: "${{ tasks.collate.outputs.values.issues }}"
+    scan_summary:
+      required: true
+      schema: { type: string }
+      value: "${{ tasks.collate.outputs.values.scan_summary }}"
+    feedback:
+      required: true
+      schema: *feedback_schema
+      value: "${{ tasks.collate.outputs.values.feedback }}"
+    window:
+      required: true
+      schema: *window_schema
+      value: "${{ tasks.frame.outputs.values.window }}"
+    findings:
+      required: true
+      schema:
+        type: array
+        description: Compact index into the scan_findings artifact — summaries only
+        items:
+          type: object
+          properties:
+            id: { type: string, description: Matches the finding's id in the scan_findings artifact }
+            angle: { type: string }
+            summary: { type: string }
+            severity: { type: string }
+          required: [id, angle, summary]
+      value: "${{ tasks.scan.outputs.values.findings }}"
+  artifacts:
+    issues_full:
+      ref: tasks.collate.outputs.artifacts.issues_full
+    scan_findings:
+      ref: tasks.scan.outputs.artifacts.findings_full
